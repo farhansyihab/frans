@@ -1,0 +1,18 @@
+# ~/AgenAI/frans/.gitignore
+build/
+logs/
+*.o
+*.a
+*.so
+*.d
+compile_commands.json
+
+# Jangan pernah commit secrets
+config/secrets.json
+*.key
+.env
+
+# Editor
+.vscode/
+.idea/
+*.swp
