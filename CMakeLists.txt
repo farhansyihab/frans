@@ -24,6 +24,7 @@ find_package(Threads REQUIRED)
 
 # ===========================================================================
 # Stage 5 — Code Intelligence Layer (tree-sitter, opsional)
+# Stage 6 — Context Selector + Budget Manager (butuh Code Intelligence)
 # ===========================================================================
 set(TS_CORE "${CMAKE_SOURCE_DIR}/third_party/tree-sitter/lib/src/lib.c")
 set(TS_CORE_HDR "${CMAKE_SOURCE_DIR}/third_party/tree-sitter/lib/include/tree_sitter/api.h")
@@ -39,7 +40,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         "${CMAKE_SOURCE_DIR}/third_party/tree-sitter/lib/include"
         "${CMAKE_SOURCE_DIR}/third_party/tree-sitter/lib/src"
     )
-    # Suppress warnings dari third-party code (jangan diubah).
     target_compile_options(tree_sitter PRIVATE -w)
 
     # ---- tree-sitter-python grammar ----
@@ -54,7 +54,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
     target_compile_options(tree_sitter_python PRIVATE -w)
 
-    # ---- frans_code_intel (library statis berisi kode kita) ----
+    # ---- frans_code_intel (Stage 5) ----
     add_library(frans_code_intel STATIC
         src/code_intelligence/parsers/PythonParser.cpp
         src/code_intelligence/visitor/PythonAstVisitor.cpp
@@ -70,10 +70,28 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
     target_compile_options(frans_code_intel PRIVATE -Wall -Wextra -Wpedantic)
 
-    # ---- Smoke test executable (Stage 5 verification) ----
+    # ---- Stage 5 smoke test ----
     add_executable(frans_graph_test tests/graph_smoke_test.cpp)
     target_link_libraries(frans_graph_test PRIVATE frans_code_intel)
     target_compile_definitions(frans_graph_test PRIVATE
+        FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/python"
+    )
+
+    # ---- frans_context (Stage 6) — ContextSelector + ContextBudgetManager ----
+    add_library(frans_context STATIC
+        src/application/context_budget/ContextBudgetManager.cpp
+        src/application/context_selector/ContextSelector.cpp
+    )
+    target_include_directories(frans_context PUBLIC
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    target_link_libraries(frans_context PUBLIC frans_code_intel)
+    target_compile_options(frans_context PRIVATE -Wall -Wextra -Wpedantic)
+
+    # ---- Stage 6 smoke test ----
+    add_executable(frans_context_test tests/context_smoke_test.cpp)
+    target_link_libraries(frans_context_test PRIVATE frans_context)
+    target_compile_definitions(frans_context_test PRIVATE
         FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/python"
     )
 
@@ -85,21 +103,12 @@ else()
         "    cd third_party && \\\n"
         "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter.git && \\\n"
         "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter-python.git\n"
-        "  Skip frans_code_intel + frans_graph_test.")
+        "  Skip frans_code_intel + frans_graph_test + frans_context.")
     set(FRANS_CODE_INTEL_ENABLED OFF)
 endif()
 
 # ===========================================================================
 # Main executable (UI)
-#
-# Setelah refactor main.cpp:
-#   - main.cpp          : bootstrap tipis (load config + run FLTK)
-#   - AppContext.h      : state/services non-UI (header-only)
-#   - Worker.{h,cpp}    : background task runner
-#   - MainWindow.{h,cpp}: layout + timer + wiring
-#   - MaintenancePanel  : RAM/Swap + tombol maintenance
-#   - LlamaPanel        : pilih model + start/stop + status bar
-#   - ChatView.{h,cpp}  : streaming chat (tidak berubah)
 # ===========================================================================
 add_executable(frans_ai
     # ---- bootstrap ----
@@ -151,9 +160,10 @@ target_compile_definitions(frans_ai PRIVATE
 
 target_compile_options(frans_ai PRIVATE -Wall -Wextra -Wpedantic)
 
-# Stage 6 akan menautkan frans_code_intel ke frans_ai. Stage 5 cukup
-# disiapkan sebagai library terpisah supaya UI build tetap tidak
-# terpengaruh kalau tree-sitter belum di-clone.
+# Stage 6 akan menautkan frans_ai ke frans_context (yang transitively
+# membawa frans_code_intel). Stage 5 hanya disiapkan sebagai library
+# terpisah supaya UI build tetap tidak terpengaruh kalau tree-sitter
+# belum di-clone.
 if(FRANS_CODE_INTEL_ENABLED)
-    target_link_libraries(frans_ai PRIVATE frans_code_intel)
+    target_link_libraries(frans_ai PRIVATE frans_code_intel frans_context)
 endif()

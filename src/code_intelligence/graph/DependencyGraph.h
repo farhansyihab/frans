@@ -48,6 +48,18 @@ public:
     std::size_t symbolCount() const { return symbol_index_.size(); }
     std::size_t edgeCount()   const;
 
+    // Akses read-only ke indeks simbol. Map: symbol_name -> [(file, idx)]
+    // dengan idx = posisi snippet di files_[file].snippets.
+    //
+    // Dipakai ContextSelector (Stage 6) untuk fuzzy match nama simbol dari
+    // prompt user tanpa perlu copy seluruh snapshot. Caller TIDAK boleh
+    // menyimpan reference ini melewati lifetime graph atau setelah mutasi
+    // (addFile/removeFile/clear) — index di-rebuild.
+    const std::map<
+        std::string,
+        std::vector<std::pair<std::string, std::size_t>>>&
+    allSymbols() const { return symbol_index_; }
+
     // Dump ringkas (untuk smoke test / terminal).
     void dumpTo(std::ostream& os) const;
 
