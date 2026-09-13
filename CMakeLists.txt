@@ -100,10 +100,20 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
 
     # -----------------------------------------------------------------------
+    # Stage 7f — ProjectGraphCache + TargetScopeResolver (library bersama)
+    # -----------------------------------------------------------------------
+    add_library(frans_project STATIC
+        src/application/project/ProjectGraphCache.cpp
+        src/application/agent/TargetScopeResolver.cpp
+    )
+    target_include_directories(frans_project PUBLIC
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    target_link_libraries(frans_project PUBLIC frans_context)
+    target_compile_options(frans_project PRIVATE -Wall -Wextra -Wpedantic)
+
+    # -----------------------------------------------------------------------
     # Stage 7b — GenerateState smoke test
-    #
-    # Fix dari build sebelumnya: tambah MultiFileParser.cpp — GenerateState
-    # sekarang memanggil parseModelOutput().
     # -----------------------------------------------------------------------
     add_executable(frans_generate_test
         tests/generate_smoke_test.cpp
@@ -113,6 +123,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
     target_link_libraries(frans_generate_test PRIVATE
         frans_context
+        frans_project
         frans_fs
         nlohmann_json::nlohmann_json
         Threads::Threads
@@ -143,6 +154,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
     target_link_libraries(frans_agent_loop_test PRIVATE
         frans_context
+        frans_project
         frans_fs
     )
     target_include_directories(frans_agent_loop_test PRIVATE
@@ -169,6 +181,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
     target_link_libraries(frans_task_runner_test PRIVATE
         frans_context
+        frans_project
         frans_fs
     )
     target_include_directories(frans_task_runner_test PRIVATE
@@ -176,6 +189,32 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         ${CMAKE_SOURCE_DIR}/third_party
     )
     target_compile_options(frans_task_runner_test PRIVATE -Wall -Wextra -Wpedantic)
+
+    # -----------------------------------------------------------------------
+    # Stage 7f — Project awareness smoke test
+    # -----------------------------------------------------------------------
+    add_executable(frans_project_awareness_test
+        tests/project_awareness_smoke_test.cpp
+        src/application/agent/PlanState.cpp
+        src/application/agent/GenerateState.cpp
+        src/application/agent/ExecuteState.cpp
+        src/application/agent/ObserveState.cpp
+        src/application/agent/FixState.cpp
+        src/application/agent/Agent.cpp
+        src/application/agent/MultiFileParser.cpp
+        src/application/safety/DangerCheckHandler.cpp
+        src/infrastructure/system/ProcessExecutor.cpp
+    )
+    target_link_libraries(frans_project_awareness_test PRIVATE
+        frans_context
+        frans_project
+        frans_fs
+    )
+    target_include_directories(frans_project_awareness_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/third_party
+    )
+    target_compile_options(frans_project_awareness_test PRIVATE -Wall -Wextra -Wpedantic)
 
     set(FRANS_CODE_INTEL_ENABLED ON)
 else()
@@ -185,8 +224,8 @@ else()
         "    cd third_party && \\\n"
         "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter.git && \\\n"
         "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter-python.git\n"
-        "  Skip frans_code_intel + frans_context + agent tests.\n"
-        "  Stage 7e (AgentPanel) TIDAK akan di-build.")
+        "  Skip frans_code_intel + frans_context + frans_project + agent tests.\n"
+        "  Stage 7f (AgentPanel) TIDAK akan di-build.")
     set(FRANS_CODE_INTEL_ENABLED OFF)
 endif()
 
@@ -227,7 +266,7 @@ set(FRANS_AI_SOURCES
 
 if(FRANS_CODE_INTEL_ENABLED)
     list(APPEND FRANS_AI_SOURCES
-        # ---- agent (Stage 7e) ----
+        # ---- agent ----
         src/application/agent/PlanState.cpp
         src/application/agent/GenerateState.cpp
         src/application/agent/ExecuteState.cpp
@@ -235,10 +274,12 @@ if(FRANS_CODE_INTEL_ENABLED)
         src/application/agent/FixState.cpp
         src/application/agent/Agent.cpp
         src/application/agent/MultiFileParser.cpp
+        src/application/agent/TargetScopeResolver.cpp
+        src/application/project/ProjectGraphCache.cpp
         src/application/safety/DangerCheckHandler.cpp
         src/application/task_runner/TaskRunner.cpp
 
-        # ---- agent UI (Stage 7e) ----
+        # ---- agent UI ----
         src/ui/AgentPanel.cpp
     )
 endif()

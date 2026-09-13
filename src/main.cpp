@@ -11,6 +11,7 @@
 // State non-UI dipindah ke application/AppContext.h.
 
 #include "application/AppContext.h"
+#include "application/project/ProjectGraphCache.h"
 #include "application/resource_guard/IdleUnloadTimer.h"
 #include "application/resource_guard/ResourceGuard.h"
 #include "config/AppConfig.h"
@@ -53,6 +54,7 @@ void printStartupBanner(const frans::application::AppContext& ctx,
     std::printf("[frans_ai] safety margin: %d MB\n",
                 ctx.config.ram_available_threshold_mb);
     std::printf("[frans_ai] chat provider: /v1/chat/completions (SSE streaming)\n");
+    std::printf("[frans_ai] graph cache: single-slot (Stage 7f)\n");
     std::fflush(stdout);
 }
 
@@ -62,6 +64,7 @@ frans::application::AppContext buildAppContext(
 {
     using frans::application::AppContext;
     using frans::application::IdleUnloadTimer;
+    using frans::application::ProjectGraphCache;
     using frans::application::ResourceGuard;
     using frans::infrastructure::LlamaServerProcessController;
     using frans::infrastructure::ModelRegistry;
@@ -85,6 +88,9 @@ frans::application::AppContext buildAppContext(
     // Idle unload timer (mulai dari stopped; di-start saat server ready).
     ctx.idle_timer = std::make_unique<IdleUnloadTimer>(
         std::chrono::seconds(cfg.idle_unload_minutes * 60));
+
+    // Stage 7f: project graph cache (single-slot).
+    ctx.graph_cache = std::make_unique<ProjectGraphCache>();
 
     return ctx;
 }

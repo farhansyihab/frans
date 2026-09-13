@@ -31,6 +31,15 @@ struct TaskProgress {
     std::string                stdout_text;
     std::string                stderr_text;
     std::string                final_error;
+
+    // ---- Stage 7f.5 — test-aware execution ----
+    // `last_test_ran == false` → tidak ada test file terdeteksi.
+    // `last_test_ran == true` → test dijalankan; exit_code == 0 berarti
+    //   pass (entry point kemudian dijalankan), exit_code != 0 berarti
+    //   fail (entry point SKIPPED).
+    bool                       last_test_ran        = false;
+    std::string                last_test_file;
+    int                        last_test_exit_code  = -1;
 };
 
 // Blueprint §3 — TaskRunner.
@@ -47,8 +56,7 @@ struct TaskProgress {
 //     resolvePendingConfirm().
 //   - Worker thread: Agent::run() → workerConfirm() (block condvar).
 //
-// TaskRunner TIDAK menyentuh widget FLTK. Semua interaksi UI lewat
-// metode publik yang dipanggil dari main thread.
+// TaskRunner TIDAK menyentuh widget FLTK.
 class TaskRunner {
 public:
     TaskRunner();
@@ -57,36 +65,13 @@ public:
     TaskRunner(const TaskRunner&)            = delete;
     TaskRunner& operator=(const TaskRunner&) = delete;
 
-    // Start task asinkron. Return false kalau sudah ada task berjalan.
-    // `deps` di-copy; caller tetap memiliki object yang ditunjuk pointer
-    // (provider, fs) — WAJIB hidup selama task berjalan.
-    //
-    // Field `confirm`, `cancel_flag`, `on_state` di `deps` AKAN
-    // di-override oleh TaskRunner (chain untuk on_state, override penuh
-    // untuk confirm & cancel_flag).
     bool start(Agent::Deps deps, AgentContext ctx);
-
-    // Dipanggil dari timer main thread (mis. 100ms).
-    // Update internal elapsed, consumer bisa baca via snapshot().
     void poll();
-
-    // Minta pembatalan. Worker cek di batas state.
     void requestCancel();
 
-    // ---- Confirm bridge (worker → main thread → worker) ----
-    //
-    // Kalau ada request baru, return pesan (non-empty) dan tandai sebagai
-    // "sudah ditampilkan". Caller WAJIB segera memanggil
-    // resolvePendingConfirm() setelah dialog selesai.
-    //
-    // Kalau tidak ada request baru, return string kosong.
     std::string takePendingConfirmMessage();
+    void        resolvePendingConfirm(bool result);
 
-    // Jawab request yang sedang aktif. Idempotent-ish: kalau tidak ada
-    // request aktif, no-op.
-    void resolvePendingConfirm(bool result);
-
-    // Snapshot status. Thread-safe.
     TaskProgress snapshot() const;
     bool         isRunning() const { return running_.load(); }
 
@@ -94,21 +79,18 @@ private:
     void workerMain(Agent::Deps deps, AgentContext ctx);
     bool workerConfirm(const std::string& message);
 
-    // ---- task control ----
     std::atomic<bool>  running_{false};
     std::atomic<bool>  cancel_requested_{false};
     std::thread        thread_;
 
-    // ---- progress state (mutex-protected) ----
     mutable std::mutex progress_mtx_;
     TaskProgress       progress_;
     std::chrono::steady_clock::time_point start_time_{};
 
-    // ---- confirm bridge ----
     struct PendingConfirm {
         std::string message;
-        bool        has_new  = false;   // worker set, belum di-take UI
-        bool        shown    = false;   // sudah di-take, dialog in progress
+        bool        has_new  = false;
+        bool        shown    = false;
         bool        resolved = false;
         bool        result   = false;
     };

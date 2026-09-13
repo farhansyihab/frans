@@ -28,7 +28,6 @@ bool TaskRunner::start(Agent::Deps deps, AgentContext ctx) {
 
     cancel_requested_.store(false);
 
-    // Reset progress state.
     {
         std::lock_guard<std::mutex> lk(progress_mtx_);
         progress_ = TaskProgress{};
@@ -37,10 +36,8 @@ bool TaskRunner::start(Agent::Deps deps, AgentContext ctx) {
         start_time_ = steady_clock::now();
     }
 
-    // Simpan on_state user (kalau ada) dan chain.
     const Agent::StateCallback user_on_state = deps.on_state;
 
-    // Override confirm + cancel + on_state.
     deps.confirm     = [this](const std::string& msg) { return workerConfirm(msg); };
     deps.cancel_flag = &cancel_requested_;
     deps.on_state    = [this, user_on_state](const std::string& state, int attempt) {
@@ -54,7 +51,6 @@ bool TaskRunner::start(Agent::Deps deps, AgentContext ctx) {
         if (user_on_state) user_on_state(state, attempt);
     };
 
-    // Reap thread lama.
     if (thread_.joinable()) thread_.join();
 
     thread_ = std::thread([this,
@@ -94,7 +90,6 @@ void TaskRunner::workerMain(Agent::Deps deps, AgentContext ctx) {
 
     const bool was_cancelled = cancel_requested_.load();
 
-    // Update state progress final.
     {
         std::lock_guard<std::mutex> lk(progress_mtx_);
         progress_.running      = false;
@@ -111,11 +106,18 @@ void TaskRunner::workerMain(Agent::Deps deps, AgentContext ctx) {
         progress_.final_error  = ctx.lastError;
         progress_.elapsed_sec  =
             duration<double>(steady_clock::now() - start_time_).count();
+
+        // Stage 7f.5 — bawa hasil test ke UI.
+        progress_.last_test_ran       = ctx.lastTest.ran;
+        progress_.last_test_file      = ctx.lastTest.test_file;
+        progress_.last_test_exit_code = ctx.lastTest.exit_code;
     }
 
     std::fprintf(stderr,
-        "[frans][task_runner] worker DONE: success=%d cancelled=%d attempts=%zu\n",
-        ok ? 1 : 0, was_cancelled ? 1 : 0, ctx.attemptHistory.size());
+        "[frans][task_runner] worker DONE: success=%d cancelled=%d "
+        "attempts=%zu test_ran=%d test_exit=%d\n",
+        ok ? 1 : 0, was_cancelled ? 1 : 0, ctx.attemptHistory.size(),
+        ctx.lastTest.ran ? 1 : 0, ctx.lastTest.exit_code);
     std::fflush(stderr);
 
     running_.store(false);

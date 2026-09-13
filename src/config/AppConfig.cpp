@@ -38,9 +38,10 @@ AppConfig AppConfig::loadFromFile(const std::string& path) {
 
     if (j.contains("window") && j["window"].is_object()) {
         const auto& w = j["window"];
-        if (w.contains("width")  && w["width"].is_number_integer())  cfg.window_width  = w["width"].get<int>();
-        if (w.contains("height") && w["height"].is_number_integer()) cfg.window_height = w["height"].get<int>();
-        if (w.contains("title")  && w["title"].is_string())          cfg.window_title  = w["title"].get<std::string>();
+        if (w.contains("width")      && w["width"].is_number_integer())      cfg.window_width      = w["width"].get<int>();
+        if (w.contains("height")     && w["height"].is_number_integer())     cfg.window_height     = w["height"].get<int>();
+        if (w.contains("margin_px")  && w["margin_px"].is_number_integer())  cfg.window_margin_px  = w["margin_px"].get<int>();
+        if (w.contains("title")      && w["title"].is_string())              cfg.window_title      = w["title"].get<std::string>();
     }
 
     return cfg;

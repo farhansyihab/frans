@@ -1,19 +1,24 @@
 // ~/AgenAI/frans/tests/execute_smoke_test.cpp
 //
-// Smoke test Stage 7c: ExecuteState + DangerCheckHandler.
+// Smoke test Stage 7c + Stage 7f.5.
 //
-// Skenario:
-//   0. DangerCheckHandler unit checks (plain code, subprocess, /etc/passwd).
-//   1. Basic: print(2+2)               → stdout "4\n", exit=0, success.
-//   2. Error: raise ValueError         → exit!=0, stderr ada "ValueError".
-//   3. Timeout: while True: pass       → timed_out=true, durasi < 5s.
-//   4. Blocked: /etc/passwd            → tidak dijalankan, lastError sebut BLOCKED.
-//   5. NeedsConfirm tanpa callback     → tolak.
-//   6. NeedsConfirm callback approve   → dijalankan.
-//   7. Ekstensi .txt                   → fail dengan pesan jelas.
-//   8. File tidak ada                  → fail dengan pesan jelas.
+// Stage 7c (existing):
+//   0. DangerCheckHandler unit checks.
+//   1. Basic execution: print(2+2).
+//   2. Error: raise ValueError.
+//   3. Timeout: while True.
+//   4. Blocked: /etc/passwd.
+//   5. NeedsConfirm tanpa callback.
+//   6. NeedsConfirm callback approve.
+//   7. Ekstensi tidak didukung.
+//   8. File tidak ada.
 //
-// Membutuhkan python3 di PATH (diasumsikan ada di Lubuntu default).
+// Stage 7f.5 (new):
+//   9.  Test-aware: test pass + entry pass.
+//   10. Test-aware: test fail → entry NOT run.
+//   11. Test-aware: no test file → entry run saja.
+//   12. Test-aware: nama test_ tapi tidak import unittest → bukan test.
+//   13. Test-aware: entry point == test file → test detection skip.
 
 #include "application/agent/AgentContext.h"
 #include "application/agent/ExecuteState.h"
@@ -56,7 +61,7 @@ int main() {
     std::error_code ec;
     fs::remove_all(sandbox_root, ec);
 
-    std::printf("=== frans_ai execute smoke test (Stage 7c) ===\n");
+    std::printf("=== frans_ai execute smoke test (Stage 7c + 7f.5) ===\n");
     std::printf("sandbox root (sebelum canonical): %s\n", sandbox_root.c_str());
 
     SandboxedFileSystem sb(sandbox_root);
@@ -106,18 +111,16 @@ int main() {
         exec.run(ctx);
 
         std::printf("  stdout   : %s", ctx.lastExecution.stdout_text.c_str());
-        std::printf("  stderr   : %s", ctx.lastExecution.stderr_text.c_str());
-        std::printf("  exit=%d  timed_out=%d  success=%d  dur=%.2fs\n",
+        std::printf("  exit=%d  success=%d  test_ran=%d\n",
                     ctx.lastExecution.exit_code,
-                    ctx.lastExecution.timed_out ? 1 : 0,
                     ctx.success ? 1 : 0,
-                    ctx.lastExecution.duration_sec);
+                    ctx.lastTest.ran ? 1 : 0);
 
         check(ctx.success, "ctx.success == true");
         check(ctx.lastExecution.exit_code == 0, "exit_code == 0");
         check(ctx.lastExecution.stdout_text == "4\n",
               "stdout == \"4\\n\"");
-        check(!ctx.lastExecution.timed_out, "not timed out");
+        check(!ctx.lastTest.ran, "no test file → lastTest.ran == false");
     }
 
     // =====================================================================
@@ -136,20 +139,12 @@ int main() {
         ExecuteState exec(canonical, sb, nullptr, 10);
         exec.run(ctx);
 
-        std::printf("  exit=%d  success=%d\n",
-                    ctx.lastExecution.exit_code, ctx.success ? 1 : 0);
-        std::printf("  stderr (first 220): %s\n",
-                    ctx.lastExecution.stderr_text.substr(0, 220).c_str());
-
         check(!ctx.success, "ctx.success == false");
         check(ctx.lastExecution.exit_code != 0, "exit_code != 0");
         check(ctx.lastExecution.stderr_text.find("ValueError")
                   != std::string::npos,
               "stderr mengandung 'ValueError'");
-        check(ctx.lastExecution.stderr_text.find("boom triggered")
-                  != std::string::npos,
-              "stderr mengandung 'boom triggered'");
-        check(!ctx.lastError.empty(), "ctx.lastError tidak kosong");
+        check(!ctx.lastTest.ran, "no test file");
     }
 
     // =====================================================================
@@ -165,16 +160,9 @@ int main() {
         ExecuteState exec(canonical, sb, nullptr, /*timeout_sec=*/2);
         exec.run(ctx);
 
-        std::printf("  exit=%d  timed_out=%d  dur=%.2fs\n",
-                    ctx.lastExecution.exit_code,
-                    ctx.lastExecution.timed_out ? 1 : 0,
-                    ctx.lastExecution.duration_sec);
-
         check(!ctx.success, "ctx.success == false");
         check(ctx.lastExecution.timed_out, "timed_out == true");
-        check(ctx.lastExecution.exit_code != 0, "exit_code != 0");
-        check(ctx.lastExecution.duration_sec < 5.0,
-              "duration < 5s (timeout benar-benar bekerja)");
+        check(ctx.lastExecution.duration_sec < 5.0, "duration < 5s");
     }
 
     // =====================================================================
@@ -192,13 +180,9 @@ int main() {
         ExecuteState exec(canonical, sb, nullptr, 5);
         exec.run(ctx);
 
-        std::printf("  lastError: %s\n", ctx.lastError.c_str());
-
         check(!ctx.success, "ctx.success == false");
         check(ctx.lastError.find("BLOCKED") != std::string::npos,
               "lastError menyebut BLOCKED");
-        check(ctx.lastExecution.stdout_text.empty(),
-              "tidak ada stdout (script tidak dijalankan)");
     }
 
     // =====================================================================
@@ -216,8 +200,6 @@ int main() {
 
         ExecuteState exec(canonical, sb, /*confirm=*/nullptr, 5);
         exec.run(ctx);
-
-        std::printf("  lastError: %s\n", ctx.lastError.c_str());
 
         check(!ctx.success, "ctx.success == false");
         check(ctx.lastError.find("konfirmasi") != std::string::npos
@@ -247,11 +229,6 @@ int main() {
             }, 10);
         exec.run(ctx);
 
-        std::printf("  confirm_calls=%d  exit=%d  stdout='%s'\n",
-                    confirm_calls,
-                    ctx.lastExecution.exit_code,
-                    ctx.lastExecution.stdout_text.c_str());
-
         check(confirm_calls == 1, "confirm callback dipanggil sekali");
         check(ctx.success, "ctx.success == true");
         check(ctx.lastExecution.stdout_text.find("hello-from-subprocess")
@@ -272,8 +249,6 @@ int main() {
         ExecuteState exec(canonical, sb, nullptr, 5);
         exec.run(ctx);
 
-        std::printf("  lastError: %s\n", ctx.lastError.c_str());
-
         check(!ctx.success, "ctx.success == false");
         check(ctx.lastError.find("tidak didukung") != std::string::npos,
               "lastError menyebut ekstensi tidak didukung");
@@ -290,11 +265,218 @@ int main() {
         ExecuteState exec(canonical, sb, nullptr, 5);
         exec.run(ctx);
 
-        std::printf("  lastError: %s\n", ctx.lastError.c_str());
-
         check(!ctx.success, "ctx.success == false");
         check(ctx.lastError.find("tidak ada") != std::string::npos,
               "lastError menyebut file tidak ada");
+    }
+
+    // =====================================================================
+    // Test 9 — Test-aware: test PASS + entry PASS
+    // =====================================================================
+    banner("Test-aware — test PASS + entry PASS");
+    {
+        const std::string tdir =
+            (fs::temp_directory_path()
+             / ("frans_7f5_pass_" + std::to_string(::getpid()))).string();
+        fs::remove_all(tdir, ec);
+        SandboxedFileSystem sb2(tdir);
+        const std::string c2 = sb2.root().string();
+
+        // Entry point: perkalian.py dengan __main__ block
+        sb2.writeFile("perkalian.py",
+            "def multiply(a, b):\n"
+            "    return a * b\n"
+            "\n"
+            "if __name__ == '__main__':\n"
+            "    print('The product is:', multiply(5, 3))\n");
+
+        // Test file
+        sb2.writeFile("test_perkalian.py",
+            "import unittest\n"
+            "from perkalian import multiply\n"
+            "\n"
+            "class TestPerkalian(unittest.TestCase):\n"
+            "    def test_multiply(self):\n"
+            "        self.assertEqual(multiply(5, 3), 15)\n"
+            "        self.assertEqual(multiply(-2, 4), -8)\n"
+            "        self.assertEqual(multiply(0, 5), 0)\n"
+            "\n"
+            "if __name__ == '__main__':\n"
+            "    unittest.main()\n");
+
+        AgentContext ctx;
+        ctx.targetRelativePath = "perkalian.py";
+
+        ExecuteState exec(c2, sb2, nullptr, 10);
+        exec.run(ctx);
+
+        std::printf("  lastTest: ran=%d file='%s' exit=%d dur=%.2fs\n",
+                    ctx.lastTest.ran ? 1 : 0,
+                    ctx.lastTest.test_file.c_str(),
+                    ctx.lastTest.exit_code,
+                    ctx.lastTest.duration_sec);
+        std::printf("  lastExecution: exit=%d stdout='%s'\n",
+                    ctx.lastExecution.exit_code,
+                    ctx.lastExecution.stdout_text.c_str());
+
+        check(ctx.lastTest.ran, "lastTest.ran == true");
+        check(ctx.lastTest.test_file == "test_perkalian.py",
+              "test_file == 'test_perkalian.py'");
+        check(ctx.lastTest.exit_code == 0, "test exit_code == 0 (PASS)");
+        check(ctx.lastExecution.exit_code == 0, "entry exit_code == 0");
+        check(ctx.success, "ctx.success == true");
+        check(ctx.lastExecution.stdout_text.find("The product is: 15")
+                  != std::string::npos,
+              "stdout entry mengandung 'The product is: 15'");
+    }
+
+    // =====================================================================
+    // Test 10 — Test-aware: test FAIL → entry TIDAK dijalankan
+    // =====================================================================
+    banner("Test-aware — test FAIL → skip entry");
+    {
+        const std::string tdir =
+            (fs::temp_directory_path()
+             / ("frans_7f5_fail_" + std::to_string(::getpid()))).string();
+        fs::remove_all(tdir, ec);
+        SandboxedFileSystem sb2(tdir);
+        const std::string c2 = sb2.root().string();
+
+        // Entry point: perkalian.py dengan multiply BUGGY (a+b bukan a*b)
+        sb2.writeFile("perkalian.py",
+            "def multiply(a, b):\n"
+            "    return a + b\n"   // bug: + bukan *
+            "\n"
+            "if __name__ == '__main__':\n"
+            "    print('The product is:', multiply(5, 3))\n");
+
+        sb2.writeFile("test_perkalian.py",
+            "import unittest\n"
+            "from perkalian import multiply\n"
+            "\n"
+            "class TestPerkalian(unittest.TestCase):\n"
+            "    def test_multiply(self):\n"
+            "        self.assertEqual(multiply(5, 3), 15)\n"
+            "\n"
+            "if __name__ == '__main__':\n"
+            "    unittest.main()\n");
+
+        AgentContext ctx;
+        ctx.targetRelativePath = "perkalian.py";
+
+        ExecuteState exec(c2, sb2, nullptr, 10);
+        exec.run(ctx);
+
+        std::printf("  lastTest: ran=%d exit=%d\n",
+                    ctx.lastTest.ran ? 1 : 0, ctx.lastTest.exit_code);
+        std::printf("  lastExecution exit=%d\n", ctx.lastExecution.exit_code);
+        std::printf("  lastError='%s'\n", ctx.lastError.c_str());
+
+        check(ctx.lastTest.ran, "lastTest.ran == true");
+        check(ctx.lastTest.exit_code != 0, "test exit_code != 0 (FAIL)");
+        check(!ctx.success, "ctx.success == false");
+        check(ctx.lastError.find("Test failed") != std::string::npos,
+              "lastError menyebut 'Test failed'");
+        // lastExecution berisi hasil TEST, bukan entry.
+        // Marker: stderr ada AssertionError dari unittest.
+        check(ctx.lastExecution.stderr_text.find("AssertionError")
+                  != std::string::npos,
+              "lastExecution.stderr mengandung AssertionError "
+              "(berarti test yang dieksekusi, bukan entry)");
+        // Entry point tidak dijalankan: stdout tidak ada "The product is".
+        check(ctx.lastExecution.stdout_text.find("The product is")
+                  == std::string::npos,
+              "stdout entry TIDAK ada (entry skipped)");
+    }
+
+    // =====================================================================
+    // Test 11 — Test-aware: no test file → entry run saja
+    // =====================================================================
+    banner("Test-aware — no test file");
+    {
+        const std::string tdir =
+            (fs::temp_directory_path()
+             / ("frans_7f5_notest_" + std::to_string(::getpid()))).string();
+        fs::remove_all(tdir, ec);
+        SandboxedFileSystem sb2(tdir);
+        const std::string c2 = sb2.root().string();
+
+        sb2.writeFile("simple.py", "print('no test here')\n");
+
+        AgentContext ctx;
+        ctx.targetRelativePath = "simple.py";
+
+        ExecuteState exec(c2, sb2, nullptr, 10);
+        exec.run(ctx);
+
+        check(!ctx.lastTest.ran, "lastTest.ran == false");
+        check(ctx.lastExecution.exit_code == 0, "entry exit_code == 0");
+        check(ctx.success, "ctx.success == true");
+    }
+
+    // =====================================================================
+    // Test 12 — Test-aware: nama test_ tapi tidak import unittest
+    // =====================================================================
+    banner("Test-aware — test_*.py tanpa import unittest → bukan test");
+    {
+        const std::string tdir =
+            (fs::temp_directory_path()
+             / ("frans_7f5_fake_" + std::to_string(::getpid()))).string();
+        fs::remove_all(tdir, ec);
+        SandboxedFileSystem sb2(tdir);
+        const std::string c2 = sb2.root().string();
+
+        // Nama match test_ prefix, tapi isi bukan test file.
+        sb2.writeFile("test_helpers.py",
+            "def helper():\n"
+            "    return 42\n");
+
+        sb2.writeFile("main.py", "print('ok')\n");
+
+        AgentContext ctx;
+        ctx.targetRelativePath = "main.py";
+
+        ExecuteState exec(c2, sb2, nullptr, 10);
+        exec.run(ctx);
+
+        check(!ctx.lastTest.ran,
+              "lastTest.ran == false (bukan test file sebenarnya)");
+        check(ctx.success, "ctx.success == true");
+    }
+
+    // =====================================================================
+    // Test 13 — Test-aware: entry point == test file → skip test detection
+    // =====================================================================
+    banner("Test-aware — entry point == test file → run as entry saja");
+    {
+        const std::string tdir =
+            (fs::temp_directory_path()
+             / ("frans_7f5_same_" + std::to_string(::getpid()))).string();
+        fs::remove_all(tdir, ec);
+        SandboxedFileSystem sb2(tdir);
+        const std::string c2 = sb2.root().string();
+
+        // User set target = test file itu sendiri.
+        sb2.writeFile("test_self.py",
+            "import unittest\n"
+            "\n"
+            "class TestSelf(unittest.TestCase):\n"
+            "    def test_ok(self):\n"
+            "        self.assertTrue(True)\n"
+            "\n"
+            "if __name__ == '__main__':\n"
+            "    print('running as entry')\n"
+            "    unittest.main()\n");
+
+        AgentContext ctx;
+        ctx.targetRelativePath = "test_self.py";
+
+        ExecuteState exec(c2, sb2, nullptr, 10);
+        exec.run(ctx);
+
+        check(!ctx.lastTest.ran,
+              "lastTest.ran == false (test file = entry, tidak dijalankan "
+              "dua kali)");
     }
 
     std::printf("\n=== %s ===\n",

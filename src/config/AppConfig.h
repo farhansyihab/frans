@@ -20,9 +20,18 @@ struct AppConfig {
     std::string log_dir;
 
     // UI
-    int         window_width   = 1000;
-    int         window_height  = 650;
-    std::string window_title   = "frans_ai";
+    //
+    // window_width / window_height:
+    //   0  → AUTO: pakai Fl::screen_work_area() dikurangi 2*margin_px.
+    //   >0 → pakai nilai itu, tapi di-clamp ke work area - 2*margin_px
+    //        supaya tidak ada bagian window di luar layar.
+    //
+    // window_margin_px: jarak window dari tepi work area (kiri/kanan/
+    // atas/bawah). Berlaku untuk mode AUTO maupun clamp.
+    int         window_width     = 0;
+    int         window_height    = 0;
+    int         window_margin_px = 24;
+    std::string window_title     = "frans_ai";
 
     // Baca config/app.json. Kalau file tidak ada atau field hilang,
     // nilai default di atas dipakai (no-throw).

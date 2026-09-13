@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -42,35 +43,57 @@ const char* kFixSystemPrompt =
     "- Do NOT write any text before the first \"File:\" line or after "
     "the last block.\n";
 
-// Render semua generatedFiles jadi blok teks dengan format File:.
-std::string formatGeneratedFiles(const std::vector<GeneratedFile>& files) {
+// Blueprint Stage 7f — baca file dari DISK, bukan dari memory
+// (ctx.generatedFiles). Ini mencegah bug di mana IDE auto-format file
+// antara attempt 0 dan attempt 1, sehingga memory dan disk tidak sinkron.
+//
+// Kumpulkan union dari inScopeFiles (prioritas — entry + file relevan
+// lain) dan generatedFiles. Dedup lewat std::set.
+std::vector<std::string> collectFilesToRead(const AgentContext& ctx) {
+    std::vector<std::string> files;
+    std::set<std::string> seen;
+
+    for (const auto& f : ctx.inScopeFiles) {
+        if (seen.insert(f).second) files.push_back(f);
+    }
+    for (const auto& f : ctx.generatedFiles) {
+        if (seen.insert(f.relative_path).second) {
+            files.push_back(f.relative_path);
+        }
+    }
+    return files;
+}
+
+// Render konten file yang dibaca dari disk dengan format File: + fenced
+// block. File yang tidak ada di disk (mis. user hapus manual) ditulis
+// sebagai blok kosong — model bisa generate ulang.
+std::string formatFilesFromDisk(const std::vector<std::string>& paths,
+                                frans::domain::IFileSystemPort& fs) {
     std::string out;
-    for (const auto& f : files) {
-        out += "File: " + f.relative_path + "\n";
+    if (paths.empty()) {
+        out += "(no files known)\n";
+        return out;
+    }
+    for (const auto& path : paths) {
+        const std::string content = fs.readFile(path);
+        out += "File: " + path + "\n";
         out += "```\n";
-        out += f.content;
-        if (f.content.empty() || f.content.back() != '\n') out += '\n';
+        out += content;
+        if (content.empty() || content.back() != '\n') out += '\n';
         out += "```\n\n";
     }
     return out;
 }
 
-std::string buildUserMessage(const AgentContext& ctx) {
+std::string buildUserMessage(const AgentContext& ctx,
+                             frans::domain::IFileSystemPort& fs) {
     std::string msg;
     msg += "=== Original task ===\n";
     msg += ctx.taskDescription;
     msg += "\n\n";
 
     msg += "=== Your previous attempt (the file(s) currently on disk) ===\n";
-    if (!ctx.generatedFiles.empty()) {
-        msg += formatGeneratedFiles(ctx.generatedFiles);
-    } else if (!ctx.lastGeneratedCode.empty()) {
-        msg += "File: " + ctx.targetRelativePath + "\n";
-        msg += "```\n";
-        msg += ctx.lastGeneratedCode;
-        if (ctx.lastGeneratedCode.back() != '\n') msg += '\n';
-        msg += "```\n\n";
-    }
+    msg += formatFilesFromDisk(collectFilesToRead(ctx), fs);
     msg += "\n";
 
     msg += "=== Error observation from running that code ===\n";
@@ -111,7 +134,8 @@ void FixState::run(AgentContext& ctx) {
         ctx.lastError = "FixState: targetRelativePath kosong.";
         return;
     }
-    if (ctx.generatedFiles.empty() && ctx.lastGeneratedCode.empty()) {
+    if (ctx.generatedFiles.empty() && ctx.lastGeneratedCode.empty()
+        && ctx.inScopeFiles.empty()) {
         ctx.lastError = "FixState: tidak ada kode sebelumnya.";
         return;
     }
@@ -129,9 +153,10 @@ void FixState::run(AgentContext& ctx) {
     }
 
     // ---- 3. Messages ----
+    // Stage 7f: buildUserMessage baca DISK (via fs), bukan memory.
     std::vector<ChatMessage> messages = {
         {"system", systemPrompt},
-        {"user",   buildUserMessage(ctx)},
+        {"user",   buildUserMessage(ctx, fs_)},
     };
 
     GenOptions opts;
@@ -165,12 +190,18 @@ void FixState::run(AgentContext& ctx) {
     std::fflush(stderr);
 
     // ---- 6. Tulis semua file (overwrite) ----
+    // Snapshot pakai fungsi YANG SAMA dengan GenerateState — tidak
+    // reimplementasi logic terpisah. Idempotent: kalau sudah tercatat
+    // dari GenerateState, tidak overwrite.
     for (const auto& f : parsed.files) {
         const std::filesystem::path p(f.relative_path);
         const std::filesystem::path parent = p.parent_path();
         if (!parent.empty()) {
             (void)fs_.createDirectory(parent.string());
         }
+
+        snapshotBeforeWrite(ctx, fs_, f.relative_path);
+
         if (!fs_.writeFile(f.relative_path, f.content)) {
             ctx.lastError = "FixState: writeFile gagal untuk: " + f.relative_path;
             return;

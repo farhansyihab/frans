@@ -28,10 +28,16 @@ namespace {
 // System prompt untuk multi-file response (Stage 7e).
 //
 // Instruksi format SANGAT eksplisit supaya qwen2.5-coder-7b mengikuti
-// konvensi "File: <path>" + fenced block. Konvensi ini dipakai aider
-// dan model ini sudah familiar dengannya.
+// konvensi "File: <path>" + fenced block. Konvensi ini dipakai
+// aider dan model ini sudah familiar dengannya.
+//
+// Stage 7f: tambah "Files currently in scope" header supaya model
+// tahu file apa saja yang dianggap relevan — membantu model
+// menghindari menulis file yang tidak perlu, dan menyelaraskan
+// pemahaman dengan ContextSelector.
 std::string buildSystemPrompt(const std::string& target_path,
-                              const std::string& context_block)
+                              const std::string& context_block,
+                              const std::vector<std::string>& in_scope_files)
 {
     std::string p;
     p +=
@@ -56,6 +62,17 @@ std::string buildSystemPrompt(const std::string& target_path,
          "blocks, or after the last block.\n"
          "- The entry point, when run, must exit with code 0 on success "
          "and non-zero on failure.\n";
+
+    // ---- Stage 7f: files in scope ----
+    if (!in_scope_files.empty()) {
+        p += "\nFiles currently in scope (relative to project root):\n";
+        for (const auto& f : in_scope_files) {
+            p += "  - ";
+            p += f;
+            if (f == target_path) p += "  [ENTRY POINT]";
+            p += "\n";
+        }
+    }
 
     if (!context_block.empty()) {
         p += "\nExisting related code from the project (for style/signature "
@@ -111,7 +128,8 @@ void GenerateState::run(AgentContext& ctx) {
 
     // ---- 3. System prompt + messages ----
     const std::string systemPrompt =
-        buildSystemPrompt(ctx.targetRelativePath, context_block);
+        buildSystemPrompt(ctx.targetRelativePath, context_block,
+                          ctx.inScopeFiles);
 
     std::vector<ChatMessage> messages = {
         {"system", systemPrompt},
@@ -152,12 +170,18 @@ void GenerateState::run(AgentContext& ctx) {
     std::fflush(stderr);
 
     // ---- 6. Tulis semua file ----
+    // Stage 7f: snapshotBeforeWrite dipanggil SEBELUM fs_.writeFile untuk
+    // SETIAP file yang akan ditulis — bukan hanya yang di inScopeFiles,
+    // karena model bisa saja menghasilkan file baru di luar scope awal.
     for (const auto& f : parsed.files) {
         const std::filesystem::path p(f.relative_path);
         const std::filesystem::path parent = p.parent_path();
         if (!parent.empty()) {
             (void)fs_.createDirectory(parent.string());
         }
+
+        snapshotBeforeWrite(ctx, fs_, f.relative_path);
+
         if (!fs_.writeFile(f.relative_path, f.content)) {
             ctx.success   = false;
             ctx.lastError = "writeFile gagal untuk: " + f.relative_path;

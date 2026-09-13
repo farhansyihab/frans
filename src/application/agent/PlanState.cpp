@@ -27,8 +27,6 @@ bool containsAny(const std::string& haystack,
     return false;
 }
 
-// Keyword heuristics. Semua lowercase karena kita membandingkan dengan
-// task yang sudah di-toLower().
 TaskComplexity classify(const std::string& task) {
     const std::string low = toLower(task);
 
@@ -87,6 +85,7 @@ void PlanState::run(AgentContext& ctx) {
     ctx.attemptHistory.clear();
     ctx.lastObservation.clear();
     ctx.lastExecution.reset();
+    ctx.lastTest.reset();          // Stage 7f.5 — reset hasil test run sebelumnya
     // ctx.lastGeneratedCode & ctx.contextSnippets SENGAJA tidak di-clear:
     // GenerateState yang akan mengisinya di attempt 0.
 

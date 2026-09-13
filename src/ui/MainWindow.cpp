@@ -7,10 +7,13 @@
 #include "ui/LlamaPanel.h"
 #include "ui/MaintenancePanel.h"
 
+#include <FL/Fl.H>
 #include <FL/Fl_Box.H>
+#include <FL/Fl_Tabs.H>
 #include <FL/Fl_Window.H>
 #include <FL/fl_ask.H>
 
+#include <algorithm>
 #include <cstdio>
 
 namespace frans::ui {
@@ -21,9 +24,28 @@ using frans::application::WorkerDone;
 using frans::infrastructure::ModelEntry;
 
 namespace {
-constexpr int kWorkerTimeoutSec = 180;
-}
 
+constexpr int kWorkerTimeoutSec = 180;
+
+// Lebar padding dalam tab (kiri+kanan). Nilai kecil supaya panel dapat
+// lebar maksimal.
+constexpr int kTabPaddingX = 10;
+
+// Tinggi tab header bar (Fl_Tabs reserve ~25px untuk label tab).
+constexpr int kTabHeaderH = 25;
+
+// Padding vertikal dalam tab.
+constexpr int kTabPaddingY = 8;
+
+// Tinggi minimum window. Di bawah ini layout tab mulai tidak nyaman.
+constexpr int kMinWindowW = 800;
+constexpr int kMinWindowH = 560;
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Construction
+// ---------------------------------------------------------------------------
 MainWindow::MainWindow(AppContext* ctx) : ctx_(ctx) {
     worker_ = std::make_unique<Worker>(
         [this](bool busy, const std::string& label) {
@@ -36,58 +58,115 @@ MainWindow::MainWindow(AppContext* ctx) : ctx_(ctx) {
 
 MainWindow::~MainWindow() = default;
 
+// ---------------------------------------------------------------------------
+// create — bangun window + layout tab
+// ---------------------------------------------------------------------------
 Fl_Window* MainWindow::create() {
     const auto& cfg = ctx_->config;
-    const int W = cfg.window_width;
 
-    win_ = new Fl_Window(cfg.window_width, cfg.window_height,
-                         cfg.window_title.c_str());
+    // ---- Hitung ukuran & posisi window ----
+    // Ambil work area (excludes taskbar/panel). Fallback ke Fl::w()/Fl::h()
+    // kalau X server tidak melaporkan work area dengan benar.
+    int sx = 0, sy = 0, sw = 0, sh = 0;
+    Fl::screen_work_area(sx, sy, sw, sh);
+    if (sw < kMinWindowW || sh < kMinWindowH) {
+        sx = 0;
+        sy = 0;
+        sw = Fl::w() > 0 ? Fl::w() : 1366;
+        sh = Fl::h() > 0 ? Fl::h() : 768;
+    }
+
+    int margin = cfg.window_margin_px;
+    if (margin < 0) margin = 24;
+    // Jangan sampai margin melebihi setengah layar (config salah).
+    margin = std::min(margin, std::min(sw, sh) / 4);
+
+    const int avail_w = std::max(sw - 2 * margin, kMinWindowW);
+    const int avail_h = std::max(sh - 2 * margin, kMinWindowH);
+
+    // width/height = 0 → AUTO (pakai avail). > 0 → pakai config, tapi clamp.
+    int ww = cfg.window_width  > 0 ? std::min(cfg.window_width,  avail_w) : avail_w;
+    int wh = cfg.window_height > 0 ? std::min(cfg.window_height, avail_h) : avail_h;
+
+    const int wx = sx + margin;
+    const int wy = sy + margin;
+
+    std::fprintf(stderr,
+        "[frans][ui] screen work area: (%d,%d) %dx%d; margin=%d; "
+        "window: (%d,%d) %dx%d\n",
+        sx, sy, sw, sh, margin, wx, wy, ww, wh);
+    std::fflush(stderr);
+
+    // ---- Buat window ----
+    win_ = new Fl_Window(wx, wy, ww, wh, cfg.window_title.c_str());
+
+    // resizable(win_) → user bisa drag border window; WM tahu window
+    // resizable sehingga tombol maximize/restore aktif.
+    // size_range → batasi min & max. max = ukuran layar supaya tidak
+    // bisa drag melebihi layar.
+    win_->resizable(win_);
+    win_->size_range(kMinWindowW, kMinWindowH,
+                     Fl::w() > 0 ? Fl::w() : 16384,
+                     Fl::h() > 0 ? Fl::h() : 16384);
+
     win_->begin();
+
+    // =====================================================================
+    // Layout: header → LlamaPanel (sticky) → Tabs → status line
+    // =====================================================================
+    const int W  = ww - 40;   // content width (margin 20 kiri/kanan)
+    const int LX = 20;        // left x
 
     int y = 12;
 
-    // ---- Header ----
-    Fl_Box* title = new Fl_Box(20, y, W - 40, 30,
-        "frans_ai  \u2014  Stage 7e: Agent ↔ UI Integration");
-    title->labelfont(FL_BOLD);
-    title->labelsize(17);
-    title->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-    y += 30;
+    // ---- Header (compact) ----
+    {
+        Fl_Box* title = new Fl_Box(LX, y, W, 24,
+            "frans_ai  \u2014  Stage 7f: Project Awareness");
+        title->labelfont(FL_BOLD);
+        title->labelsize(15);
+        title->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        y += 28;
+    }
 
-    Fl_Box* sub = new Fl_Box(20, y, W - 40, 18,
-        "Plan \u2192 Generate \u2192 Execute \u2192 Observe \u2192 Fix  |  "
-        "multi-file + DangerCheckHandler");
-    sub->labelsize(11);
-    sub->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-    y += 26;
-
-    // ---- Maintenance section ----
-    maintenance_ = std::make_unique<MaintenancePanel>(
-        ctx_, worker_.get(),
-        [this]() -> const ModelEntry* {
-            return llama_panel_ ? llama_panel_->selectedModel() : nullptr;
-        });
-    y = maintenance_->createWidgets(20, y, W - 40);
-    y += 12;
-
-    // ---- Status line ----
-    status_line_ = new Fl_Box(20, y, W - 40, 20, "idle.");
-    status_line_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-    status_line_->labelsize(11);
-    status_line_->labelcolor(FL_DARK_BLUE);
-    y += 26;
-
-    // ---- Llama section ----
+    // ---- LlamaPanel (STICKY — di luar tabs) ----
     llama_panel_ = std::make_unique<LlamaPanel>(
         ctx_, worker_.get(),
         [this]() -> bool {
             return chat_ && chat_->isStreaming();
         });
-    y = llama_panel_->createWidgets(20, y, W - 40);
-    y += 12;
+    y = llama_panel_->createWidgets(LX, y, W);
+    y += 6;
 
-    // ---- Agent section (Stage 7e) ----
+    // ---- Tab area ----
+    // Status line di bawah tabs → reserve dari bawah.
+    constexpr int kStatusH       = 24;
+    constexpr int kBottomMargin  = 10;
+    constexpr int kStatusGap     = 6;
+
+    const int tabs_h = wh - y - kStatusH - kBottomMargin - kStatusGap;
+    if (tabs_h < 200) {
+        std::fprintf(stderr,
+            "[frans][ui] WARNING: tabs_h=%d terlalu kecil. "
+            "Beberapa panel mungkin terpotong.\n", tabs_h);
+        std::fflush(stderr);
+    }
+
+    // Inner bounds untuk tab content (setelah dikurangi tab header + padding).
+    const int tab_inner_x = LX + kTabPaddingX;
+    const int tab_inner_y = y + kTabHeaderH + kTabPaddingY;
+    const int tab_inner_w = W - 2 * kTabPaddingX;
+    const int tab_inner_h = tabs_h - kTabHeaderH - 2 * kTabPaddingY;
+
+    tabs_ = new Fl_Tabs(LX, y, W, tabs_h);
+
+    // ---- Tab 1: Agent (default visible) ----
     {
+        Fl_Group* g = new Fl_Group(LX + 2, y + kTabHeaderH,
+                                    W - 4, tabs_h - kTabHeaderH,
+                                    "Agent");
+        g->begin();
+
         AgentPanel::Deps adeps;
         adeps.is_server_running = [this]() -> bool {
             return ctx_->llama && ctx_->llama->isRunning();
@@ -115,69 +194,118 @@ Fl_Window* MainWindow::create() {
         };
 
         agent_panel_ = std::make_unique<AgentPanel>(ctx_, std::move(adeps));
-        y = agent_panel_->createWidgets(20, y, W - 40);
-        y += 12;
+        // Panel dimulai dari tab_inner_y, bukan dari y + kTabHeaderH —
+        // kita sudah hitung padding di atas.
+        agent_panel_->createWidgets(tab_inner_x, tab_inner_y, tab_inner_w);
+
+        g->end();
     }
 
-    // ---- Chat section ----
-    Fl_Box* ctitle = new Fl_Box(20, y, W - 40, 20, "Chat  (streaming test)");
-    ctitle->labelfont(FL_BOLD);
-    ctitle->labelsize(12);
-    ctitle->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-    y += 22;
+    // ---- Tab 2: Chat ----
+    {
+        Fl_Group* g = new Fl_Group(LX + 2, y + kTabHeaderH,
+                                    W - 4, tabs_h - kTabHeaderH,
+                                    "Chat");
+        g->begin();
 
-    const int chat_h = 200;
+        ChatDeps chat_deps;
+        chat_deps.is_server_running = [this]() -> bool {
+            return ctx_->llama && ctx_->llama->isRunning();
+        };
+        chat_deps.get_host = [this]() -> std::string {
+            if (!ctx_->llama) return "127.0.0.1";
+            const std::string url = ctx_->llama->baseUrl();
+            const auto scheme_end = url.find("://");
+            const auto colon      = url.rfind(':');
+            if (scheme_end == std::string::npos || colon == std::string::npos) {
+                return "127.0.0.1";
+            }
+            return url.substr(scheme_end + 3, colon - (scheme_end + 3));
+        };
+        chat_deps.get_port = [this]() -> int {
+            if (!ctx_->llama) return 8080;
+            const std::string url = ctx_->llama->baseUrl();
+            const auto colon = url.rfind(':');
+            if (colon == std::string::npos) return 8080;
+            try { return std::stoi(url.substr(colon + 1)); }
+            catch (...) { return 8080; }
+        };
+        chat_deps.get_model_tag = [this]() -> std::string {
+            const ModelEntry* e = llama_panel_ ? llama_panel_->selectedModel() : nullptr;
+            return e ? e->id : std::string{};
+        };
+        chat_deps.on_activity = [this]() {
+            if (ctx_->idle_timer) ctx_->idle_timer->markActivity();
+        };
 
-    ChatDeps chat_deps;
-    chat_deps.is_server_running = [this]() -> bool {
-        return ctx_->llama && ctx_->llama->isRunning();
-    };
-    chat_deps.get_host = [this]() -> std::string {
-        if (!ctx_->llama) return "127.0.0.1";
-        const std::string url = ctx_->llama->baseUrl();
-        const auto scheme_end = url.find("://");
-        const auto colon      = url.rfind(':');
-        if (scheme_end == std::string::npos || colon == std::string::npos) {
-            return "127.0.0.1";
+        // ChatView punya (x, y, w, h) di constructor (bukan createWidgets
+        // param), jadi kita pass tab_inner bounds langsung.
+        chat_ = std::make_unique<ChatView>(tab_inner_x, tab_inner_y,
+                                            tab_inner_w, tab_inner_h,
+                                            std::move(chat_deps));
+        chat_->createWidgets();
+
+        g->end();
+    }
+
+    // ---- Tab 3: System (MaintenancePanel + hint box) ----
+    {
+        Fl_Group* g = new Fl_Group(LX + 2, y + kTabHeaderH,
+                                    W - 4, tabs_h - kTabHeaderH,
+                                    "System");
+        g->begin();
+
+        maintenance_ = std::make_unique<MaintenancePanel>(
+            ctx_, worker_.get(),
+            [this]() -> const ModelEntry* {
+                return llama_panel_ ? llama_panel_->selectedModel() : nullptr;
+            });
+
+        const int maint_end_y =
+            maintenance_->createWidgets(tab_inner_x, tab_inner_y, tab_inner_w);
+
+        // Hint box di bawah maintenance.
+        const int hint_y = maint_end_y + 16;
+        const int hint_h = (tab_inner_y + tab_inner_h) - hint_y;
+        if (hint_h > 60) {
+            Fl_Box* hint = new Fl_Box(tab_inner_x, hint_y,
+                                       tab_inner_w, hint_h,
+                "Cara pakai:\n"
+                "  \u2022  Llama Server (panel atas, sticky): pilih model, klik Start Server.\n"
+                "  \u2022  Tab Agent: isi project root + task, kosongkan Target untuk auto-detect,\n"
+                "     lalu klik Run Task. Hasil (attempt history + file + stdout/stderr)\n"
+                "     muncul di kotak output di bawah tombol.\n"
+                "  \u2022  Tab Chat: chat bebas dengan model lokal (streaming).\n"
+                "  \u2022  Tab System: bersihkan RAM/Swap, drop caches, dll.\n"
+                "\n"
+                "Log terminal ber-prefix [frans] adalah alat debug utama \u2014 "
+                "jalankan frans_ai dari terminal, bukan double-click.");
+            hint->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE | FL_ALIGN_WRAP);
+            hint->labelsize(11);
+            hint->labelcolor(FL_DARK_BLUE);
         }
-        return url.substr(scheme_end + 3, colon - (scheme_end + 3));
-    };
-    chat_deps.get_port = [this]() -> int {
-        if (!ctx_->llama) return 8080;
-        const std::string url = ctx_->llama->baseUrl();
-        const auto colon = url.rfind(':');
-        if (colon == std::string::npos) return 8080;
-        try { return std::stoi(url.substr(colon + 1)); }
-        catch (...) { return 8080; }
-    };
-    chat_deps.get_model_tag = [this]() -> std::string {
-        const ModelEntry* e = llama_panel_ ? llama_panel_->selectedModel() : nullptr;
-        return e ? e->id : std::string{};
-    };
-    chat_deps.on_activity = [this]() {
-        if (ctx_->idle_timer) ctx_->idle_timer->markActivity();
-    };
 
-    chat_ = std::make_unique<ChatView>(20, y, W - 40, chat_h,
-                                       std::move(chat_deps));
-    chat_->createWidgets();
-    y += chat_h + 10;
+        g->end();
+    }
 
-    // ---- Hints ----
-    Fl_Box* hint = new Fl_Box(20, y, W - 40, cfg.window_height - y - 15,
-        "Cara pakai Stage 7e:\n"
-        "  1. Isi project root (folder kerja Agent). Folder dibuat otomatis.\n"
-        "  2. Tulis task di kotak Task (bahasa natural).\n"
-        "  3. Target file = entry point relatif terhadap project root.\n"
-        "  4. Klik Run Task. Hasil (attempt history + file yang ditulis +\n"
-        "     stdout/stderr) muncul di kotak output di bawah tombol.");
-    hint->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE | FL_ALIGN_WRAP);
-    hint->labelsize(11);
+    tabs_->end();
+
+    y += tabs_h + kStatusGap;
+
+    // ---- Status line (paling bawah, mirip status bar aplikasi) ----
+    status_line_ = new Fl_Box(LX, y, W, kStatusH, "idle.");
+    status_line_->box(FL_DOWN_BOX);
+    status_line_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+    status_line_->labelsize(11);
+    status_line_->labelcolor(FL_DARK_BLUE);
 
     win_->end();
     return win_;
 }
 
+// ---------------------------------------------------------------------------
+// startTimers
+// ---------------------------------------------------------------------------
 void MainWindow::startTimers() {
     Fl::add_timeout(0.4,  onMemoryRefresh, this);
     Fl::add_timeout(0.5,  onLlamaRefresh,  this);

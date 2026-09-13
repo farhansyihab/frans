@@ -29,18 +29,8 @@ namespace frans::ui {
 
 // Panel untuk menjalankan Agent task secara end-to-end.
 //
-// Tanggung jawab:
-//   - Project root picker
-//   - Task description input (multi-line)
-//   - Target entry point input
-//   - Run / Cancel / Clear buttons
-//   - Status + result display
-//   - Confirm marshalling ke main thread (lewat TaskRunner)
-//
-// Pola threading:
-//   - tick() dipanggil dari timer main-thread.
-//   - TaskRunner menjalankan Agent di worker thread.
-//   - Semua widget HANYA disentuh di tick() / callback (main thread).
+// Stage 7f: tambah ProjectGraphCache (via AppContext) + TargetScopeResolver
+// untuk auto-detect entry point dan in-scope files.
 class AgentPanel {
 public:
     struct Deps {
@@ -73,6 +63,10 @@ private:
     void startTask();
     void renderResult(const frans::application::TaskProgress& p);
 
+    // Stage 7f — update label "Detected scope: N file(s)" berdasarkan
+    // task & root input saat ini. Dipanggil dari tick() saat idle.
+    void updateScopeLabel(const std::string& task, const std::string& root);
+
     // ---- deps ----
     frans::application::AppContext* ctx_;
     Deps                            deps_;
@@ -82,6 +76,7 @@ private:
     Fl_Button*          browse_btn_    = nullptr;
     Fl_Multiline_Input* task_input_    = nullptr;
     Fl_Input*           target_input_  = nullptr;
+    Fl_Box*             scope_label_   = nullptr;   // Stage 7f
     Fl_Button*          run_btn_       = nullptr;
     Fl_Button*          cancel_btn_    = nullptr;
     Fl_Button*          clear_btn_     = nullptr;
@@ -96,6 +91,14 @@ private:
 
     bool        result_shown_ = false;
     std::string status_buf_;
+
+    // Stage 7f — budget token untuk context selection. Dihitung sekali
+    // di constructor lewat ContextBudgetManager, TIDAK di-hardcode.
+    int         code_budget_ = 0;
+
+    // Stage 7f — tracking untuk hindari resolve berulang di tick().
+    std::string last_scope_task_;
+    std::string last_scope_root_;
 };
 
 } // namespace frans::ui

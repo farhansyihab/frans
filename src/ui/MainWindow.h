@@ -10,6 +10,7 @@
 #include <string>
 
 class Fl_Box;
+class Fl_Tabs;
 
 namespace frans::application {
 struct AppContext;
@@ -24,8 +25,14 @@ class AgentPanel;
 
 // Main window FLTK.
 //
-// Stage 7e: tambah AgentPanel (dijadwalkan lewat timer 100ms) di antara
-// LlamaPanel dan ChatView.
+// Stage 7f+1 (layout):
+//   - Header compact.
+//   - LlamaPanel sticky di atas (selalu terlihat).
+//   - Fl_Tabs: [Agent] (default) | [Chat] | [System].
+//   - Status line di paling bawah (mirip status bar).
+//
+// Window size dihitung dari Fl::screen_work_area() - 2*margin supaya
+// "nyaris" fullscreen tapi tetap ada chrome OS (taskbar/panel).
 class MainWindow {
 public:
     explicit MainWindow(frans::application::AppContext* ctx);
@@ -59,6 +66,7 @@ private:
     std::unique_ptr<ChatView>                    chat_;
 
     Fl_Window* win_         = nullptr;
+    Fl_Tabs*   tabs_        = nullptr;
     Fl_Box*    status_line_ = nullptr;
 
     std::string status_buf_;

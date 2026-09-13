@@ -4,6 +4,9 @@
 #include "application/AppContext.h"
 #include "application/agent/AgentContext.h"
 #include "application/agent/Agent.h"
+#include "application/agent/TargetScopeResolver.h"
+#include "application/context_budget/ContextBudgetManager.h"
+#include "application/project/ProjectGraphCache.h"
 #include "domain/fs/IFileSystemPort.h"
 #include "domain/llm/ILlmProvider.h"
 #include "infrastructure/fs/SandboxedFileSystem.h"
@@ -17,15 +20,19 @@
 #include <FL/fl_ask.H>
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 namespace frans::ui {
 
 using frans::application::Agent;
 using frans::application::AgentContext;
 using frans::application::AppContext;
+using frans::application::ContextBudgetManager;
+using frans::application::TargetScopeResolver;
 using frans::application::TaskProgress;
 using frans::application::TaskRunner;
 using frans::infrastructure::LlamaCppProvider;
@@ -42,7 +49,6 @@ std::string humanBytes(std::size_t n) {
     return buf;
 }
 
-// Ambil beberapa baris terakhir stderr untuk ringkasan.
 std::string tailLines(const std::string& s, std::size_t max_lines) {
     if (s.empty()) return {};
     std::vector<std::size_t> newlines;
@@ -54,27 +60,35 @@ std::string tailLines(const std::string& s, std::size_t max_lines) {
     return s.substr(start);
 }
 
+std::string resolveTilde(const std::string& in) {
+    if (in.empty() || in[0] != '~') return in;
+    const char* home = std::getenv("HOME");
+    if (!home) return in;
+    return std::string(home) + in.substr(1);
+}
+
 } // namespace
 
-// ---------------------------------------------------------------------------
-// Construction
-// ---------------------------------------------------------------------------
 AgentPanel::AgentPanel(AppContext* ctx, Deps deps)
     : ctx_(ctx), deps_(std::move(deps))
 {
     runner_ = std::make_unique<TaskRunner>();
+
+    ContextBudgetManager mgr;
+    code_budget_ = mgr.allocate(4096).code_context_tokens;
+
+    std::fprintf(stderr,
+        "[frans][agent_panel] code_budget_ = %d token (dari ContextBudgetManager)\n",
+        code_budget_);
+    std::fflush(stderr);
 }
 
 AgentPanel::~AgentPanel() {
     if (runner_) {
         runner_->requestCancel();
     }
-    // TaskRunner destructor akan join thread.
 }
 
-// ---------------------------------------------------------------------------
-// Layout
-// ---------------------------------------------------------------------------
 int AgentPanel::createWidgets(int x, int y, int w) {
     int by = y;
 
@@ -119,10 +133,21 @@ int AgentPanel::createWidgets(int x, int y, int w) {
     lbl_target->labelsize(11);
 
     target_input_ = new Fl_Input(x + 100, by, 240, kBtnH, nullptr);
-    target_input_->value("hello.py");
-    target_input_->tooltip("Entry point relatif terhadap project root.");
+    target_input_->value("");
+    target_input_->tooltip(
+        "Kosongkan untuk auto-detect dari prompt. "
+        "Isi manual untuk override entry point.");
 
-    by += kBtnH + 6;
+    by += kBtnH + 4;
+
+    // ---- Detected scope label ----
+    scope_label_ = new Fl_Box(x + 100, by, w - 100, 18,
+        "Detected scope: (isi task & root dulu)");
+    scope_label_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+    scope_label_->labelsize(10);
+    scope_label_->labelcolor(FL_DARK_GREEN);
+
+    by += 20;
 
     // ---- Buttons ----
     run_btn_ = new Fl_Button(x, by, 130, kBtnH, "Run Task");
@@ -145,6 +170,9 @@ int AgentPanel::createWidgets(int x, int y, int w) {
     by += 26;
 
     // ---- Output ----
+    // Tinggi output menyesuaikan sisa ruang yang tersedia dari caller.
+    // Caller (MainWindow) memberi y & w; kita pakai 220px sebagai default,
+    // tapi kalau ada info tinggi tab bisa lebih besar.
     const int out_h = 220;
     output_ = new Fl_Text_Display(x, by, w, out_h, nullptr);
     output_buf_ = new Fl_Text_Buffer();
@@ -159,9 +187,6 @@ int AgentPanel::createWidgets(int x, int y, int w) {
     return by;
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 void AgentPanel::setEnabled(bool on) {
     auto apply = [on](Fl_Widget* w) {
         if (!w) return;
@@ -174,18 +199,14 @@ void AgentPanel::setEnabled(bool on) {
     apply(target_input_);
     apply(run_btn_);
     apply(clear_btn_);
-
-    // Cancel button state ditangani oleh tick() berdasarkan status runner.
 }
 
 void AgentPanel::tick() {
     if (!runner_) return;
 
-    // 1. Poll progress.
     runner_->poll();
     const TaskProgress p = runner_->snapshot();
 
-    // 2. Update status label.
     {
         std::ostringstream oss;
         if (p.running) {
@@ -215,7 +236,6 @@ void AgentPanel::tick() {
         }
     }
 
-    // 3. Enable/disable buttons.
     if (run_btn_) {
         if (p.running) run_btn_->deactivate();
         else           run_btn_->activate();
@@ -225,7 +245,6 @@ void AgentPanel::tick() {
         else           cancel_btn_->deactivate();
     }
 
-    // 4. Pending confirmation?
     {
         const std::string msg = runner_->takePendingConfirmMessage();
         if (!msg.empty()) {
@@ -237,19 +256,63 @@ void AgentPanel::tick() {
         }
     }
 
-    // 5. Render result (edge-triggered).
     if (p.done && !result_shown_) {
         result_shown_ = true;
         renderResult(p);
     }
+
+    if (!p.running && ctx_ && ctx_->graph_cache) {
+        const std::string cur_task = task_input_ ? task_input_->value()    : "";
+        const std::string cur_root = root_input_ ? root_input_->value()    : "";
+        if (cur_task != last_scope_task_ || cur_root != last_scope_root_) {
+            last_scope_task_ = cur_task;
+            last_scope_root_ = cur_root;
+            updateScopeLabel(cur_task, cur_root);
+        }
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Private: startTask
-// ---------------------------------------------------------------------------
+void AgentPanel::updateScopeLabel(const std::string& task,
+                                   const std::string& root)
+{
+    if (!scope_label_) return;
+
+    if (task.empty() || root.empty() || !ctx_ || !ctx_->graph_cache) {
+        scope_label_->copy_label("Detected scope: (isi task & root dulu)");
+        scope_label_->redraw();
+        return;
+    }
+
+    const std::string resolved_root = resolveTilde(root);
+    const auto& graph = ctx_->graph_cache->getOrBuild(resolved_root);
+
+    TargetScopeResolver resolver;
+    const auto scope = resolver.resolve(task, /*user_target=*/"",
+                                        resolved_root, graph, code_budget_);
+
+    char buf[192];
+    if (scope.primary_entry.empty()) {
+        std::snprintf(buf, sizeof(buf),
+            "Detected scope: %zu file(s)  —  no entry detected (isi Target manual)",
+            scope.in_scope_files.size());
+    } else {
+        std::snprintf(buf, sizeof(buf),
+            "Detected scope: %zu file(s)  —  entry auto-detect: %s%s",
+            scope.in_scope_files.size(),
+            scope.primary_entry.c_str(),
+            scope.entry_from_user ? " (user override)" : "");
+    }
+    scope_label_->copy_label(buf);
+    scope_label_->redraw();
+}
+
 void AgentPanel::startTask() {
     if (!ctx_ || !ctx_->llama) {
         fl_message("AppContext/llama belum siap.");
+        return;
+    }
+    if (!ctx_->graph_cache) {
+        fl_message("ProjectGraphCache belum siap.");
         return;
     }
     if (runner_->isRunning()) {
@@ -257,13 +320,12 @@ void AgentPanel::startTask() {
         return;
     }
 
-    const std::string root   = root_input_ ? root_input_->value()    : "";
-    const std::string task   = task_input_ ? task_input_->value()    : "";
-    const std::string target = target_input_ ? target_input_->value(): "";
+    const std::string root_raw = root_input_ ? root_input_->value()    : "";
+    const std::string task     = task_input_ ? task_input_->value()    : "";
+    const std::string user_tgt = target_input_ ? target_input_->value(): "";
 
-    if (root.empty())   { fl_message("Project root kosong."); return; }
-    if (task.empty())   { fl_message("Task description kosong."); return; }
-    if (target.empty()) { fl_message("Target file kosong."); return; }
+    if (root_raw.empty()) { fl_message("Project root kosong."); return; }
+    if (task.empty())     { fl_message("Task description kosong."); return; }
 
     if (deps_.is_server_running && !deps_.is_server_running()) {
         fl_message("Llama server tidak berjalan.\n"
@@ -271,14 +333,8 @@ void AgentPanel::startTask() {
         return;
     }
 
-    // Resolve "~" ke $HOME.
-    std::string resolved_root = root;
-    if (!resolved_root.empty() && resolved_root[0] == '~') {
-        const char* home = std::getenv("HOME");
-        if (home) resolved_root = std::string(home) + resolved_root.substr(1);
-    }
+    const std::string resolved_root = resolveTilde(root_raw);
 
-    // Buat sandbox (membuat folder kalau belum ada).
     try {
         fs_ = std::make_unique<SandboxedFileSystem>(resolved_root);
     } catch (const std::exception& e) {
@@ -290,34 +346,57 @@ void AgentPanel::startTask() {
         fs_->root().string().c_str());
     std::fflush(stderr);
 
-    // Buat provider.
+    const std::string canonical_root = fs_->root().string();
+    const auto& graph_ref = ctx_->graph_cache->getOrBuild(canonical_root);
+
+    TargetScopeResolver resolver;
+    const auto scope = resolver.resolve(task, user_tgt, canonical_root,
+                                         graph_ref, code_budget_);
+
+    std::fprintf(stderr,
+        "[frans][agent_panel] scope resolve: %zu files, entry='%s' (from_user=%d), seeds=%zu\n",
+        scope.in_scope_files.size(),
+        scope.primary_entry.c_str(),
+        scope.entry_from_user ? 1 : 0,
+        scope.seed_symbols.size());
+    for (const auto& f : scope.in_scope_files) {
+        std::fprintf(stderr, "[frans][agent_panel]   in-scope: %s\n",
+                     f.c_str());
+    }
+    std::fflush(stderr);
+
+    if (scope.primary_entry.empty()) {
+        fl_message("Tidak bisa menentukan file target secara otomatis.\n\n"
+                   "Isi field \"Target file\" secara manual.");
+        return;
+    }
+
     LlamaCppProvider::Config cfg;
     cfg.host = deps_.get_host ? deps_.get_host() : std::string("127.0.0.1");
     cfg.port = deps_.get_port ? deps_.get_port() : 8080;
     provider_ = std::make_unique<LlamaCppProvider>(cfg);
 
-    // Reset UI state.
     result_shown_ = false;
     if (output_buf_) output_buf_->text("");
 
     if (deps_.on_activity) deps_.on_activity();
 
-    // Build Agent::Deps.
     Agent::Deps adeps;
     adeps.provider            = provider_.get();
     adeps.fs                  = fs_.get();
-    adeps.graph               = nullptr;   // MVP 7e: tanpa context selection
-    adeps.sandbox_root        = fs_->root().string();
+    adeps.graph               = &graph_ref;
+    adeps.sandbox_root        = canonical_root;
     adeps.execute_timeout_sec = 30;
-    // confirm & cancel_flag di-override oleh TaskRunner.
 
     AgentContext actx;
     actx.taskDescription    = task;
-    actx.targetRelativePath = target;
+    actx.targetRelativePath = scope.primary_entry;
+    actx.inScopeFiles       = scope.in_scope_files;
 
     std::fprintf(stderr,
-        "[frans][agent_panel] start task: root=%s target=%s\n",
-        fs_->root().string().c_str(), target.c_str());
+        "[frans][agent_panel] start task: root=%s target=%s in_scope=%zu\n",
+        canonical_root.c_str(), scope.primary_entry.c_str(),
+        scope.in_scope_files.size());
     std::fflush(stderr);
 
     if (!runner_->start(std::move(adeps), std::move(actx))) {
@@ -327,16 +406,23 @@ void AgentPanel::startTask() {
 
     if (output_buf_) {
         std::string hdr = "=== Starting agent task ===\n";
-        hdr += "Project root: " + fs_->root().string() + "\n";
-        hdr += "Target file : " + target + "\n";
-        hdr += "Task        : " + task + "\n\n";
+        hdr += "Project root: " + canonical_root + "\n";
+        hdr += "Target file : " + scope.primary_entry;
+        if (scope.entry_from_user) hdr += "  (user override)";
+        else                       hdr += "  (auto-detected)";
+        hdr += "\n";
+        hdr += "In scope    : " + std::to_string(scope.in_scope_files.size())
+             + " file(s)\n";
+        for (const auto& f : scope.in_scope_files) {
+            hdr += "              - " + f + "\n";
+        }
+        hdr += "Task        : " + task + "\n";
+        hdr += "Test-aware  : ON  (test_*.py / *_test.py akan dijalankan "
+               "sebelum entry point)\n\n";
         output_buf_->append(hdr.c_str());
     }
 }
 
-// ---------------------------------------------------------------------------
-// Private: renderResult
-// ---------------------------------------------------------------------------
 void AgentPanel::renderResult(const TaskProgress& p) {
     if (!output_buf_) return;
 
@@ -358,7 +444,23 @@ void AgentPanel::renderResult(const TaskProgress& p) {
         oss << "\nFinal error: " << p.final_error << "\n";
     }
 
-    // Attempt history.
+    // ---- Stage 7f.5 — test execution summary ----
+    oss << "\n--- Test execution (Stage 7f.5) ---\n";
+    if (p.last_test_ran) {
+        oss << "File  : " << p.last_test_file << "\n";
+        oss << "Result: " << (p.last_test_exit_code == 0 ? "PASS" : "FAIL")
+            << " (exit=" << p.last_test_exit_code << ")\n";
+        if (p.last_test_exit_code != 0) {
+            oss << "Note  : entry point NOT executed "
+                   "(test failed first — FixState will target test failure)\n";
+        } else {
+            oss << "Note  : test passed; entry point executed after.\n";
+        }
+    } else {
+        oss << "(no test file detected — entry point executed directly)\n";
+    }
+
+    // ---- Attempt history ----
     oss << "\n--- Attempt history ---\n";
     for (const auto& a : p.history) {
         oss << "Attempt " << a.attempt << ": "
@@ -370,7 +472,7 @@ void AgentPanel::renderResult(const TaskProgress& p) {
         }
     }
 
-    // Files written.
+    // ---- Files written ----
     if (!p.files.empty()) {
         oss << "\n--- Files written ---\n";
         for (const auto& f : p.files) {
@@ -379,7 +481,7 @@ void AgentPanel::renderResult(const TaskProgress& p) {
         }
     }
 
-    // Final stdout/stderr.
+    // ---- Final stdout/stderr ----
     if (!p.stdout_text.empty()) {
         oss << "\n--- Final stdout ---\n";
         oss << p.stdout_text;
@@ -400,9 +502,6 @@ void AgentPanel::renderResult(const TaskProgress& p) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Callbacks
-// ---------------------------------------------------------------------------
 void AgentPanel::onBrowseClicked(Fl_Widget*, void* data) {
     auto* self = static_cast<AgentPanel*>(data);
     const char* start = self->root_input_ ? self->root_input_->value() : nullptr;
