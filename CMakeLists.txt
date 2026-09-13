@@ -91,14 +91,33 @@ endif()
 
 # ===========================================================================
 # Main executable (UI)
+#
+# Setelah refactor main.cpp:
+#   - main.cpp          : bootstrap tipis (load config + run FLTK)
+#   - AppContext.h      : state/services non-UI (header-only)
+#   - Worker.{h,cpp}    : background task runner
+#   - MainWindow.{h,cpp}: layout + timer + wiring
+#   - MaintenancePanel  : RAM/Swap + tombol maintenance
+#   - LlamaPanel        : pilih model + start/stop + status bar
+#   - ChatView.{h,cpp}  : streaming chat (tidak berubah)
 # ===========================================================================
 add_executable(frans_ai
+    # ---- bootstrap ----
     src/main.cpp
-    src/config/AppConfig.cpp
-    src/config/LlamaServerConfig.cpp
-    src/domain/command/MacroCommand.cpp
+
+    # ---- application ----
+    src/application/Worker.cpp
     src/application/resource_guard/ResourceGuard.cpp
     src/application/resource_guard/IdleUnloadTimer.cpp
+
+    # ---- config ----
+    src/config/AppConfig.cpp
+    src/config/LlamaServerConfig.cpp
+
+    # ---- domain ----
+    src/domain/command/MacroCommand.cpp
+
+    # ---- infrastructure ----
     src/infrastructure/http/HttpProbe.cpp
     src/infrastructure/llama/ModelRegistry.cpp
     src/infrastructure/llama/LlamaServerProcessController.cpp
@@ -106,7 +125,12 @@ add_executable(frans_ai
     src/infrastructure/system/ProcessExecutor.cpp
     src/infrastructure/system/MemoryInfo.cpp
     src/infrastructure/system/SystemMaintenanceFacade.cpp
+
+    # ---- ui ----
     src/ui/ChatView.cpp
+    src/ui/MainWindow.cpp
+    src/ui/MaintenancePanel.cpp
+    src/ui/LlamaPanel.cpp
 )
 
 target_include_directories(frans_ai PRIVATE
