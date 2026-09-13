@@ -13,6 +13,7 @@
 #include "infrastructure/llama/LlamaServerProcessController.h"
 #include "infrastructure/llama/ModelRegistry.h"
 #include "infrastructure/system/SystemMaintenanceFacade.h"
+#include "ui/ChatView.h"
 
 #include <atomic>
 #include <chrono>
@@ -37,6 +38,7 @@ using frans::infrastructure::LlamaServerProcessController;
 using frans::infrastructure::ModelEntry;
 using frans::infrastructure::ModelRegistry;
 using frans::infrastructure::SystemMaintenanceFacade;
+using frans::ui::ChatView;
 
 struct DonePayload {
     bool         success = false;
@@ -51,6 +53,7 @@ struct UiState {
     std::unique_ptr<LlamaServerProcessController> llama;
     std::unique_ptr<ResourceGuard>                resource_guard;
     std::unique_ptr<IdleUnloadTimer>              idle_timer;
+    ChatView*                                     chat_view = nullptr;
 
     Fl_Box*                  mem_label    = nullptr;
     Fl_Box*                  swap_label   = nullptr;
@@ -80,16 +83,17 @@ struct UiState {
     std::string              llama_status_buf;
     std::string              llama_log_buf;
     std::string              mem_required_buf;
+
+    // Debug: cache string terakhir yang dicetak, hindari spam stderr.
+    std::string              last_llama_status_logged;
 };
 
 UiState* g_state = nullptr;
 
-constexpr int kWorkerTimeoutSec = 180;   // start llama bisa sampai 120s + cleanMemory
+constexpr int kWorkerTimeoutSec = 180;
 
 // ---------------------------------------------------------------------------
 // Forward declarations.
-// Dideklarasikan di atas supaya fungsi yang lebih awal (mis. timer callback)
-// bisa memanggilnya tanpa harus menyusun ulang urutan definisi.
 // ---------------------------------------------------------------------------
 void spawn_worker(const std::string& label,
                   std::function<CommandResult()> fn);
@@ -132,7 +136,7 @@ void set_ui_busy(bool busy, const std::string& label) {
 }
 
 // ---------------------------------------------------------------------------
-// poll_worker_result — dispatch hasil worker ke main thread.
+// poll_worker_result
 // ---------------------------------------------------------------------------
 void poll_worker_result(void* data) {
     auto* st = static_cast<UiState*>(data);
@@ -162,7 +166,7 @@ void poll_worker_result(void* data) {
 }
 
 // ---------------------------------------------------------------------------
-// watchdog — jaring pengaman kalau worker stuck.
+// watchdog
 // ---------------------------------------------------------------------------
 void watchdog_tick(void* data) {
     auto* st = static_cast<UiState*>(data);
@@ -184,7 +188,7 @@ void watchdog_tick(void* data) {
 }
 
 // ---------------------------------------------------------------------------
-// refresh_memory_display — RAM/Swap tiap 2 detik.
+// refresh_memory_display
 // ---------------------------------------------------------------------------
 void refresh_memory_display(void* data) {
     auto* st = static_cast<UiState*>(data);
@@ -209,8 +213,7 @@ void refresh_memory_display(void* data) {
 }
 
 // ---------------------------------------------------------------------------
-// update_mem_required_label — hitung ulang estimasi RAM untuk model terpilih.
-// Dipanggil saat dropdown berubah dan saat startup.
+// update_mem_required_label
 // ---------------------------------------------------------------------------
 void update_mem_required_label() {
     auto* st = g_state;
@@ -243,8 +246,10 @@ void on_model_choice_changed(Fl_Widget*, void*) {
 }
 
 // ---------------------------------------------------------------------------
-// refresh_llama_status — update label status llama-server tiap 1 detik.
-// Termasuk cek idle unload timer dan trigger stop otomatis.
+// refresh_llama_status
+//
+//   Format: "auto-unload in MM:SS | llama-server: RUNNING @ URL (pid=N)"
+//   Countdown ditempatkan di DEPAN supaya selalu terlihat.
 // ---------------------------------------------------------------------------
 void refresh_llama_status(void* data) {
     auto* st = static_cast<UiState*>(data);
@@ -253,14 +258,13 @@ void refresh_llama_status(void* data) {
         return;
     }
 
-    // --- Idle unload check (blueprint §5.4) ---
-    // Hanya trigger kalau: server running, timer expired, UI tidak busy.
-    // Karena semua dijalankan di main thread, tidak ada race antara dua tick.
+    // --- Idle unload check ---
     if (st->llama->isRunning()
         && st->idle_timer
         && st->idle_timer->isRunning()
         && st->idle_timer->expired()
-        && !st->busy.load())
+        && !st->busy.load()
+        && !(st->chat_view && st->chat_view->isStreaming()))
     {
         std::fprintf(stderr, "[frans] idle unload: timeout tercapai, stop server.\n");
         std::fflush(stderr);
@@ -275,41 +279,84 @@ void refresh_llama_status(void* data) {
         });
     }
 
+    // --- Bangun string status ---
     std::string s;
-    if (st->llama->isRunning()) {
-        s = "llama-server: RUNNING  @  " + st->llama->baseUrl()
-          + "  (pid=" + std::to_string(static_cast<int>(st->llama->pid())) + ")";
 
+    if (st->llama->isRunning()) {
+        char head[64];
         if (st->idle_timer && st->idle_timer->isRunning()) {
             const auto rem = st->idle_timer->remaining().count();
-            char tail[64];
-            std::snprintf(tail, sizeof(tail),
-                          "   |   auto-unload in %02ld:%02ld",
+            std::snprintf(head, sizeof(head),
+                          "auto-unload in %02ld:%02ld",
                           static_cast<long>(rem / 60),
                           static_cast<long>(rem % 60));
-            s += tail;
+        } else {
+            std::snprintf(head, sizeof(head), "auto-unload: OFF");
         }
-    } else {
-        s = "llama-server: stopped";
-        const auto err = st->llama->lastError();
-        if (!err.empty()) s += "   |   last error: " + err;
-    }
-    st->llama_status_buf = s;
-    if (st->llama_status_label) st->llama_status_label->copy_label(s.c_str());
 
+        const std::string url = st->llama->baseUrl();
+        const int pid = static_cast<int>(st->llama->pid());
+
+        char buf[320];
+        std::snprintf(buf, sizeof(buf),
+                      "%s   |   llama-server: RUNNING  @  %s  (pid=%d)",
+                      head, url.c_str(), pid);
+        s = buf;
+    } else {
+        char buf[320];
+        const std::string err = st->llama->lastError();
+        if (err.empty()) {
+            std::snprintf(buf, sizeof(buf),
+                          "auto-unload: OFF   |   llama-server: stopped");
+        } else {
+            std::snprintf(buf, sizeof(buf),
+                          "auto-unload: OFF   |   llama-server: stopped   |   last error: %s",
+                          err.c_str());
+        }
+        s = buf;
+    }
+
+    // --- Debug: cetak hanya saat berubah ---
+    if (s != st->last_llama_status_logged) {
+        std::fprintf(stderr, "[frans] llama_status: '%s'\n", s.c_str());
+        std::fflush(stderr);
+        st->last_llama_status_logged = s;
+    }
+
+    // --- Update widget ---
+    st->llama_status_buf = s;
+    if (st->llama_status_label) {
+        st->llama_status_label->copy_label(st->llama_status_buf.c_str());
+        st->llama_status_label->redraw();
+    }
+
+    // --- Log path label ---
     std::string logp = st->llama->logPath();
     if (!logp.empty()) {
         st->llama_log_buf = "log: " + logp;
     } else {
         st->llama_log_buf = "log: (belum ada \u2014 start server dulu)";
     }
-    if (st->llama_log_label) st->llama_log_label->copy_label(st->llama_log_buf.c_str());
+    if (st->llama_log_label) {
+        st->llama_log_label->copy_label(st->llama_log_buf.c_str());
+    }
 
     Fl::repeat_timeout(1.0, refresh_llama_status, data);
 }
 
 // ---------------------------------------------------------------------------
-// spawn_worker — definisi.
+// chat_tick — dispatch ke ChatView::tick dari timer main thread.
+// ---------------------------------------------------------------------------
+void chat_tick(void* data) {
+    auto* st = static_cast<UiState*>(data);
+    if (st->chat_view) {
+        st->chat_view->tick();
+    }
+    Fl::repeat_timeout(0.15, chat_tick, data);
+}
+
+// ---------------------------------------------------------------------------
+// spawn_worker
 // ---------------------------------------------------------------------------
 void spawn_worker(const std::string& label,
                   std::function<CommandResult()> fn) {
@@ -443,7 +490,6 @@ void on_llama_start(Fl_Widget*, void*) {
         return;
     }
 
-    // --- ResourceGuard pre-flight (blueprint §5.4) ---
     const ResourceCheck check = st->resource_guard->check(entry, entry.context_size);
 
     std::fprintf(stderr, "[frans] preflight: %s -> decision=%d\n",
@@ -506,8 +552,18 @@ void on_llama_start(Fl_Widget*, void*) {
             return CommandResult::fail(-1, prefix + "tidak ready: " + err);
         }
 
-        // Server siap → aktifkan idle unload timer.
-        if (g_state->idle_timer) g_state->idle_timer->start();
+        // Aktifkan idle unload timer SETELAH server benar-benar ready.
+        if (g_state->idle_timer) {
+            g_state->idle_timer->start();
+            std::fprintf(stderr,
+                "[frans] idle_timer->start() dipanggil (timeout=%llds)\n",
+                static_cast<long long>(g_state->idle_timer->timeout().count()));
+            std::fflush(stderr);
+        } else {
+            std::fprintf(stderr,
+                "[frans] WARNING: idle_timer null saat start!\n");
+            std::fflush(stderr);
+        }
 
         return CommandResult::ok(prefix + "running di " + llama->baseUrl()
                                  + "\nLog: " + llama->logPath());
@@ -522,7 +578,6 @@ void on_llama_stop(Fl_Widget*, void*) {
     }
 
     spawn_worker("Stop Llama Server", []() -> CommandResult {
-        // Hentikan idle timer dulu — supaya tidak balapan dengan refresh_llama_status.
         if (g_state->idle_timer) g_state->idle_timer->stop();
 
         auto* llama = g_state->llama.get();
@@ -545,7 +600,6 @@ int main(int argc, char** argv) {
     state.registry = ModelRegistry::loadFromFile("config/models.json");
     g_state        = &state;
 
-    // Bangun LlamaServerProcessController dari config.
     {
         LlamaServerProcessController::Config cc;
         cc.binary_path         = ls_cfg.binary;
@@ -556,10 +610,8 @@ int main(int argc, char** argv) {
         state.llama = std::make_unique<LlamaServerProcessController>(std::move(cc));
     }
 
-    // ResourceGuard (blueprint §5.4).
     state.resource_guard = std::make_unique<ResourceGuard>(cfg);
 
-    // Idle unload timer — timeout dari config/app.json (idle_unload_minutes).
     state.idle_timer = std::make_unique<IdleUnloadTimer>(
         std::chrono::seconds(cfg.idle_unload_minutes * 60));
 
@@ -571,13 +623,13 @@ int main(int argc, char** argv) {
 
     // -------- Header --------
     Fl_Box* title = new Fl_Box(20, 12, W - 40, 30,
-                               "frans_ai  \u2014  Stage 3: ResourceGuard + IdleUnloadTimer");
+                               "frans_ai  \u2014  Stage 4: LlamaCppProvider + Chat Streaming");
     title->labelfont(FL_BOLD);
     title->labelsize(17);
     title->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
 
     Fl_Box* sub = new Fl_Box(20, 42, W - 40, 18,
-                             "KV cache estimation + pre-flight check + auto-unload setelah idle");
+                             "SSE streaming ke /v1/chat/completions  |  markActivity() reset idle timer per token");
     sub->labelsize(11);
     sub->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
 
@@ -602,8 +654,8 @@ int main(int argc, char** argv) {
     state.status_line->labelsize(11);
     state.status_line->labelcolor(FL_DARK_BLUE);
 
-    // -------- Buttons maintenance (baris 1) --------
-    const int bh = 32;
+    // -------- Buttons maintenance --------
+    const int bh  = 32;
     const int gap = 8;
     int by = 178;
     int bx = 20;
@@ -623,7 +675,6 @@ int main(int argc, char** argv) {
     state.btn_drop = new Fl_Button(bx, by, 120, bh, "Drop Caches");
     state.btn_drop->callback(on_drop_only);
 
-    // -------- Buttons maintenance (baris 2) --------
     by += bh + 6;
     Fl_Button* sudo_btn = new Fl_Button(20, by, 120, bh, "Check sudo");
     sudo_btn->callback(on_check_sudo);
@@ -647,7 +698,6 @@ int main(int argc, char** argv) {
     ltitle->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
     by += 22;
 
-    // Model dropdown
     state.model_choice = new Fl_Choice(20, by, 480, bh, nullptr);
     for (const auto& m : state.registry.models()) {
         char lbl[256];
@@ -673,7 +723,6 @@ int main(int argc, char** argv) {
 
     by += bh + 4;
 
-    // Estimated RAM label
     state.mem_required_label = new Fl_Box(20, by, W - 40, 20,
         "Estimated RAM: (menghitung...)");
     state.mem_required_label->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
@@ -682,7 +731,6 @@ int main(int argc, char** argv) {
 
     by += 24;
 
-    // Status label
     state.llama_status_label = new Fl_Box(20, by, W - 40, 22,
         "llama-server: stopped");
     state.llama_status_label->box(FL_DOWN_BOX);
@@ -698,33 +746,80 @@ int main(int argc, char** argv) {
 
     by += 24;
 
+    // ========================================================================
+    // Section: Chat (Stage 4)
+    // ========================================================================
+    Fl_Box* ctitle = new Fl_Box(20, by, W - 40, 20, "Chat  (streaming test)");
+    ctitle->labelfont(FL_BOLD);
+    ctitle->labelsize(12);
+    ctitle->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+    by += 22;
+
+    const int chat_h = 240;
+    frans::ui::ChatDeps chat_deps;
+    chat_deps.is_server_running = []() -> bool {
+        return g_state && g_state->llama && g_state->llama->isRunning();
+    };
+    chat_deps.get_host = []() -> std::string {
+        if (!g_state || !g_state->llama) return std::string("127.0.0.1");
+        const std::string url = g_state->llama->baseUrl();
+        const auto scheme_end = url.find("://");
+        const auto colon = url.rfind(':');
+        if (scheme_end == std::string::npos || colon == std::string::npos) {
+            return std::string("127.0.0.1");
+        }
+        return url.substr(scheme_end + 3, colon - (scheme_end + 3));
+    };
+    chat_deps.get_port = []() -> int {
+        if (!g_state || !g_state->llama) return 8080;
+        const std::string url = g_state->llama->baseUrl();
+        const auto colon = url.rfind(':');
+        if (colon == std::string::npos) return 8080;
+        try { return std::stoi(url.substr(colon + 1)); } catch (...) { return 8080; }
+    };
+    chat_deps.get_model_tag = []() -> std::string {
+        if (!g_state) return {};
+        const int idx = g_state->model_choice ? g_state->model_choice->value() : -1;
+        if (idx < 0 || idx >= static_cast<int>(g_state->registry.models().size())) return {};
+        return g_state->registry.models()[static_cast<std::size_t>(idx)].id;
+    };
+    chat_deps.on_activity = []() {
+        if (g_state && g_state->idle_timer) {
+            g_state->idle_timer->markActivity();
+        }
+    };
+
+    state.chat_view = new ChatView(20, by, W - 40, chat_h, std::move(chat_deps));
+    state.chat_view->createWidgets();
+
+    by += chat_h + 10;
+
     // -------- Hints --------
     Fl_Box* hint = new Fl_Box(20, by, W - 40, cfg.window_height - by - 15,
-        "Catatan Stage 3:\n"
-        "  \u2022 ResourceGuard: sebelum start, UI hitung kebutuhan RAM = ukuran file .gguf\n"
-        "    + KV cache (rumus: 2 x layers x kv_heads x head_dim x 2 byte x context)\n"
-        "    + overhead 0.5 GB. Dibandingkan dengan MemAvailable di /proc/meminfo.\n"
-        "  \u2022 Decision: Proceed (headroom >= threshold), CleanMemoryThenProceed (mepet),\n"
-        "    Reject (tidak cukup \u2014 UI beri saran: context lebih kecil / model 3B).\n"
-        "  \u2022 Idle unload: setelah 5 menit tanpa aktivitas, server otomatis di-stop.\n"
-        "    (Stage 4: HTTP request ke /v1/chat/completions akan reset timer ini.)\n"
-        "  \u2022 Tombol 'Check Memory' = dry-run, tidak spawn apa pun.\n"
-        "  \u2022 KV cache dihitung dari blok \"architecture\" di config/models.json \u2014 kalau\n"
-        "    tidak ada, fallback estimasi kasar (ditandai di label).");
+        "Catatan Stage 4:\n"
+        "  \u2022 LlamaCppProvider memakai endpoint OpenAI-compatible /v1/chat/completions\n"
+        "    dengan stream=true \u2192 respons SSE (data: {...}\\n\\n).\n"
+        "  \u2022 Setiap token yang diterima memanggil idle_timer->markActivity() supaya\n"
+        "    server tidak auto-unload di tengah streaming panjang.\n"
+        "  \u2022 Format status llama: \"auto-unload in MM:SS | llama-server: RUNNING @ URL\"\n"
+        "    Countdown ditempatkan di DEPAN supaya selalu terlihat.\n"
+        "  \u2022 Cancel memutus SSE di tengah jalan (content_receiver return false).\n"
+        "  \u2022 Worker thread hanya menulis ke buffer di bawah mutex; widget FLTK\n"
+        "    di-update dari timer main thread (ChatView::tick setiap 150 ms).");
     hint->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE | FL_ALIGN_WRAP);
     hint->labelsize(11);
 
     win->end();
     win->show(argc, argv);
 
-    // Isi label estimasi RAM untuk model pertama.
     update_mem_required_label();
 
-    // Timer
-    Fl::add_timeout(0.4, refresh_memory_display, &state);
-    Fl::add_timeout(0.5, refresh_llama_status,   &state);
-    Fl::add_timeout(1.0, watchdog_tick,          &state);
-    Fl::add_timeout(0.2, poll_worker_result,     &state);
+    // Timers
+    Fl::add_timeout(0.4,  refresh_memory_display, &state);
+    Fl::add_timeout(0.5,  refresh_llama_status,   &state);
+    Fl::add_timeout(1.0,  watchdog_tick,          &state);
+    Fl::add_timeout(0.2,  poll_worker_result,     &state);
+    Fl::add_timeout(0.15, chat_tick,              &state);
 
     std::printf("[frans_ai] startup OK - FLTK %d.%d.%d\n",
                 FL_MAJOR_VERSION, FL_MINOR_VERSION, FL_PATCH_VERSION);
@@ -741,6 +836,7 @@ int main(int argc, char** argv) {
                 ls_cfg.host.c_str(), ls_cfg.port);
     std::printf("[frans_ai] idle unload: %d menit\n", cfg.idle_unload_minutes);
     std::printf("[frans_ai] safety margin: %d MB\n", cfg.ram_available_threshold_mb);
+    std::printf("[frans_ai] chat provider: /v1/chat/completions (SSE streaming)\n");
     std::fflush(stdout);
 
     return Fl::run();

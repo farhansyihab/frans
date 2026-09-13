@@ -29,9 +29,11 @@ add_executable(frans_ai
     src/infrastructure/http/HttpProbe.cpp
     src/infrastructure/llama/ModelRegistry.cpp
     src/infrastructure/llama/LlamaServerProcessController.cpp
+    src/infrastructure/llama/LlamaCppProvider.cpp
     src/infrastructure/system/ProcessExecutor.cpp
     src/infrastructure/system/MemoryInfo.cpp
     src/infrastructure/system/SystemMaintenanceFacade.cpp
+    src/ui/ChatView.cpp
 )
 
 target_include_directories(frans_ai PRIVATE
