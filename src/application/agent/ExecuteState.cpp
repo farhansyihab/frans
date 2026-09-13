@@ -152,6 +152,10 @@ void ExecuteState::run(AgentContext& ctx) {
     const auto t1 = std::chrono::steady_clock::now();
 
     // ---- 7. Simpan hasil ----
+    // `ran = true` menandakan runCommand BENAR-BENAR dipanggil (bukan
+    // dipotong di langkah 1-5). ObserveState memakai flag ini untuk
+    // membedakan "tidak jalan" dari "jalan tapi gagal".
+    ctx.lastExecution.ran          = true;
     ctx.lastExecution.exit_code    = proc.exit_code;
     ctx.lastExecution.timed_out    = proc.timed_out;
     ctx.lastExecution.duration_sec =

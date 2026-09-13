@@ -2,6 +2,7 @@
 #include "application/agent/GenerateState.h"
 
 #include "application/agent/AgentContext.h"
+#include "application/agent/CodeExtraction.h"
 #include "application/context_budget/ContextBudgetManager.h"
 #include "application/context_selector/ContextSelector.h"
 #include "code_intelligence/graph/DependencyGraph.h"
@@ -21,38 +22,6 @@ using frans::domain::GenOptions;
 using frans::domain::GenResult;
 
 namespace {
-
-// Ekstrak isi fenced code block pertama (``` ... ```).
-//
-// Kontrak:
-//   - Return false kalau tidak ada "```" pembuka, atau tidak ada newline
-//     setelah fence pembuka, atau tidak ada "```" penutup.
-//   - Trailing newline di dalam block dipangkas (trim dari belakang).
-//   - Bahasa (```python) di fence pembuka diabaikan — yang diambil isi
-//     setelah newline pertama.
-//
-// Dipakai HANYA oleh GenerateState; sengaja tidak diekspos di header.
-bool extractFencedCodeBlock(const std::string& modelOutput,
-                            std::string& outCode)
-{
-    const std::size_t start = modelOutput.find("```");
-    if (start == std::string::npos) return false;
-
-    const std::size_t lineEnd = modelOutput.find('\n', start);
-    if (lineEnd == std::string::npos) return false;
-
-    const std::size_t contentStart = lineEnd + 1;
-    const std::size_t end = modelOutput.find("```", contentStart);
-    if (end == std::string::npos) return false;
-
-    outCode = modelOutput.substr(contentStart, end - contentStart);
-
-    // Trim trailing newlines (biar file tidak diakhiri blank line berlebih).
-    while (!outCode.empty() && outCode.back() == '\n') {
-        outCode.pop_back();
-    }
-    return true;
-}
 
 // System prompt statis (Stage 7b). Sengaja konservatif: minta output
 // PERSIS satu fenced block, tanpa basa-basi.

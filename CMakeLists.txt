@@ -113,10 +113,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
 
     # =======================================================================
     # Stage 7b — GenerateState smoke test
-    #
-    # Butuh frans_context (ContextBudgetManager + ContextSelector) dan
-    # frans_fs (SandboxedFileSystem). LlamaCppProvider di-link langsung
-    # karena belum ada library khusus untuk infrastructure/llama.
     # =======================================================================
     add_executable(frans_generate_test
         tests/generate_smoke_test.cpp
@@ -138,6 +134,34 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
     target_compile_options(frans_generate_test PRIVATE -Wall -Wextra -Wpedantic)
 
+    # =======================================================================
+    # Stage 7d — Full agent loop smoke test (mock provider, no llama-server)
+    #
+    # Butuh frans_context karena GenerateState.cpp memakai
+    # formatContextForPrompt dari ContextSelector.h. FixState.cpp juga.
+    # Karena itu target ini hanya di-build kalau tree-sitter tersedia.
+    # =======================================================================
+    add_executable(frans_agent_loop_test
+        tests/agent_loop_smoke_test.cpp
+        src/application/agent/PlanState.cpp
+        src/application/agent/GenerateState.cpp
+        src/application/agent/ExecuteState.cpp
+        src/application/agent/ObserveState.cpp
+        src/application/agent/FixState.cpp
+        src/application/agent/Agent.cpp
+        src/application/safety/DangerCheckHandler.cpp
+        src/infrastructure/system/ProcessExecutor.cpp
+    )
+    target_link_libraries(frans_agent_loop_test PRIVATE
+        frans_context
+        frans_fs
+    )
+    target_include_directories(frans_agent_loop_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/third_party
+    )
+    target_compile_options(frans_agent_loop_test PRIVATE -Wall -Wextra -Wpedantic)
+
     set(FRANS_CODE_INTEL_ENABLED ON)
 else()
     message(WARNING
@@ -146,7 +170,8 @@ else()
         "    cd third_party && \\\n"
         "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter.git && \\\n"
         "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter-python.git\n"
-        "  Skip frans_code_intel + frans_graph_test + frans_context.")
+        "  Skip frans_code_intel + frans_graph_test + frans_context +\n"
+        "       frans_agent_loop_test.")
     set(FRANS_CODE_INTEL_ENABLED OFF)
 endif()
 
@@ -204,19 +229,12 @@ target_compile_definitions(frans_ai PRIVATE
 
 target_compile_options(frans_ai PRIVATE -Wall -Wextra -Wpedantic)
 
-# Stage 6 akan menautkan frans_ai ke frans_context (yang transitively
-# membawa frans_code_intel). Stage 5 hanya disiapkan sebagai library
-# terpisah supaya UI build tetap tidak terpengaruh kalau tree-sitter
-# belum di-clone.
 if(FRANS_CODE_INTEL_ENABLED)
     target_link_libraries(frans_ai PRIVATE frans_code_intel frans_context)
 endif()
 
 # ===========================================================================
-# Stage 7a manual smoke test
-#
-# Sengaja di paling bawah supaya tidak mengganggu urutan baca file:
-# frans_fs sudah didefinisikan di atas, di sini tinggal daftarkan test.
+# Stage 7a manual smoke test (tanpa tree-sitter)
 # ===========================================================================
 add_executable(frans_sandbox_test tests/sandbox_smoke_test.cpp)
 target_link_libraries(frans_sandbox_test PRIVATE frans_fs)
@@ -225,9 +243,7 @@ target_compile_options(frans_sandbox_test PRIVATE -Wall -Wextra -Wpedantic)
 # ===========================================================================
 # Stage 7c manual smoke test — ExecuteState + DangerCheckHandler
 #
-# TIDAK bergantung tree-sitter → selalu di-build, terlepas dari
-# FRANS_CODE_INTEL_ENABLED. Ini memudahkan iterasi pada safety layer
-# + eksekusi tanpa harus men-clone submodule.
+# TIDAK bergantung tree-sitter → selalu di-build.
 # ===========================================================================
 add_executable(frans_execute_test
     tests/execute_smoke_test.cpp
