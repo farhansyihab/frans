@@ -23,9 +23,13 @@ struct ProcessResult {
 // - timeout_sec: >0 = batas detik; jika lewat, proses di-SIGKILL.
 // - stdin_data : jika tidak kosong, ditulis ke stdin child sebelum close.
 //                Data diasumsikan kecil (< 64 KiB) — cukup untuk "3\n" dsb.
+// - working_dir: jika tidak kosong, child chdir ke sini SEBELUM exec.
+//                Dipakai ExecuteState (Stage 7c) supaya script berjalan
+//                dengan cwd = sandbox root (isolasi relatif).
 ProcessResult runCommand(const std::vector<std::string>& argv,
                          int timeout_sec = 30,
-                         const std::string& stdin_data = {});
+                         const std::string& stdin_data = {},
+                         const std::string& working_dir = {});
 
 // ---------------------------------------------------------------------------
 // spawnBackground: launch long-running process TANPA menunggu.

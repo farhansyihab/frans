@@ -221,3 +221,20 @@ endif()
 add_executable(frans_sandbox_test tests/sandbox_smoke_test.cpp)
 target_link_libraries(frans_sandbox_test PRIVATE frans_fs)
 target_compile_options(frans_sandbox_test PRIVATE -Wall -Wextra -Wpedantic)
+
+# ===========================================================================
+# Stage 7c manual smoke test — ExecuteState + DangerCheckHandler
+#
+# TIDAK bergantung tree-sitter → selalu di-build, terlepas dari
+# FRANS_CODE_INTEL_ENABLED. Ini memudahkan iterasi pada safety layer
+# + eksekusi tanpa harus men-clone submodule.
+# ===========================================================================
+add_executable(frans_execute_test
+    tests/execute_smoke_test.cpp
+    src/application/agent/ExecuteState.cpp
+    src/application/safety/DangerCheckHandler.cpp
+    src/infrastructure/system/ProcessExecutor.cpp
+)
+target_link_libraries(frans_execute_test PRIVATE frans_fs)
+target_include_directories(frans_execute_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(frans_execute_test PRIVATE -Wall -Wextra -Wpedantic)

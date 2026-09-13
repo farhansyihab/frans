@@ -33,12 +33,13 @@ std::string argvToStr(const std::vector<std::string>& argv) {
 } // namespace
 
 // ===========================================================================
-// runCommand (foreground, existing)
+// runCommand (foreground)
 // ===========================================================================
 
 ProcessResult runCommand(const std::vector<std::string>& argv,
                          int timeout_sec,
-                         const std::string& stdin_data) {
+                         const std::string& stdin_data,
+                         const std::string& working_dir) {
     ProcessResult result;
     if (argv.empty()) {
         result.stderr_text = "runCommand: argv kosong";
@@ -46,8 +47,15 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
     }
 
     const std::string cmd_str = argvToStr(argv);
-    std::fprintf(stderr, "[frans] runCommand START: %s  (timeout=%ds, stdin=%zu bytes)\n",
-                 cmd_str.c_str(), timeout_sec, stdin_data.size());
+    if (working_dir.empty()) {
+        std::fprintf(stderr,
+            "[frans] runCommand START: %s  (timeout=%ds, stdin=%zu bytes)\n",
+            cmd_str.c_str(), timeout_sec, stdin_data.size());
+    } else {
+        std::fprintf(stderr,
+            "[frans] runCommand START: %s  (cwd=%s, timeout=%ds, stdin=%zu bytes)\n",
+            cmd_str.c_str(), working_dir.c_str(), timeout_sec, stdin_data.size());
+    }
     std::fflush(stderr);
 
     int in_pipe[2]  = {-1, -1};
@@ -93,6 +101,16 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
         ::dup2(err_pipe[1], STDERR_FILENO);
         close_if_valid(out_pipe[0]); close_if_valid(out_pipe[1]);
         close_if_valid(err_pipe[0]); close_if_valid(err_pipe[1]);
+
+        // chdir HARUS setelah dup2 stderr, supaya pesan error chdir
+        // tertangkap oleh pipe (dan muncul di result.stderr_text parent).
+        if (!working_dir.empty()) {
+            if (::chdir(working_dir.c_str()) != 0) {
+                std::fprintf(stderr, "chdir(%s): %s\n",
+                             working_dir.c_str(), std::strerror(errno));
+                ::_exit(126);
+            }
+        }
 
         std::vector<char*> c_argv;
         c_argv.reserve(argv.size() + 1);
@@ -141,8 +159,9 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
 
     while (out_open || err_open) {
         if (!killed && std::chrono::steady_clock::now() > deadline) {
-            std::fprintf(stderr, "[frans] runCommand TIMEOUT (%ds) -> SIGKILL pid=%d: %s\n",
-                         effective_timeout, static_cast<int>(pid), cmd_str.c_str());
+            std::fprintf(stderr,
+                "[frans] runCommand TIMEOUT (%ds) -> SIGKILL pid=%d: %s\n",
+                effective_timeout, static_cast<int>(pid), cmd_str.c_str());
             std::fflush(stderr);
             result.timed_out = true;
             ::kill(pid, SIGKILL);
