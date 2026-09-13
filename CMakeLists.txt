@@ -23,6 +23,22 @@ find_package(nlohmann_json REQUIRED)
 find_package(Threads REQUIRED)
 
 # ===========================================================================
+# Stage 7a — FileSystemPort + SandboxedFileSystem
+#
+# Diletakkan SEBELUM add_executable(frans_ai ...) karena frans_ai
+# mereferensikan frans_fs di target_link_libraries. Forward-reference
+# sebenarnya resolve di CMake 3.16+, tapi ordering eksplisit lebih
+# aman & lebih mudah dibaca.
+# ===========================================================================
+add_library(frans_fs STATIC
+    src/infrastructure/fs/SandboxedFileSystem.cpp
+)
+target_include_directories(frans_fs PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_options(frans_fs PRIVATE -Wall -Wextra -Wpedantic)
+
+# ===========================================================================
 # Stage 5 — Code Intelligence Layer (tree-sitter, opsional)
 # Stage 6 — Context Selector + Budget Manager (butuh Code Intelligence)
 # ===========================================================================
@@ -152,6 +168,7 @@ target_link_libraries(frans_ai PRIVATE
     ${FLTK_LIBRARIES}
     nlohmann_json::nlohmann_json
     Threads::Threads
+    frans_fs
 )
 
 target_compile_definitions(frans_ai PRIVATE
@@ -167,3 +184,13 @@ target_compile_options(frans_ai PRIVATE -Wall -Wextra -Wpedantic)
 if(FRANS_CODE_INTEL_ENABLED)
     target_link_libraries(frans_ai PRIVATE frans_code_intel frans_context)
 endif()
+
+# ===========================================================================
+# Stage 7a manual smoke test
+#
+# Sengaja di paling bawah supaya tidak mengganggu urutan baca file:
+# frans_fs sudah didefinisikan di atas, di sini tinggal daftarkan test.
+# ===========================================================================
+add_executable(frans_sandbox_test tests/sandbox_smoke_test.cpp)
+target_link_libraries(frans_sandbox_test PRIVATE frans_fs)
+target_compile_options(frans_sandbox_test PRIVATE -Wall -Wextra -Wpedantic)
