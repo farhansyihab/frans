@@ -2,6 +2,7 @@
 #include "ui/MainWindow.h"
 
 #include "application/AppContext.h"
+#include "ui/AgentPanel.h"
 #include "ui/ChatView.h"
 #include "ui/LlamaPanel.h"
 #include "ui/MaintenancePanel.h"
@@ -47,30 +48,29 @@ Fl_Window* MainWindow::create() {
 
     // ---- Header ----
     Fl_Box* title = new Fl_Box(20, y, W - 40, 30,
-        "frans_ai  \u2014  Stage 4: LlamaCppProvider + Chat Streaming");
+        "frans_ai  \u2014  Stage 7e: Agent ↔ UI Integration");
     title->labelfont(FL_BOLD);
     title->labelsize(17);
     title->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
     y += 30;
 
     Fl_Box* sub = new Fl_Box(20, y, W - 40, 18,
-        "SSE streaming ke /v1/chat/completions  |  "
-        "markActivity() reset idle timer per token");
+        "Plan \u2192 Generate \u2192 Execute \u2192 Observe \u2192 Fix  |  "
+        "multi-file + DangerCheckHandler");
     sub->labelsize(11);
     sub->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
     y += 26;
 
-    // ---- Maintenance section (RAM/Swap + tombol maintenance) ----
+    // ---- Maintenance section ----
     maintenance_ = std::make_unique<MaintenancePanel>(
         ctx_, worker_.get(),
-        // ModelProvider — di-evaluasi saat user klik tombol "Check Memory".
         [this]() -> const ModelEntry* {
             return llama_panel_ ? llama_panel_->selectedModel() : nullptr;
         });
     y = maintenance_->createWidgets(20, y, W - 40);
     y += 12;
 
-    // ---- Status line (shared) ----
+    // ---- Status line ----
     status_line_ = new Fl_Box(20, y, W - 40, 20, "idle.");
     status_line_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
     status_line_->labelsize(11);
@@ -80,12 +80,44 @@ Fl_Window* MainWindow::create() {
     // ---- Llama section ----
     llama_panel_ = std::make_unique<LlamaPanel>(
         ctx_, worker_.get(),
-        // ChatStreamingFn — di-evaluasi saat refreshStatus() dari timer.
         [this]() -> bool {
             return chat_ && chat_->isStreaming();
         });
     y = llama_panel_->createWidgets(20, y, W - 40);
     y += 12;
+
+    // ---- Agent section (Stage 7e) ----
+    {
+        AgentPanel::Deps adeps;
+        adeps.is_server_running = [this]() -> bool {
+            return ctx_->llama && ctx_->llama->isRunning();
+        };
+        adeps.get_host = [this]() -> std::string {
+            if (!ctx_->llama) return "127.0.0.1";
+            const std::string url = ctx_->llama->baseUrl();
+            const auto scheme_end = url.find("://");
+            const auto colon      = url.rfind(':');
+            if (scheme_end == std::string::npos || colon == std::string::npos) {
+                return "127.0.0.1";
+            }
+            return url.substr(scheme_end + 3, colon - (scheme_end + 3));
+        };
+        adeps.get_port = [this]() -> int {
+            if (!ctx_->llama) return 8080;
+            const std::string url = ctx_->llama->baseUrl();
+            const auto colon = url.rfind(':');
+            if (colon == std::string::npos) return 8080;
+            try { return std::stoi(url.substr(colon + 1)); }
+            catch (...) { return 8080; }
+        };
+        adeps.on_activity = [this]() {
+            if (ctx_->idle_timer) ctx_->idle_timer->markActivity();
+        };
+
+        agent_panel_ = std::make_unique<AgentPanel>(ctx_, std::move(adeps));
+        y = agent_panel_->createWidgets(20, y, W - 40);
+        y += 12;
+    }
 
     // ---- Chat section ----
     Fl_Box* ctitle = new Fl_Box(20, y, W - 40, 20, "Chat  (streaming test)");
@@ -94,7 +126,7 @@ Fl_Window* MainWindow::create() {
     ctitle->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
     y += 22;
 
-    const int chat_h = 240;
+    const int chat_h = 200;
 
     ChatDeps chat_deps;
     chat_deps.is_server_running = [this]() -> bool {
@@ -133,21 +165,12 @@ Fl_Window* MainWindow::create() {
 
     // ---- Hints ----
     Fl_Box* hint = new Fl_Box(20, y, W - 40, cfg.window_height - y - 15,
-        "Catatan Stage 4:\n"
-        "  \u2022 LlamaCppProvider memakai endpoint OpenAI-compatible "
-        "/v1/chat/completions\n"
-        "    dengan stream=true \u2192 respons SSE (data: {...}\\n\\n).\n"
-        "  \u2022 Setiap token yang diterima memanggil idle_timer->markActivity() "
-        "supaya\n"
-        "    server tidak auto-unload di tengah streaming panjang.\n"
-        "  \u2022 Format status llama: \"auto-unload in MM:SS | llama-server: "
-        "RUNNING @ URL\"\n"
-        "    Countdown ditempatkan di DEPAN supaya selalu terlihat.\n"
-        "  \u2022 Cancel memutus SSE di tengah jalan (content_receiver return "
-        "false).\n"
-        "  \u2022 Worker thread hanya menulis ke buffer di bawah mutex; widget "
-        "FLTK\n"
-        "    di-update dari timer main thread (ChatView::tick setiap 150 ms).");
+        "Cara pakai Stage 7e:\n"
+        "  1. Isi project root (folder kerja Agent). Folder dibuat otomatis.\n"
+        "  2. Tulis task di kotak Task (bahasa natural).\n"
+        "  3. Target file = entry point relatif terhadap project root.\n"
+        "  4. Klik Run Task. Hasil (attempt history + file yang ditulis +\n"
+        "     stdout/stderr) muncul di kotak output di bawah tombol.");
     hint->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE | FL_ALIGN_WRAP);
     hint->labelsize(11);
 
@@ -161,6 +184,7 @@ void MainWindow::startTimers() {
     Fl::add_timeout(1.0,  onWatchdog,      this);
     Fl::add_timeout(0.2,  onWorkerPoll,    this);
     Fl::add_timeout(0.15, onChatTick,      this);
+    Fl::add_timeout(0.10, onAgentTick,     this);
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +218,12 @@ void MainWindow::onChatTick(void* data) {
     auto* self = static_cast<MainWindow*>(data);
     if (self->chat_) self->chat_->tick();
     Fl::repeat_timeout(0.15, onChatTick, data);
+}
+
+void MainWindow::onAgentTick(void* data) {
+    auto* self = static_cast<MainWindow*>(data);
+    if (self->agent_panel_) self->agent_panel_->tick();
+    Fl::repeat_timeout(0.10, onAgentTick, data);
 }
 
 // ---------------------------------------------------------------------------

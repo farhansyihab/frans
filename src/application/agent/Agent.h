@@ -3,6 +3,8 @@
 
 #include "application/agent/ExecuteState.h"   // ExecuteState::ConfirmCallback
 
+#include <atomic>
+#include <functional>
 #include <string>
 
 namespace frans::code_intelligence {
@@ -19,65 +21,37 @@ namespace frans::application {
 struct AgentContext;
 
 // Blueprint §5.7 — Agent orchestrator (Stage 7d).
-//
-// Mengorkestrasi loop:
-//
-//   PlanState
-//      │
-//      ▼
-//   ┌──────────────────────────────────────────────────┐
-//   │  attempt 0: GenerateState                        │
-//   │  attempt >0: FixState                            │
-//   │      │                                           │
-//   │      ▼                                           │
-//   │  ExecuteState                                    │
-//   │      │                                           │
-//   │      ▼                                           │
-//   │  ObserveState ─── success ──▶ return true        │
-//   │      │                                           │
-//   │      │ fail, attempt < maxAttempts               │
-//   │      └──────────────────────┐                    │
-//   └─────────────────────────────┼────────────────────┘
-//                                 ▼
-//                    return false (lastError berisi
-//                                  ringkasan kegagalan)
-//
-// Design note: state classes tetap murni — mereka tidak tahu transisi.
-// Agent yang memutuskan kapan pindah state. Ini menjaga IAgentState
-// tetap minimal dan mudah di-test satu-satu.
-//
-// Stage 7d hanya memakai satu provider (local). ProviderRouter +
-// EscalationPolicy masuk Stage 9 tanpa perubahan di Agent — cukup
-// mengganti panggilan provider di dalam Generate/FixState.
+// Stage 7e: tambah cancel flag + state transition callback.
 class Agent {
 public:
-    // Struct "bundel dependensi". Default-constructible — isi field
-    // satu per satu setelah deklarasi (pola sama seperti ChatDeps di
-    // UI layer). Semua pointer boleh null KECUALI provider & fs;
-    // Agent::run() akan menolak jalan kalau salah satu belum di-set.
+    // Progress hook: dipanggil sebelum setiap state dijalankan.
+    // `state_name` = "Plan" / "Generate" / "Fix" / "Execute" / "Observe".
+    // `attempt`    = nomor attempt (0-based).
+    //
+    // WAJIB tidak throw. Dipanggil dari thread yang menjalankan Agent.
+    using StateCallback = std::function<void(const std::string& state_name,
+                                              int attempt)>;
+
     struct Deps {
         // ---- providers & io (WAJIB) ----
         frans::domain::ILlmProvider*    provider = nullptr;
         frans::domain::IFileSystemPort* fs       = nullptr;
 
         // ---- code intelligence (opsional) ----
-        // Kalau null, GenerateState memakai graph kosong → context
-        // selection tidak menghasilkan snippet. Aman untuk task yang
-        // tidak butuh konteks project.
         const frans::code_intelligence::DependencyGraph* graph = nullptr;
 
         // ---- execution ----
-        // Absolute canonical path (biasanya SandboxedFileSystem::root()).
-        // Dipakai sebagai cwd child process.
         std::string sandbox_root;
-
-        // Callback konfirmasi untuk ExecuteState (dipanggil dari thread
-        // yang menjalankan Agent::run). Null → NeedsConfirm otomatis
-        // ditolak.
         ExecuteState::ConfirmCallback confirm;
-
-        // Timeout per attempt (detik).
         int execute_timeout_sec = 30;
+
+        // ---- orchestration hooks (Stage 7e) ----
+        // Kalau non-null dan nilainya true, Agent akan abort di batas state
+        // berikutnya. Dicek SEBELUM setiap state, bukan mid-state.
+        std::atomic<bool>* cancel_flag = nullptr;
+
+        // Callback dipanggil sebelum setiap state.
+        StateCallback on_state;
     };
 
     explicit Agent(Deps deps);
@@ -85,15 +59,7 @@ public:
     // Jalankan loop penuh. Modifikasi ctx in-place.
     // Return true kalau attempt terakhir sukses.
     //
-    // Setelah run():
-    //   ctx.success         — true/false
-    //   ctx.attempt         — nomor attempt terakhir (0-based)
-    //   ctx.attemptHistory  — semua attempt, termasuk yang sukses
-    //   ctx.lastObservation — analisis error terakhir (kalau gagal)
-    //   ctx.lastError       — ringkasan error terakhir (kalau gagal)
-    //
     // Precondition: deps.provider != nullptr && deps.fs != nullptr.
-    // Kalau tidak, run() langsung return false dengan lastError jelas.
     bool run(AgentContext& ctx);
 
 private:
