@@ -111,6 +111,33 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/python"
     )
 
+    # =======================================================================
+    # Stage 7b — GenerateState smoke test
+    #
+    # Butuh frans_context (ContextBudgetManager + ContextSelector) dan
+    # frans_fs (SandboxedFileSystem). LlamaCppProvider di-link langsung
+    # karena belum ada library khusus untuk infrastructure/llama.
+    # =======================================================================
+    add_executable(frans_generate_test
+        tests/generate_smoke_test.cpp
+        src/application/agent/GenerateState.cpp
+        src/infrastructure/llama/LlamaCppProvider.cpp
+    )
+    target_link_libraries(frans_generate_test PRIVATE
+        frans_context
+        frans_fs
+        nlohmann_json::nlohmann_json
+        Threads::Threads
+    )
+    target_include_directories(frans_generate_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/third_party
+    )
+    target_compile_definitions(frans_generate_test PRIVATE
+        FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/python"
+    )
+    target_compile_options(frans_generate_test PRIVATE -Wall -Wextra -Wpedantic)
+
     set(FRANS_CODE_INTEL_ENABLED ON)
 else()
     message(WARNING
