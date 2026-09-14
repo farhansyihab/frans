@@ -107,6 +107,9 @@ void TaskRunner::workerMain(Agent::Deps deps, AgentContext ctx) {
         progress_.elapsed_sec  =
             duration<double>(steady_clock::now() - start_time_).count();
 
+        // Stage 7g — bawa snapshot untuk DiffEngine.
+        progress_.file_snapshots = ctx.fileSnapshots;
+
         // Stage 7f.5 — bawa hasil test ke UI.
         progress_.last_test_ran       = ctx.lastTest.ran;
         progress_.last_test_file      = ctx.lastTest.test_file;
@@ -115,9 +118,10 @@ void TaskRunner::workerMain(Agent::Deps deps, AgentContext ctx) {
 
     std::fprintf(stderr,
         "[frans][task_runner] worker DONE: success=%d cancelled=%d "
-        "attempts=%zu test_ran=%d test_exit=%d\n",
+        "attempts=%zu test_ran=%d test_exit=%d snapshots=%zu\n",
         ok ? 1 : 0, was_cancelled ? 1 : 0, ctx.attemptHistory.size(),
-        ctx.lastTest.ran ? 1 : 0, ctx.lastTest.exit_code);
+        ctx.lastTest.ran ? 1 : 0, ctx.lastTest.exit_code,
+        ctx.fileSnapshots.size());
     std::fflush(stderr);
 
     running_.store(false);

@@ -34,6 +34,17 @@ target_include_directories(frans_fs PUBLIC
 target_compile_options(frans_fs PRIVATE -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
+# Stage 7g — DiffEngine (standalone, tidak butuh deps lain)
+# ===========================================================================
+add_library(frans_diff STATIC
+    src/infrastructure/system/DiffEngine.cpp
+)
+target_include_directories(frans_diff PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_options(frans_diff PRIVATE -Wall -Wextra -Wpedantic)
+
+# ===========================================================================
 # Stage 5 + 6 — tree-sitter & context (opsional)
 # ===========================================================================
 set(TS_CORE "${CMAKE_SOURCE_DIR}/third_party/tree-sitter/lib/src/lib.c")
@@ -164,7 +175,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     target_compile_options(frans_agent_loop_test PRIVATE -Wall -Wextra -Wpedantic)
 
     # -----------------------------------------------------------------------
-    # Stage 7e — TaskRunner smoke test
+    # Stage 7e + 7g — TaskRunner smoke test (+ DiffEngine.cpp per blueprint)
     # -----------------------------------------------------------------------
     add_executable(frans_task_runner_test
         tests/task_runner_smoke_test.cpp
@@ -178,6 +189,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         src/application/safety/DangerCheckHandler.cpp
         src/application/task_runner/TaskRunner.cpp
         src/infrastructure/system/ProcessExecutor.cpp
+        src/infrastructure/system/DiffEngine.cpp
     )
     target_link_libraries(frans_task_runner_test PRIVATE
         frans_context
@@ -256,6 +268,7 @@ set(FRANS_AI_SOURCES
     src/infrastructure/system/ProcessExecutor.cpp
     src/infrastructure/system/MemoryInfo.cpp
     src/infrastructure/system/SystemMaintenanceFacade.cpp
+    src/infrastructure/system/DiffEngine.cpp       # Stage 7g
 
     # ---- ui ----
     src/ui/ChatView.cpp
@@ -318,7 +331,8 @@ target_link_libraries(frans_sandbox_test PRIVATE frans_fs)
 target_compile_options(frans_sandbox_test PRIVATE -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
-# Stage 7c — ExecuteState + DangerCheckHandler smoke test
+# Stage 7c + 7g — ExecuteState + DangerCheckHandler smoke test
+#           (tambah DiffEngine.cpp per blueprint 7g §2.7)
 # ===========================================================================
 add_executable(frans_execute_test
     tests/execute_smoke_test.cpp
@@ -326,7 +340,16 @@ add_executable(frans_execute_test
     src/application/agent/MultiFileParser.cpp
     src/application/safety/DangerCheckHandler.cpp
     src/infrastructure/system/ProcessExecutor.cpp
+    src/infrastructure/system/DiffEngine.cpp
 )
 target_link_libraries(frans_execute_test PRIVATE frans_fs)
 target_include_directories(frans_execute_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(frans_execute_test PRIVATE -Wall -Wextra -Wpedantic)
+
+# ===========================================================================
+# Stage 7g — DiffEngine smoke test (standalone)
+# ===========================================================================
+add_executable(frans_diff_engine_test tests/diff_engine_smoke_test.cpp)
+target_link_libraries(frans_diff_engine_test PRIVATE frans_diff)
+target_include_directories(frans_diff_engine_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(frans_diff_engine_test PRIVATE -Wall -Wextra -Wpedantic)

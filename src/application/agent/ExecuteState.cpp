@@ -157,11 +157,13 @@ std::string moduleNameFromFile(const std::string& filename) {
 ExecuteState::ExecuteState(std::string                     sandbox_root,
                            frans::domain::IFileSystemPort& fs,
                            ConfirmCallback                 confirm,
-                           int                             default_timeout_sec)
+                           int                             default_timeout_sec,
+                           std::atomic<bool>*              cancel_flag)
     : sandbox_root_(std::move(sandbox_root)),
       fs_(fs),
       confirm_(std::move(confirm)),
-      default_timeout_sec_(default_timeout_sec > 0 ? default_timeout_sec : 30) {}
+      default_timeout_sec_(default_timeout_sec > 0 ? default_timeout_sec : 30),
+      cancel_flag_(cancel_flag) {}
 
 void ExecuteState::run(AgentContext& ctx) {
     // Reset status supaya caller tidak membaca hasil run sebelumnya.
@@ -292,7 +294,8 @@ void ExecuteState::run(AgentContext& ctx) {
                 test_argv,
                 default_timeout_sec_,
                 /*stdin_data=*/"",
-                /*working_dir=*/sandbox_root_);
+                /*working_dir=*/sandbox_root_,
+                /*cancel_flag=*/cancel_flag_);
             const auto t1 = std::chrono::steady_clock::now();
 
             ctx.lastTest.exit_code    = proc.exit_code;
@@ -314,15 +317,18 @@ void ExecuteState::run(AgentContext& ctx) {
                 // Salin hasil test ke lastExecution supaya ObserveState &
                 // FixState dapat sinyal error yang benar (tanpa tahu bahwa
                 // ini sebenarnya output test, bukan output entry point).
-                ctx.lastExecution.ran          = true;
-                ctx.lastExecution.exit_code    = proc.exit_code;
-                ctx.lastExecution.timed_out    = proc.timed_out;
-                ctx.lastExecution.duration_sec = ctx.lastTest.duration_sec;
-                ctx.lastExecution.stdout_text  = proc.stdout_text;
-                ctx.lastExecution.stderr_text  = proc.stderr_text;
+                ctx.lastExecution.ran               = true;
+                ctx.lastExecution.exit_code         = proc.exit_code;
+                ctx.lastExecution.timed_out         = proc.timed_out;
+                ctx.lastExecution.cancelled_by_user = proc.cancelled_by_user;
+                ctx.lastExecution.duration_sec      = ctx.lastTest.duration_sec;
+                ctx.lastExecution.stdout_text       = proc.stdout_text;
+                ctx.lastExecution.stderr_text       = proc.stderr_text;
 
                 ctx.success = false;
-                if (proc.timed_out) {
+                if (proc.cancelled_by_user) {
+                    ctx.lastError = "Test cancelled by user in " + test_file;
+                } else if (proc.timed_out) {
                     ctx.lastError = "Test TIMEOUT in " + test_file;
                 } else {
                     ctx.lastError = "Test failed (exit="
@@ -349,13 +355,15 @@ void ExecuteState::run(AgentContext& ctx) {
         argv,
         default_timeout_sec_,
         /*stdin_data=*/"",
-        /*working_dir=*/sandbox_root_);
+        /*working_dir=*/sandbox_root_,
+        /*cancel_flag=*/cancel_flag_);
     const auto t1 = std::chrono::steady_clock::now();
 
     // ---- 8. Simpan hasil ----
-    ctx.lastExecution.ran          = true;
-    ctx.lastExecution.exit_code    = proc.exit_code;
-    ctx.lastExecution.timed_out    = proc.timed_out;
+    ctx.lastExecution.ran               = true;
+    ctx.lastExecution.exit_code         = proc.exit_code;
+    ctx.lastExecution.timed_out         = proc.timed_out;
+    ctx.lastExecution.cancelled_by_user = proc.cancelled_by_user;
     ctx.lastExecution.duration_sec =
         std::chrono::duration<double>(t1 - t0).count();
     ctx.lastExecution.stdout_text  = proc.stdout_text;
@@ -366,9 +374,13 @@ void ExecuteState::run(AgentContext& ctx) {
         ctx.lastError.clear();
     } else {
         ctx.success = false;
-        ctx.lastError = summarizeFailure(
-            proc.exit_code, proc.timed_out,
-            proc.stdout_text, proc.stderr_text);
+        if (proc.cancelled_by_user) {
+            ctx.lastError = "Execution cancelled by user.";
+        } else {
+            ctx.lastError = summarizeFailure(
+                proc.exit_code, proc.timed_out,
+                proc.stdout_text, proc.stderr_text);
+        }
     }
 }
 

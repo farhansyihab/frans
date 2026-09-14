@@ -39,7 +39,8 @@ std::string argvToStr(const std::vector<std::string>& argv) {
 ProcessResult runCommand(const std::vector<std::string>& argv,
                          int timeout_sec,
                          const std::string& stdin_data,
-                         const std::string& working_dir) {
+                         const std::string& working_dir,
+                         std::atomic<bool>* cancel_flag) {
     ProcessResult result;
     if (argv.empty()) {
         result.stderr_text = "runCommand: argv kosong";
@@ -158,6 +159,21 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
     char buf[4096];
 
     while (out_open || err_open) {
+        // ---- Stage 7g: cek cancel_flag dulu (user-initiated) ----
+        // Ini terpisah dari timeout: kalau user klik Cancel, kita SIGKILL
+        // child, set cancelled_by_user = true. Worst-case latency: 200ms
+        // (poll timeout). Cukup responsif untuk personal use.
+        if (!killed && cancel_flag && cancel_flag->load()) {
+            std::fprintf(stderr,
+                "[frans] runCommand CANCEL (user) -> SIGKILL pid=%d: %s\n",
+                static_cast<int>(pid), cmd_str.c_str());
+            std::fflush(stderr);
+            result.cancelled_by_user = true;
+            ::kill(pid, SIGKILL);
+            killed = true;
+        }
+
+        // ---- Timeout (kita yang putuskan, bukan user) ----
         if (!killed && std::chrono::steady_clock::now() > deadline) {
             std::fprintf(stderr,
                 "[frans] runCommand TIMEOUT (%ds) -> SIGKILL pid=%d: %s\n",
@@ -215,10 +231,11 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
         result.exit_code = -1;
     }
 
-    std::fprintf(stderr, "[frans] runCommand DONE : %s  -> exit=%d%s\n",
+    std::fprintf(stderr, "[frans] runCommand DONE : %s  -> exit=%d%s%s\n",
                  cmd_str.c_str(),
                  result.exit_code,
-                 result.timed_out ? " (TIMED OUT)" : "");
+                 result.timed_out ? " (TIMED OUT)" : "",
+                 result.cancelled_by_user ? " (CANCELLED)" : "");
     std::fflush(stderr);
 
     return result;

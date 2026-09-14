@@ -6,6 +6,7 @@
 #include <FL/Fl_Box.H>
 #include <FL/Fl_Button.H>
 #include <FL/Fl_Input.H>
+#include <FL/Fl_Light_Button.H>
 #include <FL/Fl_Multiline_Input.H>
 
 #include <functional>
@@ -31,6 +32,7 @@ namespace frans::ui {
 //
 // Stage 7f: tambah ProjectGraphCache (via AppContext) + TargetScopeResolver
 // untuk auto-detect entry point dan in-scope files.
+// Stage 7g: tambah toggle [Log]/[Diff] + render unified diff setelah run.
 class AgentPanel {
 public:
     struct Deps {
@@ -59,9 +61,12 @@ private:
     static void onRunClicked(Fl_Widget*, void*);
     static void onCancelClicked(Fl_Widget*, void*);
     static void onClearClicked(Fl_Widget*, void*);
+    static void onLogViewClicked(Fl_Widget*, void*);
+    static void onDiffViewClicked(Fl_Widget*, void*);
 
     void startTask();
     void renderResult(const frans::application::TaskProgress& p);
+    void renderDiff(const frans::application::TaskProgress& p);   // Stage 7g
 
     // Stage 7f — update label "Detected scope: N file(s)" berdasarkan
     // task & root input saat ini. Dipanggil dari tick() saat idle.
@@ -81,8 +86,14 @@ private:
     Fl_Button*          cancel_btn_    = nullptr;
     Fl_Button*          clear_btn_     = nullptr;
     Fl_Box*             status_label_  = nullptr;
+
+    // Stage 7g — toggle [Log]/[Diff] + dua view yang overlap.
+    Fl_Light_Button*    btn_log_view_  = nullptr;
+    Fl_Light_Button*    btn_diff_view_ = nullptr;
     Fl_Text_Display*    output_        = nullptr;
     Fl_Text_Buffer*     output_buf_    = nullptr;
+    Fl_Text_Display*    diff_view_     = nullptr;
+    Fl_Text_Buffer*     diff_buf_      = nullptr;
 
     // ---- state ----
     std::unique_ptr<frans::application::TaskRunner>                runner_;

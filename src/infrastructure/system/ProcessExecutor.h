@@ -1,6 +1,7 @@
 // ~/AgenAI/frans/src/infrastructure/system/ProcessExecutor.h
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <vector>
 #include <sys/types.h>
@@ -12,24 +13,32 @@ namespace frans::infrastructure {
 // ---------------------------------------------------------------------------
 
 struct ProcessResult {
-    int exit_code = -1;          // -1 jika gagal fork/exec, atau 128+signal
-    bool timed_out = false;
+    int  exit_code = -1;          // -1 jika gagal fork/exec, atau 128+signal
+    bool timed_out = false;       // true jika kita kill karena lewat deadline
+    bool cancelled_by_user = false; // true jika kita kill karena cancel_flag
+                                    // (Stage 7g) — mutually exclusive dengan
+                                    // timed_out; yang duluan menang.
     std::string stdout_text;
     std::string stderr_text;
 };
 
 // Jalankan argv (argv[0] di-resolve via PATH oleh execvp) dan tunggu selesai.
 //
-// - timeout_sec: >0 = batas detik; jika lewat, proses di-SIGKILL.
-// - stdin_data : jika tidak kosong, ditulis ke stdin child sebelum close.
-//                Data diasumsikan kecil (< 64 KiB) — cukup untuk "3\n" dsb.
-// - working_dir: jika tidak kosong, child chdir ke sini SEBELUM exec.
-//                Dipakai ExecuteState (Stage 7c) supaya script berjalan
-//                dengan cwd = sandbox root (isolasi relatif).
+// - timeout_sec : >0 = batas detik; jika lewat, proses di-SIGKILL.
+// - stdin_data  : jika tidak kosong, ditulis ke stdin child sebelum close.
+//                 Data diasumsikan kecil (< 64 KiB) — cukup untuk "3\n" dsb.
+// - working_dir : jika tidak kosong, child chdir ke sini SEBELUM exec.
+//                 Dipakai ExecuteState (Stage 7c) supaya script berjalan
+//                 dengan cwd = sandbox root (isolasi relatif).
+// - cancel_flag : Stage 7g. Kalau non-null dan nilainya true, SIGKILL
+//                 child di iterasi polling berikutnya (worst-case ~200ms
+//                 latency karena poll timeout). Backward compatible:
+//                 default nullptr = perilaku lama.
 ProcessResult runCommand(const std::vector<std::string>& argv,
                          int timeout_sec = 30,
                          const std::string& stdin_data = {},
-                         const std::string& working_dir = {});
+                         const std::string& working_dir = {},
+                         std::atomic<bool>* cancel_flag = nullptr);
 
 // ---------------------------------------------------------------------------
 // spawnBackground: launch long-running process TANPA menunggu.

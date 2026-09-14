@@ -20,15 +20,22 @@ enum class TaskComplexity {
 };
 
 // Hasil satu langkah eksekusi (Stage 7c — ExecuteState).
+//
+// Stage 7g: tambah `cancelled_by_user`. Field ini mutually exclusive
+// dengan `timed_out` — yang duluan terdeteksi di polling loop ProcessExecutor
+// yang menang. `is_success()` sekarang memperhitungkan keduanya.
 struct ExecutionOutcome {
-    bool        ran          = false;
-    int         exit_code    = -1;
-    bool        timed_out    = false;
-    double      duration_sec = 0.0;
+    bool        ran               = false;
+    int         exit_code         = -1;
+    bool        timed_out         = false;
+    bool        cancelled_by_user = false;   // Stage 7g
+    double      duration_sec      = 0.0;
     std::string stdout_text;
     std::string stderr_text;
 
-    bool is_success() const { return ran && exit_code == 0 && !timed_out; }
+    bool is_success() const {
+        return ran && exit_code == 0 && !timed_out && !cancelled_by_user;
+    }
     void reset() { *this = ExecutionOutcome{}; }
 };
 

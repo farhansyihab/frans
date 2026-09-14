@@ -1,6 +1,7 @@
 // ~/AgenAI/frans/tests/task_runner_smoke_test.cpp
 //
-// Smoke test Stage 7e: TaskRunner + multi-file parser + cancellation.
+// Smoke test Stage 7e + 7g: TaskRunner + multi-file parser +
+// cancellation (state-boundary & mid-execute) + snapshot capture.
 // Tidak butuh llama-server (MockProvider).
 //
 // Skenario:
@@ -8,7 +9,9 @@
 //   2. Single-file happy path via TaskRunner.
 //   3. Multi-file happy path via TaskRunner.
 //   4. Buggy → fix via TaskRunner.
-//   5. Cancellation.
+//   5. Cancellation (state boundary — selama LLM call).
+//   6. [7g] Cancellation mid-execute (proses panjang di-SIGKILL).
+//   7. [7g] Snapshot capture di TaskProgress.
 
 #include "application/agent/AgentContext.h"
 #include "application/agent/MultiFileParser.h"
@@ -107,7 +110,7 @@ public:
 std::string makeSandbox(const std::string& tag) {
     const std::string p =
         (fs::temp_directory_path()
-         / ("frans_7e_test_" + tag + "_" + std::to_string(::getpid()))).string();
+         / ("frans_7g_test_" + tag + "_" + std::to_string(::getpid()))).string();
     std::error_code ec;
     fs::remove_all(p, ec);
     return p;
@@ -129,7 +132,7 @@ TaskProgress runSync(TaskRunner& runner) {
 } // namespace
 
 int main() {
-    std::printf("=== frans_ai task runner smoke test (Stage 7e) ===\n");
+    std::printf("=== frans_ai task runner smoke test (Stage 7e + 7g) ===\n");
     std::printf("Mock provider — llama-server TIDAK diperlukan.\n");
 
     // =====================================================================
@@ -238,8 +241,9 @@ int main() {
 
         TaskProgress p = runSync(runner);
 
-        std::printf("  success=%d attempts=%zu files=%zu\n",
-                    p.success ? 1 : 0, p.history.size(), p.files.size());
+        std::printf("  success=%d attempts=%zu files=%zu snapshots=%zu\n",
+                    p.success ? 1 : 0, p.history.size(), p.files.size(),
+                    p.file_snapshots.size());
         std::printf("  stdout='%s'\n", p.stdout_text.c_str());
 
         check(p.done, "task done");
@@ -248,6 +252,12 @@ int main() {
         check(p.files.size() == 1, "1 file");
         check(p.files[0].relative_path == "single.py", "path benar");
         check(p.stdout_text == "hello from single\n", "stdout benar");
+
+        // Stage 7g — snapshot file baru = "".
+        check(p.file_snapshots.count("single.py") == 1,
+              "snapshot untuk single.py tercatat");
+        check(p.file_snapshots["single.py"] == "",
+              "snapshot file baru = string kosong");
     }
 
     // =====================================================================
@@ -351,20 +361,15 @@ int main() {
     }
 
     // =====================================================================
-    // Test 5 — Cancellation
-    //
-    // MockProvider sleep 300ms per call. Task timeout 2s. Kami cancel
-    // setelah 100ms. Worker harus abort sebelum attempt berikutnya.
+    // Test 5 — Cancellation (state boundary — selama LLM call)
     // =====================================================================
-    banner("TaskRunner — cancellation");
+    banner("TaskRunner — cancellation (state boundary)");
     {
         const std::string sandbox = makeSandbox("cancel");
         SandboxedFileSystem sb(sandbox);
 
         MockProvider provider;
         provider.sleep_ms_per_call = 300;
-        // Response yang akan menghasilkan loop panjang, tapi kita cancel
-        // sebelum selesai.
         provider.responses = {
             "```python\nraise RuntimeError('will loop')\n```\n",
             "```python\nraise RuntimeError('still bad')\n```\n",
@@ -384,7 +389,6 @@ int main() {
         TaskRunner runner;
         check(runner.start(adeps, actx), "start task");
 
-        // Tunggu 400ms, lalu request cancel.
         std::this_thread::sleep_for(std::chrono::milliseconds(400));
         runner.requestCancel();
 
@@ -397,8 +401,106 @@ int main() {
         check(p.done, "task done");
         check(!p.success, "not success");
         check(p.cancelled, "cancelled flag set");
-        // Attempthistory harus < maxAttempts karena cancel dicek di batas state.
         check(p.history.size() < 3, "attemptHistory lebih pendek dari maxAttempts");
+    }
+
+    // =====================================================================
+    // Test 6 — [7g] Cancellation mid-execute (SIGKILL proses panjang)
+    // =====================================================================
+    banner("TaskRunner — cancellation mid-execute (Stage 7g)");
+    {
+        const std::string sandbox = makeSandbox("cancel_exec");
+        SandboxedFileSystem sb(sandbox);
+
+        MockProvider provider;
+        provider.responses = {
+            // Script yang akan jalan 30 detik kalau tidak di-cancel.
+            "```python\nimport time\ntime.sleep(30)\nprint('never')\n```\n",
+        };
+
+        Agent::Deps adeps;
+        adeps.provider            = &provider;
+        adeps.fs                  = &sb;
+        adeps.sandbox_root        = sb.root().string();
+        adeps.execute_timeout_sec = 30;   // panjang, kita mau cancel sebelum ini
+
+        AgentContext actx;
+        actx.taskDescription    = "sleep forever";
+        actx.targetRelativePath = "sleep.py";
+
+        TaskRunner runner;
+        check(runner.start(adeps, actx), "start task");
+
+        // Tunggu 800ms supaya script sudah pasti jalan di dalam subprocess.
+        std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        runner.requestCancel();
+
+        TaskProgress p = runSync(runner);
+
+        std::printf("  done=%d cancelled=%d success=%d elapsed=%.2fs attempts=%zu\n",
+                    p.done ? 1 : 0, p.cancelled ? 1 : 0, p.success ? 1 : 0,
+                    p.elapsed_sec, p.history.size());
+
+        check(p.done, "task done");
+        check(!p.success, "not success");
+        check(p.cancelled, "cancelled flag set");
+        // Kalau tidak cancel responsif, ini akan ~30s (timeout).
+        // Cancellation 7g harus SIGKILL dalam < 5s.
+        check(p.elapsed_sec < 5.0,
+              "elapsed < 5s (bukan timeout 30s — cancel responsif)");
+        // Attempt record ada (Observe + record dijalankan setelah execute).
+        check(p.history.size() >= 1, "attempt record tercatat");
+        if (!p.history.empty()) {
+            std::printf("  attempt 0 observation: %s\n",
+                        p.history[0].observation.c_str());
+            check(p.history[0].observation.find("cancelled") != std::string::npos
+                  || p.history[0].observation.find("Cancelled") != std::string::npos,
+                  "observation attempt 0 menyebut cancel");
+        }
+    }
+
+    // =====================================================================
+    // Test 7 — [7g] Snapshot capture untuk file yang sudah ada sebelumnya
+    // =====================================================================
+    banner("TaskRunner — snapshot capture (pre-existing file)");
+    {
+        const std::string sandbox = makeSandbox("snapshot");
+        SandboxedFileSystem sb(sandbox);
+
+        // Pre-create existing file di disk.
+        sb.writeFile("existing.py", "print('old')\n");
+
+        MockProvider provider;
+        provider.responses = {
+            "File: existing.py\n"
+            "```python\n"
+            "print('new')\n"
+            "```\n",
+        };
+
+        Agent::Deps adeps;
+        adeps.provider            = &provider;
+        adeps.fs                  = &sb;
+        adeps.sandbox_root        = sb.root().string();
+        adeps.execute_timeout_sec = 5;
+
+        AgentContext actx;
+        actx.taskDescription    = "change to new";
+        actx.targetRelativePath = "existing.py";
+
+        TaskRunner runner;
+        check(runner.start(adeps, actx), "start task");
+
+        TaskProgress p = runSync(runner);
+
+        std::printf("  success=%d snapshots=%zu\n",
+                    p.success ? 1 : 0, p.file_snapshots.size());
+
+        check(p.success, "success");
+        check(p.file_snapshots.count("existing.py") == 1,
+              "snapshot untuk existing.py tercatat");
+        check(p.file_snapshots["existing.py"] == "print('old')\n",
+              "snapshot berisi konten SEBELUM run");
     }
 
     std::printf("\n=== %s ===\n",

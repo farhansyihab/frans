@@ -23,12 +23,17 @@ using frans::domain::GenResult;
 
 namespace {
 
+// Stage 7g+1 (patch): perkuat instruksi serupa GenerateState.
+// "Output the FULL corrected file(s)" terlalu ambigu — model bisa
+// menginterpretasikan sebagai "semua file yang kamu lihat". Sekarang
+// eksplisit: hanya file yang ada di "Your previous attempt" di
+// user message.
 const char* kFixSystemPrompt =
     "You are frans_ai, a local coding assistant. Your previous attempt at "
     "the task FAILED. Analyze the error carefully and produce a corrected "
     "version.\n"
     "\n"
-    "Use EXACTLY this format for EACH file:\n"
+    "Use EXACTLY this format for EACH file you output:\n"
     "\n"
     "File: <relative_path>\n"
     "```<language>\n"
@@ -37,6 +42,15 @@ const char* kFixSystemPrompt =
     "\n"
     "Rules:\n"
     "- Fix the SPECIFIC problem described in the error observation.\n"
+    "- Output ONLY files that appeared in \"Your previous attempt\" below, "
+    "  OR new files (paths not present anywhere in the project) that the "
+    "  fix explicitly requires.\n"
+    "- Do NOT output files shown as project context if they were NOT part "
+    "  of your previous attempt. Those files were correct as-is — the user "
+    "  did NOT ask for changes there.\n"
+    "- Preserve ALL existing functions/classes in files you output, unless "
+    "  the fix explicitly requires changing them. Edit surgically — do not "
+    "  rewrite files from scratch.\n"
     "- Do NOT invent unrelated changes.\n"
     "- Preserve the original intent and any existing style.\n"
     "- Output the FULL corrected file(s), not fragments.\n"
@@ -105,7 +119,9 @@ std::string buildUserMessage(const AgentContext& ctx,
 
     msg += "=== Your task ===\n";
     msg += "Produce the full corrected file(s) using the SAME format. "
-           "Fix the specific problem described above.";
+           "Fix the specific problem described above. Output ONLY files "
+           "that were part of \"Your previous attempt\" above — do not "
+           "touch files that appeared only as project context.";
 
     return msg;
 }
@@ -148,7 +164,8 @@ void FixState::run(AgentContext& ctx) {
     std::string systemPrompt = kFixSystemPrompt;
     if (!ctx.contextSnippets.empty()) {
         systemPrompt +=
-            "\nProject context (for style/signature consistency):\n\n";
+            "\nProject context (for style/signature consistency, "
+            "READ-ONLY — do NOT output these files):\n\n";
         systemPrompt += formatContextForPrompt(ctx.contextSnippets);
     }
 

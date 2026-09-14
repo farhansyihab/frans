@@ -12,6 +12,7 @@
 #include "infrastructure/fs/SandboxedFileSystem.h"
 #include "infrastructure/llama/LlamaCppProvider.h"
 #include "infrastructure/llama/LlamaServerProcessController.h"
+#include "infrastructure/system/DiffEngine.h"
 
 #include <FL/Fl.H>
 #include <FL/Fl_File_Chooser.H>
@@ -169,11 +170,20 @@ int AgentPanel::createWidgets(int x, int y, int w) {
     status_label_->labelsize(11);
     by += 26;
 
-    // ---- Output ----
-    // Tinggi output menyesuaikan sisa ruang yang tersedia dari caller.
-    // Caller (MainWindow) memberi y & w; kita pakai 220px sebagai default,
-    // tapi kalau ada info tinggi tab bisa lebih besar.
+    // ---- Stage 7g: toggle [Log] / [Diff] ----
+    constexpr int kToggleH = 22;
+    btn_log_view_ = new Fl_Light_Button(x, by, 70, kToggleH, "Log");
+    btn_log_view_->value(1);   // Log aktif secara default
+    btn_log_view_->callback(onLogViewClicked, this);
+
+    btn_diff_view_ = new Fl_Light_Button(x + 76, by, 70, kToggleH, "Diff");
+    btn_diff_view_->callback(onDiffViewClicked, this);
+
+    by += kToggleH + 2;
+
+    // ---- Output / Diff (overlapping, satu terlihat) ----
     const int out_h = 220;
+
     output_ = new Fl_Text_Display(x, by, w, out_h, nullptr);
     output_buf_ = new Fl_Text_Buffer();
     output_->buffer(output_buf_);
@@ -181,6 +191,15 @@ int AgentPanel::createWidgets(int x, int y, int w) {
     output_->textsize(10);
     output_->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
     output_->color(FL_WHITE);
+
+    diff_view_ = new Fl_Text_Display(x, by, w, out_h, nullptr);
+    diff_buf_ = new Fl_Text_Buffer();
+    diff_view_->buffer(diff_buf_);
+    diff_view_->textfont(FL_COURIER);
+    diff_view_->textsize(10);
+    diff_view_->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
+    diff_view_->color(FL_WHITE);
+    diff_view_->hide();   // default: Log yang tampil
 
     by += out_h + 4;
 
@@ -259,6 +278,7 @@ void AgentPanel::tick() {
     if (p.done && !result_shown_) {
         result_shown_ = true;
         renderResult(p);
+        renderDiff(p);   // Stage 7g
     }
 
     if (!p.running && ctx_ && ctx_->graph_cache) {
@@ -378,6 +398,7 @@ void AgentPanel::startTask() {
 
     result_shown_ = false;
     if (output_buf_) output_buf_->text("");
+    if (diff_buf_)   diff_buf_->text("");
 
     if (deps_.on_activity) deps_.on_activity();
 
@@ -418,7 +439,9 @@ void AgentPanel::startTask() {
         }
         hdr += "Task        : " + task + "\n";
         hdr += "Test-aware  : ON  (test_*.py / *_test.py akan dijalankan "
-               "sebelum entry point)\n\n";
+               "sebelum entry point)\n";
+        hdr += "Stage 7g    : cancel responsif (SIGKILL via cancel_flag) + "
+               "diff view\n\n";
         output_buf_->append(hdr.c_str());
     }
 }
@@ -502,6 +525,51 @@ void AgentPanel::renderResult(const TaskProgress& p) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Stage 7g — render unified diff dari snapshot vs konten akhir
+// ---------------------------------------------------------------------------
+void AgentPanel::renderDiff(const TaskProgress& p) {
+    if (!diff_buf_) return;
+
+    diff_buf_->text("");
+
+    if (p.files.empty()) {
+        diff_buf_->append(
+            "(no files written in this run — tidak ada diff)\n");
+        return;
+    }
+
+    std::size_t files_with_diff = 0;
+
+    for (const auto& f : p.files) {
+        std::string old_content;
+        auto it = p.file_snapshots.find(f.relative_path);
+        if (it != p.file_snapshots.end()) {
+            old_content = it->second;
+        }
+
+        const auto diff =
+            frans::infrastructure::computeDiff(
+                f.relative_path, old_content, f.content);
+
+        if (diff.added_count > 0 || diff.removed_count > 0
+            || diff.is_new_file || diff.is_deleted) {
+            ++files_with_diff;
+        }
+
+        const std::string formatted =
+            frans::infrastructure::formatDiff(diff);
+        diff_buf_->append(formatted.c_str());
+        diff_buf_->append("\n");
+    }
+
+    if (files_with_diff == 0) {
+        diff_buf_->append(
+            "(tidak ada perubahan bersih — semua file yang ditulis "
+            "identik dengan snapshot)\n");
+    }
+}
+
 void AgentPanel::onBrowseClicked(Fl_Widget*, void* data) {
     auto* self = static_cast<AgentPanel*>(data);
     const char* start = self->root_input_ ? self->root_input_->value() : nullptr;
@@ -527,7 +595,27 @@ void AgentPanel::onClearClicked(Fl_Widget*, void* data) {
     auto* self = static_cast<AgentPanel*>(data);
     if (self->runner_ && self->runner_->isRunning()) return;
     if (self->output_buf_) self->output_buf_->text("");
+    if (self->diff_buf_)   self->diff_buf_->text("");
     self->result_shown_ = false;
+}
+
+// ---------------------------------------------------------------------------
+// Stage 7g — toggle callbacks
+// ---------------------------------------------------------------------------
+void AgentPanel::onLogViewClicked(Fl_Widget*, void* data) {
+    auto* self = static_cast<AgentPanel*>(data);
+    if (self->output_)    self->output_->show();
+    if (self->diff_view_) self->diff_view_->hide();
+    if (self->btn_log_view_)  self->btn_log_view_->value(1);
+    if (self->btn_diff_view_) self->btn_diff_view_->value(0);
+}
+
+void AgentPanel::onDiffViewClicked(Fl_Widget*, void* data) {
+    auto* self = static_cast<AgentPanel*>(data);
+    if (self->output_)    self->output_->hide();
+    if (self->diff_view_) self->diff_view_->show();
+    if (self->btn_log_view_)  self->btn_log_view_->value(0);
+    if (self->btn_diff_view_) self->btn_diff_view_->value(1);
 }
 
 } // namespace frans::ui

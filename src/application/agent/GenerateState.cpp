@@ -35,6 +35,17 @@ namespace {
 // tahu file apa saja yang dianggap relevan — membantu model
 // menghindari menulis file yang tidak perlu, dan menyelaraskan
 // pemahaman dengan ContextSelector.
+//
+// Stage 7g+1 (patch): perkuat instruksi supaya model TIDAK rewrite file
+// di luar scope. Sebelumnya baris "- You MAY output additional files
+// (tests, helpers)." secara literal meng-invite model menulis file apa
+// pun yang dia lihat di "in scope" — perilaku observed di real run
+// dengan 3B dan 7B: model rewrite test.py padahal task tidak minta.
+// Perbaikan:
+//   1. Buang "MAY output additional files" — ganti aturan eksplisit
+//      "output ONLY entry point + file yang disebut eksplisit di task".
+//   2. Tambah instruksi "preserve existing functions, edit surgically".
+//   3. Anotasi per-file: [ENTRY POINT] vs [READ-ONLY].
 std::string buildSystemPrompt(const std::string& target_path,
                               const std::string& context_block,
                               const std::vector<std::string>& in_scope_files)
@@ -56,7 +67,19 @@ std::string buildSystemPrompt(const std::string& target_path,
         "- The ENTRY POINT file MUST have path: ";
     p += target_path;
     p += "\n"
-         "- You MAY output additional files (tests, helpers).\n"
+         "- Output ONLY the following files:\n"
+         "  · the ENTRY POINT file, AND\n"
+         "  · any NEW file (path not yet in the project) that the task "
+         "explicitly asks you to create.\n"
+         "- Do NOT output any other file, even if it appears in the "
+         "\"in scope\" list below. Files marked [READ-ONLY] are shown only "
+         "as context so you understand the surrounding code — outputting "
+         "them will break the user's project and the user did NOT ask for "
+         "changes there.\n"
+         "- When the ENTRY POINT is an EXISTING file, you MUST preserve "
+         "ALL existing functions/classes in it unless the task explicitly "
+         "asks to remove them. Edit surgically — do not rewrite the file "
+         "from scratch.\n"
          "- Each file must be COMPLETE and self-contained (no fragments).\n"
          "- Do NOT write any text before the first \"File:\" line, between "
          "blocks, or after the last block.\n"
@@ -69,9 +92,16 @@ std::string buildSystemPrompt(const std::string& target_path,
         for (const auto& f : in_scope_files) {
             p += "  - ";
             p += f;
-            if (f == target_path) p += "  [ENTRY POINT]";
+            if (f == target_path) {
+                p += "   [ENTRY POINT]";
+            } else {
+                p += "   [READ-ONLY — do NOT include in your output]";
+            }
             p += "\n";
         }
+        p += "\nReminder: files marked [READ-ONLY] are context only. "
+             "Your output MUST contain ONLY the entry point (and any new "
+             "file the task explicitly asks to create).\n";
     }
 
     if (!context_block.empty()) {

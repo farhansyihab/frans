@@ -106,6 +106,16 @@ std::vector<CodeSnippet> DependencyGraph::getRelatedSymbols(
     return out;
 }
 
+std::vector<std::string> DependencyGraph::allFilePaths() const {
+    std::vector<std::string> out;
+    out.reserve(files_.size());
+    // std::map iterasi by key (sorted), jadi hasil sudah alfabetis.
+    for (const auto& [path, _] : files_) {
+        out.push_back(path);
+    }
+    return out;
+}
+
 void DependencyGraph::dumpTo(std::ostream& os) const {
     os << "DependencyGraph: " << fileCount() << " files, "
        << symbolCount() << " symbols, " << edgeCount() << " edges\n";

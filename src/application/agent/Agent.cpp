@@ -112,23 +112,23 @@ bool Agent::run(AgentContext& ctx) {
         }
 
         // ---- Execute ----
+        // Stage 7g: pass cancel_flag supaya runCommand bisa SIGKILL child
+        // saat user klik Cancel (bukan cuma menunggu timeout).
         {
             announce("Execute", attempt);
             ExecuteState exec(deps_.sandbox_root,
                               *deps_.fs,
                               deps_.confirm,
-                              deps_.execute_timeout_sec);
+                              deps_.execute_timeout_sec,
+                              deps_.cancel_flag);
             exec.run(ctx);
             logStep("Execute", attempt, ctx);
         }
 
-        if (is_cancelled()) {
-            ctx.success = false;
-            ctx.lastError = "Cancelled by user.";
-            return false;
-        }
-
         // ---- Observe ----
+        // Stage 7g: SELALU jalan, termasuk saat cancelled_by_user — supaya
+        // observation-nya terekam dengan jelas (bukan langsung abort tanpa
+        // jejak). Cancel tetap dihormati di bawah, setelah record tercatat.
         {
             announce("Observe", attempt);
             ObserveState observe;
@@ -144,6 +144,18 @@ bool Agent::run(AgentContext& ctx) {
             rec.timed_out   = ctx.lastExecution.timed_out;
             rec.observation = ctx.lastObservation;
             ctx.attemptHistory.push_back(std::move(rec));
+        }
+
+        // Cancel check — dipindah ke sini (setelah Observe + record) supaya
+        // cancel-by-execute tetap menghasilkan attempt record yang informatif.
+        if (is_cancelled()) {
+            ctx.success = false;
+            ctx.lastError = "Cancelled by user.";
+            std::fprintf(stderr,
+                "[frans][agent] CANCELLED after attempt %d record.\n",
+                attempt);
+            std::fflush(stderr);
+            return false;
         }
 
         if (ctx.success) return true;

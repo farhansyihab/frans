@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -31,6 +32,11 @@ struct TaskProgress {
     std::string                stdout_text;
     std::string                stderr_text;
     std::string                final_error;
+
+    // ---- Stage 7g — snapshot untuk DiffEngine ----
+    // Path relatif → konten file SEBELUM run ini pertama kali menyentuhnya.
+    // File baru = value kosong. File yang tidak disentuh = tidak ada di map.
+    std::map<std::string, std::string> file_snapshots;
 
     // ---- Stage 7f.5 — test-aware execution ----
     // `last_test_ran == false` → tidak ada test file terdeteksi.

@@ -60,6 +60,16 @@ public:
         std::vector<std::pair<std::string, std::size_t>>>&
     allSymbols() const { return symbol_index_; }
 
+    // Stage 7g+1 (patch) — list semua file path yang ada di graph
+    // (termasuk file yang tidak punya symbol/snippet sama sekali).
+    // Hasil di-sort alfabetis (files_ adalah std::map, jadi iterasi
+    // sudah sorted by key).
+    //
+    // Dipakai TargetScopeResolver untuk mencocokkan nama file yang
+    // disebut eksplisit di task description dengan file yang benar-benar
+    // ada di graph.
+    std::vector<std::string> allFilePaths() const;
+
     // Dump ringkas (untuk smoke test / terminal).
     void dumpTo(std::ostream& os) const;
 

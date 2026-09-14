@@ -245,6 +245,17 @@ void ObserveState::run(AgentContext& ctx) {
         return;
     }
 
+    // ---- Kasus 3.5: cancelled by user (Stage 7g) ----
+    // CATATAN: kasus ini dicek SETELAH timeout karena mutually exclusive,
+    // tapi DIPISAH dari fallback umum supaya observation-nya jelas dan
+    // FixState tidak sia-sia mencoba memperbaiki.
+    if (ctx.lastExecution.cancelled_by_user) {
+        ctx.lastObservation =
+            "Execution cancelled by user (SIGKILL sent before completion).";
+        ctx.lastError = "Execution cancelled by user.";
+        return;
+    }
+
     // ---- Kasus 4: SyntaxError (muncul sebelum traceback) ----
     const std::string& err = ctx.lastExecution.stderr_text;
 
