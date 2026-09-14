@@ -12,12 +12,18 @@ namespace frans::domain {
 
 // Hasil satu panggilan generate. `text` = respons lengkap (setelah stream
 // selesai); untuk streaming, `text` juga diisi penuh sebagai akumulasi.
+//
+// Stage 8: tambah `cost_usd` (default 0.0 — provider lokal selalu 0).
+// Provider berbayar (DeepSeek) mengisi field ini setelah generation selesai
+// berdasarkan usage prompt_tokens/completion_tokens yang dilaporkan server.
+// Stage 9 DailyBudgetGuard akan membaca field ini untuk akumulasi biaya.
 struct GenResult {
     bool        success           = false;
     std::string text;
     int         prompt_tokens     = 0;
     int         completion_tokens = 0;
     double      elapsed_sec       = 0.0;
+    double      cost_usd          = 0.0;   // Stage 8 — 0.0 untuk provider lokal
     std::string error;   // terisi kalau success == false
 };
 

@@ -1,6 +1,7 @@
 # ~/AgenAI/frans/CMakeLists.txt
 cmake_minimum_required(VERSION 3.16)
 # Stage 5 — tambah C untuk compile tree-sitter core + grammar Python.
+# Stage 8 — tambah OpenSSL (opsional) untuk HTTPS (DeepSeek).
 project(frans_ai LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -21,6 +22,25 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(FLTK REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(Threads REQUIRED)
+
+# ===========================================================================
+# Stage 8 — OpenSSL (opsional). Diperlukan untuk DeepSeekProvider (HTTPS).
+# Kalau tidak ditemukan, build tetap lanjut — DeepSeekProvider akan fail
+# runtime dengan pesan jelas, dan LlamaCppProvider (HTTP lokal) tetap jalan.
+# ===========================================================================
+find_package(OpenSSL QUIET)
+set(FRANS_HTTPLIB_DEFS "")
+set(FRANS_OPENSSL_LIBS "")
+if(OpenSSL_FOUND)
+    message(STATUS "OpenSSL ditemukan — HTTPS (DeepSeekProvider) enabled")
+    list(APPEND FRANS_HTTPLIB_DEFS CPPHTTPLIB_OPENSSL_SUPPORT)
+    list(APPEND FRANS_OPENSSL_LIBS OpenSSL::SSL OpenSSL::Crypto)
+else()
+    message(WARNING
+        "OpenSSL TIDAK ditemukan — DeepSeekProvider (HTTPS) akan fail runtime.\n"
+        "  Install: sudo apt install libssl-dev\n"
+        "  Lalu reconfigure & rebuild.")
+endif()
 
 # ===========================================================================
 # Stage 7a — FileSystemPort + SandboxedFileSystem
@@ -138,6 +158,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         frans_fs
         nlohmann_json::nlohmann_json
         Threads::Threads
+        ${FRANS_OPENSSL_LIBS}
     )
     target_include_directories(frans_generate_test PRIVATE
         ${CMAKE_SOURCE_DIR}/src
@@ -145,6 +166,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
     target_compile_definitions(frans_generate_test PRIVATE
         FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/python"
+        ${FRANS_HTTPLIB_DEFS}
     )
     target_compile_options(frans_generate_test PRIVATE -Wall -Wextra -Wpedantic)
 
@@ -175,7 +197,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     target_compile_options(frans_agent_loop_test PRIVATE -Wall -Wextra -Wpedantic)
 
     # -----------------------------------------------------------------------
-    # Stage 7e + 7g — TaskRunner smoke test (+ DiffEngine.cpp per blueprint)
+    # Stage 7e + 7g — TaskRunner smoke test
     # -----------------------------------------------------------------------
     add_executable(frans_task_runner_test
         tests/task_runner_smoke_test.cpp
@@ -242,6 +264,28 @@ else()
 endif()
 
 # ===========================================================================
+# Stage 8 — DeepSeekProvider smoke test (independen dari tree-sitter)
+# ===========================================================================
+add_executable(frans_deepseek_test
+    tests/deepseek_provider_smoke_test.cpp
+    src/config/DeepSeekConfig.cpp
+    src/infrastructure/api_providers/DeepSeekProvider.cpp
+)
+target_link_libraries(frans_deepseek_test PRIVATE
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+    ${FRANS_OPENSSL_LIBS}
+)
+target_include_directories(frans_deepseek_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party
+)
+target_compile_definitions(frans_deepseek_test PRIVATE
+    ${FRANS_HTTPLIB_DEFS}
+)
+target_compile_options(frans_deepseek_test PRIVATE -Wall -Wextra -Wpedantic)
+
+# ===========================================================================
 # Main executable (UI)
 # ===========================================================================
 set(FRANS_AI_SOURCES
@@ -256,6 +300,7 @@ set(FRANS_AI_SOURCES
     # ---- config ----
     src/config/AppConfig.cpp
     src/config/LlamaServerConfig.cpp
+    src/config/DeepSeekConfig.cpp          # Stage 8
 
     # ---- domain ----
     src/domain/command/MacroCommand.cpp
@@ -265,6 +310,7 @@ set(FRANS_AI_SOURCES
     src/infrastructure/llama/ModelRegistry.cpp
     src/infrastructure/llama/LlamaServerProcessController.cpp
     src/infrastructure/llama/LlamaCppProvider.cpp
+    src/infrastructure/api_providers/DeepSeekProvider.cpp   # Stage 8
     src/infrastructure/system/ProcessExecutor.cpp
     src/infrastructure/system/MemoryInfo.cpp
     src/infrastructure/system/SystemMaintenanceFacade.cpp
@@ -310,10 +356,12 @@ target_link_libraries(frans_ai PRIVATE
     nlohmann_json::nlohmann_json
     Threads::Threads
     frans_fs
+    ${FRANS_OPENSSL_LIBS}
 )
 
 target_compile_definitions(frans_ai PRIVATE
     CPPHTTPLIB_THREAD_POOL_COUNT=2
+    ${FRANS_HTTPLIB_DEFS}
 )
 
 target_compile_options(frans_ai PRIVATE -Wall -Wextra -Wpedantic)
@@ -332,7 +380,6 @@ target_compile_options(frans_sandbox_test PRIVATE -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
 # Stage 7c + 7g — ExecuteState + DangerCheckHandler smoke test
-#           (tambah DiffEngine.cpp per blueprint 7g §2.7)
 # ===========================================================================
 add_executable(frans_execute_test
     tests/execute_smoke_test.cpp

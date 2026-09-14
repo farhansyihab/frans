@@ -2,6 +2,7 @@
 #include "infrastructure/llama/LlamaCppProvider.h"
 
 #include "httplib.h"
+#include "infrastructure/http/SseParser.h"
 
 #include <nlohmann/json.hpp>
 
@@ -19,94 +20,6 @@ using frans::domain::GenResult;
 using frans::domain::TokenCallback;
 
 using nlohmann::json;
-
-namespace {
-
-// ---------------------------------------------------------------------------
-// SSE parser — buffer bytes, potong per '\n', proses baris "data: {...}".
-//
-// llama-server mengirim:
-//   data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n
-//   data: {"choices":[{"delta":{"content":" there"}}]}\n\n
-//   data: [DONE]\n\n
-//
-// Baris lain (komentar, kosong, dll) diabaikan. Partial chunk aman karena
-// buffer menahan sisa baris terakhir sampai '\n' berikutnya tiba.
-// ---------------------------------------------------------------------------
-class SseParser {
-public:
-    explicit SseParser(TokenCallback onToken)
-        : onToken_(std::move(onToken)) {}
-
-    // Return false untuk abort (mis. cancel).
-    bool feed(const char* data, size_t len) {
-        buf_.append(data, len);
-
-        size_t pos;
-        while ((pos = buf_.find('\n')) != std::string::npos) {
-            std::string line = buf_.substr(0, pos);
-            buf_.erase(0, pos + 1);
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (!processLine(line)) return false;
-        }
-        return true;
-    }
-
-    bool               done()             const { return done_; }
-    int                prompt_tokens()    const { return prompt_tokens_; }
-    int                completion_tokens()const { return completion_tokens_; }
-    const std::string& finish_reason()    const { return finish_reason_; }
-
-private:
-    bool processLine(const std::string& line) {
-        if (line.empty()) return true;
-        if (line.rfind("data:", 0) != 0) return true;
-
-        std::string payload = line.substr(5);
-        while (!payload.empty() && (payload.front() == ' ' || payload.front() == '\t')) {
-            payload.erase(0, 1);
-        }
-
-        if (payload == "[DONE]") {
-            done_ = true;
-            return true;
-        }
-
-        try {
-            auto j = json::parse(payload);
-
-            if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()) {
-                const auto& c = j["choices"][0];
-                if (c.contains("delta") && c["delta"].contains("content")) {
-                    const std::string tok = c["delta"]["content"].get<std::string>();
-                    if (!tok.empty() && onToken_) onToken_(tok);
-                }
-                if (c.contains("finish_reason") && !c["finish_reason"].is_null()) {
-                    finish_reason_ = c["finish_reason"].get<std::string>();
-                }
-            }
-
-            if (j.contains("usage") && j["usage"].is_object()) {
-                if (j["usage"].contains("prompt_tokens"))
-                    prompt_tokens_ = j["usage"]["prompt_tokens"].get<int>();
-                if (j["usage"].contains("completion_tokens"))
-                    completion_tokens_ = j["usage"]["completion_tokens"].get<int>();
-            }
-        } catch (...) {
-            // Baris tidak lengkap / bukan JSON valid -> abaikan, tidak fatal.
-        }
-        return true;
-    }
-
-    TokenCallback     onToken_;
-    std::string       buf_;
-    bool              done_ = false;
-    int               prompt_tokens_ = 0;
-    int               completion_tokens_ = 0;
-    std::string       finish_reason_;
-};
-
-} // namespace
 
 // ---------------------------------------------------------------------------
 // LlamaCppProvider
@@ -175,7 +88,8 @@ GenResult LlamaCppProvider::generate(const std::vector<ChatMessage>& messages,
     cli.set_keep_alive(false);
 
     httplib::Headers headers = {{"Content-Type", "application/json"}};
-    const auto res = cli.Post("/v1/chat/completions", headers, payload, "application/json");
+    const auto res = cli.Post("/v1/chat/completions", headers, payload,
+                              "application/json");
 
     const auto t1 = std::chrono::steady_clock::now();
     result.elapsed_sec = std::chrono::duration<double>(t1 - t0).count();
@@ -192,16 +106,22 @@ GenResult LlamaCppProvider::generate(const std::vector<ChatMessage>& messages,
 
     try {
         const auto j = json::parse(res->body);
-        if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()) {
-            result.text = j["choices"][0]["message"]["content"].get<std::string>();
+        if (j.contains("choices") && j["choices"].is_array()
+            && !j["choices"].empty())
+        {
+            result.text =
+                j["choices"][0]["message"]["content"].get<std::string>();
         }
         if (j.contains("usage") && j["usage"].is_object()) {
             if (j["usage"].contains("prompt_tokens"))
-                result.prompt_tokens = j["usage"]["prompt_tokens"].get<int>();
+                result.prompt_tokens =
+                    j["usage"]["prompt_tokens"].get<int>();
             if (j["usage"].contains("completion_tokens"))
-                result.completion_tokens = j["usage"]["completion_tokens"].get<int>();
+                result.completion_tokens =
+                    j["usage"]["completion_tokens"].get<int>();
         }
         result.success = true;
+        result.cost_usd = 0.0;   // lokal = gratis
     } catch (const std::exception& e) {
         result.error = std::string("JSON parse error: ") + e.what();
     }
@@ -244,17 +164,19 @@ GenResult LlamaCppProvider::streamGenerate(
     req.body = payload;
 
     req.content_receiver =
-        [&](const char* data, size_t len, uint64_t /*offset*/, uint64_t /*total*/) -> bool {
-            if (cancel_flag && cancel_flag->load()) {
-                abort_reason = "cancelled by user";
-                return false;
-            }
-            if (!parser.feed(data, len)) {
-                if (abort_reason.empty()) abort_reason = "SSE parse abort";
-                return false;
-            }
-            return true;
-        };
+        [&](const char* data, size_t len, uint64_t /*offset*/,
+            uint64_t /*total*/) -> bool
+    {
+        if (cancel_flag && cancel_flag->load()) {
+            abort_reason = "cancelled by user";
+            return false;
+        }
+        if (!parser.feed(data, len)) {
+            if (abort_reason.empty()) abort_reason = "SSE parse abort";
+            return false;
+        }
+        return true;
+    };
 
     httplib::Response res;
     httplib::Error    err = httplib::Error::Success;
@@ -267,7 +189,7 @@ GenResult LlamaCppProvider::streamGenerate(
         result.error = !abort_reason.empty()
                      ? abort_reason
                      : ("HTTP error: " + httplib::to_string(err));
-        result.text  = accumulated;   // tetap bawa partial text
+        result.text  = accumulated;
         return result;
     }
     if (res.status != 200) {
@@ -281,6 +203,7 @@ GenResult LlamaCppProvider::streamGenerate(
     result.text              = accumulated;
     result.prompt_tokens     = parser.prompt_tokens();
     result.completion_tokens = parser.completion_tokens();
+    result.cost_usd          = 0.0;   // lokal = gratis
     return result;
 }
 
