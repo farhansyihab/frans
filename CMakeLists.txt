@@ -9,6 +9,10 @@ cmake_minimum_required(VERSION 3.16)
 #             FIX (v2): scanner lookup sekarang glob .cc DAN .c di
 #             src/, karena versi tree-sitter-cpp yang lebih baru
 #             memindahkan/mengganti nama scanner file.
+# Stage 10b — tambah tree_sitter_javascript + tree_sitter_typescript +
+#             tree_sitter_tsx + TsJsParserBase + TypeScriptParser +
+#             JavaScriptParser + TsJsAstVisitor + frans_ts_parser_test
+#             + frans_js_parser_test.
 project(frans_ai LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -90,6 +94,7 @@ target_compile_options(frans_routing PRIVATE -Wall -Wextra -Wpedantic)
 # ===========================================================================
 # Stage 5 + 6 — tree-sitter & context (opsional)
 # Stage 10a — C++ parser (opsional, conditional)
+# Stage 10b — TypeScript + JavaScript parser (opsional, conditional)
 # ===========================================================================
 set(TS_CORE "${CMAKE_SOURCE_DIR}/third_party/tree-sitter/lib/src/lib.c")
 set(TS_CORE_HDR "${CMAKE_SOURCE_DIR}/third_party/tree-sitter/lib/include/tree_sitter/api.h")
@@ -124,9 +129,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     #   - src/scanner.cc  (C++, historis — wajib karena raw string literal)
     #   - src/scanner.c   (C, versi baru setelah refactor)
     # Kita cek keduanya, prioritaskan .cc (kalau ada), fallback .c.
-    # Kalau tidak ketemu sama sekali, WARNING besar — karena parser.c
-    # mereferensikan tree_sitter_cpp_external_scanner_* dan link akan
-    # gagal tanpa definisi scanner.
     # -----------------------------------------------------------------------
     set(TS_CPP_DIR     "${CMAKE_SOURCE_DIR}/third_party/tree-sitter-cpp/src")
     set(TS_CPP_PARSER  "${TS_CPP_DIR}/parser.c")
@@ -149,10 +151,9 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
             message(WARNING
                 "tree-sitter-cpp: scanner TIDAK ditemukan di ${TS_CPP_DIR}.\n"
                 "  Dicek: scanner.cc dan scanner.c.\n"
-                "  Akibatnya: link akan gagal karena parser.c mereferensikan\n"
-                "  tree_sitter_cpp_external_scanner_{create,destroy,scan,serialize,deserialize}.\n"
-                "  Cek manual: ls -la ${TS_CPP_DIR}/\n"
-                "  Kemungkinan clone rusak — re-clone:\n"
+                "  Link akan gagal karena parser.c mereferensikan\n"
+                "  tree_sitter_cpp_external_scanner_*.\n"
+                "  Re-clone:\n"
                 "    cd third_party && rm -rf tree-sitter-cpp && \\\n"
                 "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter-cpp.git")
         endif()
@@ -168,6 +169,82 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
             "    cd third_party && \\\n"
             "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter-cpp.git\n"
             "  Target frans_cpp_parser_test tidak akan di-build.")
+    endif()
+
+    # -----------------------------------------------------------------------
+    # Stage 10b — tree-sitter-javascript (opsional)
+    #
+    # Pure C (parser.c + scanner.c). Grammar ini juga support JSX,
+    # jadi .jsx dan .js diparse dengan cara yang sama.
+    # -----------------------------------------------------------------------
+    set(TS_JS_DIR     "${CMAKE_SOURCE_DIR}/third_party/tree-sitter-javascript/src")
+    set(TS_JS_PARSER  "${TS_JS_DIR}/parser.c")
+    set(TS_JS_SCANNER "${TS_JS_DIR}/scanner.c")
+    set(FRANS_HAS_JS_PARSER OFF)
+
+    if(EXISTS "${TS_JS_PARSER}")
+        message(STATUS "tree-sitter-javascript ditemukan — JavaScript parser enabled")
+        set(TS_JS_SOURCES "${TS_JS_PARSER}")
+        if(EXISTS "${TS_JS_SCANNER}")
+            message(STATUS "  scanner: scanner.c")
+            list(APPEND TS_JS_SOURCES "${TS_JS_SCANNER}")
+        endif()
+        add_library(tree_sitter_javascript STATIC ${TS_JS_SOURCES})
+        target_include_directories(tree_sitter_javascript PRIVATE "${TS_JS_DIR}")
+        target_compile_options(tree_sitter_javascript PRIVATE -w)
+        set(FRANS_HAS_JS_PARSER ON)
+    else()
+        message(WARNING
+            "tree-sitter-javascript TIDAK ditemukan — skip JavaScript parser.\n"
+            "  Jalankan:\n"
+            "    cd third_party && \\\n"
+            "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter-javascript.git\n"
+            "  Target frans_js_parser_test tidak akan di-build.")
+    endif()
+
+    # -----------------------------------------------------------------------
+    # Stage 10b — tree-sitter-typescript + tree-sitter-tsx (opsional)
+    #
+    # Repo tree-sitter-typescript punya DUA subdirektori grammar:
+    #   typescript/src/parser.c → tree_sitter_typescript()
+    #   tsx/src/parser.c        → tree_sitter_tsx()
+    # Keduanya pure C. Kita butuh keduanya karena .ts dan .tsx adalah
+    # dua ekstensi yang sering muncul berdampingan, dan `<` di TSX
+    # ambigu (generic vs JSX element).
+    # -----------------------------------------------------------------------
+    set(TS_TS_DIR  "${CMAKE_SOURCE_DIR}/third_party/tree-sitter-typescript/typescript/src")
+    set(TS_TSX_DIR "${CMAKE_SOURCE_DIR}/third_party/tree-sitter-typescript/tsx/src")
+    set(FRANS_HAS_TS_PARSER OFF)
+
+    if(EXISTS "${TS_TS_DIR}/parser.c" AND EXISTS "${TS_TSX_DIR}/parser.c")
+        message(STATUS "tree-sitter-typescript ditemukan — TS + TSX parser enabled")
+
+        # TypeScript grammar
+        set(TS_TS_SOURCES "${TS_TS_DIR}/parser.c")
+        if(EXISTS "${TS_TS_DIR}/scanner.c")
+            list(APPEND TS_TS_SOURCES "${TS_TS_DIR}/scanner.c")
+        endif()
+        add_library(tree_sitter_typescript STATIC ${TS_TS_SOURCES})
+        target_include_directories(tree_sitter_typescript PRIVATE "${TS_TS_DIR}")
+        target_compile_options(tree_sitter_typescript PRIVATE -w)
+
+        # TSX grammar
+        set(TS_TSX_SOURCES "${TS_TSX_DIR}/parser.c")
+        if(EXISTS "${TS_TSX_DIR}/scanner.c")
+            list(APPEND TS_TSX_SOURCES "${TS_TSX_DIR}/scanner.c")
+        endif()
+        add_library(tree_sitter_tsx STATIC ${TS_TSX_SOURCES})
+        target_include_directories(tree_sitter_tsx PRIVATE "${TS_TSX_DIR}")
+        target_compile_options(tree_sitter_tsx PRIVATE -w)
+
+        set(FRANS_HAS_TS_PARSER ON)
+    else()
+        message(WARNING
+            "tree-sitter-typescript TIDAK ditemukan — skip TypeScript parser.\n"
+            "  Jalankan:\n"
+            "    cd third_party && \\\n"
+            "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter-typescript.git\n"
+            "  Target frans_ts_parser_test tidak akan di-build.")
     endif()
 
     # -----------------------------------------------------------------------
@@ -190,6 +267,33 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
             src/code_intelligence/visitor/CppAstVisitor.cpp
         )
         list(APPEND FRANS_CODE_INTEL_LIBS tree_sitter_cpp)
+    endif()
+
+    # Stage 10b — shared base + visitor. Ditambahkan kalau SALAH SATU
+    # dari TS atau JS parser enabled. Tidak boleh di-add dua kali
+    # (duplikat symbol).
+    if(FRANS_HAS_TS_PARSER OR FRANS_HAS_JS_PARSER)
+        list(APPEND FRANS_CODE_INTEL_SOURCES
+            src/code_intelligence/parsers/TsJsParserBase.cpp
+            src/code_intelligence/visitor/TsJsAstVisitor.cpp
+        )
+    endif()
+
+    if(FRANS_HAS_TS_PARSER)
+        list(APPEND FRANS_CODE_INTEL_SOURCES
+            src/code_intelligence/parsers/TypeScriptParser.cpp
+        )
+        list(APPEND FRANS_CODE_INTEL_LIBS
+            tree_sitter_typescript
+            tree_sitter_tsx
+        )
+    endif()
+
+    if(FRANS_HAS_JS_PARSER)
+        list(APPEND FRANS_CODE_INTEL_SOURCES
+            src/code_intelligence/parsers/JavaScriptParser.cpp
+        )
+        list(APPEND FRANS_CODE_INTEL_LIBS tree_sitter_javascript)
     endif()
 
     add_library(frans_code_intel STATIC ${FRANS_CODE_INTEL_SOURCES})
@@ -215,6 +319,32 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
             FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/cpp"
         )
         target_compile_options(frans_cpp_parser_test PRIVATE
+            -Wall -Wextra -Wpedantic)
+    endif()
+
+    # -----------------------------------------------------------------------
+    # Stage 10b — TypeScript parser smoke test.
+    # -----------------------------------------------------------------------
+    if(FRANS_HAS_TS_PARSER)
+        add_executable(frans_ts_parser_test tests/ts_parser_smoke_test.cpp)
+        target_link_libraries(frans_ts_parser_test PRIVATE frans_code_intel)
+        target_compile_definitions(frans_ts_parser_test PRIVATE
+            FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/typescript"
+        )
+        target_compile_options(frans_ts_parser_test PRIVATE
+            -Wall -Wextra -Wpedantic)
+    endif()
+
+    # -----------------------------------------------------------------------
+    # Stage 10b — JavaScript parser smoke test.
+    # -----------------------------------------------------------------------
+    if(FRANS_HAS_JS_PARSER)
+        add_executable(frans_js_parser_test tests/js_parser_smoke_test.cpp)
+        target_link_libraries(frans_js_parser_test PRIVATE frans_code_intel)
+        target_compile_definitions(frans_js_parser_test PRIVATE
+            FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/javascript"
+        )
+        target_compile_options(frans_js_parser_test PRIVATE
             -Wall -Wextra -Wpedantic)
     endif()
 
