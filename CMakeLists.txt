@@ -3,11 +3,12 @@ cmake_minimum_required(VERSION 3.16)
 # Stage 5 — tambah C untuk compile tree-sitter core + grammar Python.
 # Stage 8 — tambah OpenSSL (opsional) untuk HTTPS (DeepSeek).
 # Stage 9c — tambah frans_routing (ProviderRouter + EscalationPolicy +
-#            DailyBudgetGuard) sebagai static library bersama. Agent.cpp
-#            sekarang mereferensikan simbol-simbol ini, jadi SEMUA target
-#            yang meng-link Agent.cpp WAJIB juga link frans_routing.
-#            Dikumpulkan jadi satu library untuk menghindari duplikasi
-#            source list yang riskan drift.
+#            DailyBudgetGuard) sebagai static library bersama.
+# Stage 10a — tambah tree_sitter_cpp (grammar C++) + CppParser +
+#             CppAstVisitor + frans_cpp_parser_test.
+#             FIX (v2): scanner lookup sekarang glob .cc DAN .c di
+#             src/, karena versi tree-sitter-cpp yang lebih baru
+#             memindahkan/mengganti nama scanner file.
 project(frans_ai LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -31,8 +32,6 @@ find_package(Threads REQUIRED)
 
 # ===========================================================================
 # Stage 8 — OpenSSL (opsional). Diperlukan untuk DeepSeekProvider (HTTPS).
-# Kalau tidak ditemukan, build tetap lanjut — DeepSeekProvider akan fail
-# runtime dengan pesan jelas, dan LlamaCppProvider (HTTP lokal) tetap jalan.
 # ===========================================================================
 find_package(OpenSSL QUIET)
 set(FRANS_HTTPLIB_DEFS "")
@@ -73,15 +72,6 @@ target_compile_options(frans_diff PRIVATE -Wall -Wextra -Wpedantic)
 # ===========================================================================
 # Stage 9c — frans_routing: ProviderRouter + EscalationPolicy +
 #            DailyBudgetGuard.
-#
-# Static library bersama supaya Agent.cpp (yang mereferensikan ketiga
-# komponen ini) bisa di-link oleh SEMUA target test maupun frans_ai tanpa
-# perlu menduplikasi source list di setiap target.
-#
-# Dependency: nlohmann_json (DailyBudgetGuard.cpp pakai nlohmann::json
-# untuk persist state budget). Dideklarasikan PUBLIC supaya consumer yang
-# meng-link frans_routing otomatis mendapat nlohmann_json juga — mereka
-# tidak perlu tahu detail internal DailyBudgetGuard.
 # ===========================================================================
 add_library(frans_routing STATIC
     src/application/provider_router/ProviderRouter.cpp
@@ -99,6 +89,7 @@ target_compile_options(frans_routing PRIVATE -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
 # Stage 5 + 6 — tree-sitter & context (opsional)
+# Stage 10a — C++ parser (opsional, conditional)
 # ===========================================================================
 set(TS_CORE "${CMAKE_SOURCE_DIR}/third_party/tree-sitter/lib/src/lib.c")
 set(TS_CORE_HDR "${CMAKE_SOURCE_DIR}/third_party/tree-sitter/lib/include/tree_sitter/api.h")
@@ -126,19 +117,86 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
     target_compile_options(tree_sitter_python PRIVATE -w)
 
-    add_library(frans_code_intel STATIC
+    # -----------------------------------------------------------------------
+    # Stage 10a — tree-sitter-cpp (opsional)
+    #
+    # FIX (v2): scanner file di tree-sitter-cpp bisa hadir sebagai:
+    #   - src/scanner.cc  (C++, historis — wajib karena raw string literal)
+    #   - src/scanner.c   (C, versi baru setelah refactor)
+    # Kita cek keduanya, prioritaskan .cc (kalau ada), fallback .c.
+    # Kalau tidak ketemu sama sekali, WARNING besar — karena parser.c
+    # mereferensikan tree_sitter_cpp_external_scanner_* dan link akan
+    # gagal tanpa definisi scanner.
+    # -----------------------------------------------------------------------
+    set(TS_CPP_DIR     "${CMAKE_SOURCE_DIR}/third_party/tree-sitter-cpp/src")
+    set(TS_CPP_PARSER  "${TS_CPP_DIR}/parser.c")
+    set(TS_CPP_SCAN_CC "${TS_CPP_DIR}/scanner.cc")
+    set(TS_CPP_SCAN_C  "${TS_CPP_DIR}/scanner.c")
+    set(FRANS_HAS_CPP_PARSER OFF)
+
+    if(EXISTS "${TS_CPP_PARSER}")
+        message(STATUS "tree-sitter-cpp ditemukan — C++ parser enabled")
+
+        set(TS_CPP_SOURCES "${TS_CPP_PARSER}")
+
+        if(EXISTS "${TS_CPP_SCAN_CC}")
+            message(STATUS "  scanner: scanner.cc (C++)")
+            list(APPEND TS_CPP_SOURCES "${TS_CPP_SCAN_CC}")
+        elseif(EXISTS "${TS_CPP_SCAN_C}")
+            message(STATUS "  scanner: scanner.c (C)")
+            list(APPEND TS_CPP_SOURCES "${TS_CPP_SCAN_C}")
+        else()
+            message(WARNING
+                "tree-sitter-cpp: scanner TIDAK ditemukan di ${TS_CPP_DIR}.\n"
+                "  Dicek: scanner.cc dan scanner.c.\n"
+                "  Akibatnya: link akan gagal karena parser.c mereferensikan\n"
+                "  tree_sitter_cpp_external_scanner_{create,destroy,scan,serialize,deserialize}.\n"
+                "  Cek manual: ls -la ${TS_CPP_DIR}/\n"
+                "  Kemungkinan clone rusak — re-clone:\n"
+                "    cd third_party && rm -rf tree-sitter-cpp && \\\n"
+                "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter-cpp.git")
+        endif()
+
+        add_library(tree_sitter_cpp STATIC ${TS_CPP_SOURCES})
+        target_include_directories(tree_sitter_cpp PRIVATE "${TS_CPP_DIR}")
+        target_compile_options(tree_sitter_cpp PRIVATE -w)
+        set(FRANS_HAS_CPP_PARSER ON)
+    else()
+        message(WARNING
+            "tree-sitter-cpp TIDAK ditemukan — skip C++ parser.\n"
+            "  Jalankan:\n"
+            "    cd third_party && \\\n"
+            "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter-cpp.git\n"
+            "  Target frans_cpp_parser_test tidak akan di-build.")
+    endif()
+
+    # -----------------------------------------------------------------------
+    # frans_code_intel — library bersama.
+    # -----------------------------------------------------------------------
+    set(FRANS_CODE_INTEL_SOURCES
         src/code_intelligence/parsers/PythonParser.cpp
         src/code_intelligence/visitor/PythonAstVisitor.cpp
         src/code_intelligence/graph/DependencyGraph.cpp
         src/code_intelligence/builder/TreeSitterGraphBuilder.cpp
     )
-    target_include_directories(frans_code_intel PUBLIC
-        ${CMAKE_SOURCE_DIR}/src
-    )
-    target_link_libraries(frans_code_intel PUBLIC
+    set(FRANS_CODE_INTEL_LIBS
         tree_sitter
         tree_sitter_python
     )
+
+    if(FRANS_HAS_CPP_PARSER)
+        list(APPEND FRANS_CODE_INTEL_SOURCES
+            src/code_intelligence/parsers/CppParser.cpp
+            src/code_intelligence/visitor/CppAstVisitor.cpp
+        )
+        list(APPEND FRANS_CODE_INTEL_LIBS tree_sitter_cpp)
+    endif()
+
+    add_library(frans_code_intel STATIC ${FRANS_CODE_INTEL_SOURCES})
+    target_include_directories(frans_code_intel PUBLIC
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    target_link_libraries(frans_code_intel PUBLIC ${FRANS_CODE_INTEL_LIBS})
     target_compile_options(frans_code_intel PRIVATE -Wall -Wextra -Wpedantic)
 
     add_executable(frans_graph_test tests/graph_smoke_test.cpp)
@@ -146,6 +204,19 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     target_compile_definitions(frans_graph_test PRIVATE
         FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/python"
     )
+
+    # -----------------------------------------------------------------------
+    # Stage 10a — C++ parser smoke test.
+    # -----------------------------------------------------------------------
+    if(FRANS_HAS_CPP_PARSER)
+        add_executable(frans_cpp_parser_test tests/cpp_parser_smoke_test.cpp)
+        target_link_libraries(frans_cpp_parser_test PRIVATE frans_code_intel)
+        target_compile_definitions(frans_cpp_parser_test PRIVATE
+            FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/cpp"
+        )
+        target_compile_options(frans_cpp_parser_test PRIVATE
+            -Wall -Wextra -Wpedantic)
+    endif()
 
     add_library(frans_context STATIC
         src/application/context_budget/ContextBudgetManager.cpp
@@ -164,7 +235,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
 
     # -----------------------------------------------------------------------
-    # Stage 7f — ProjectGraphCache + TargetScopeResolver (library bersama)
+    # Stage 7f — ProjectGraphCache + TargetScopeResolver
     # -----------------------------------------------------------------------
     add_library(frans_project STATIC
         src/application/project/ProjectGraphCache.cpp
@@ -178,10 +249,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
 
     # -----------------------------------------------------------------------
     # Stage 7b — GenerateState smoke test
-    #
-    # Catatan: TIDAK link frans_routing karena test ini tidak memakai
-    # Agent.cpp (hanya GenerateState langsung). Kalau nanti test ini
-    # mulai memakai Agent, tambahkan frans_routing ke target_link_libraries.
     # -----------------------------------------------------------------------
     add_executable(frans_generate_test
         tests/generate_smoke_test.cpp
@@ -209,12 +276,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
 
     # -----------------------------------------------------------------------
     # Stage 7d — Full agent loop smoke test
-    #
-    # Stage 9c: Agent.cpp sekarang referensi ProviderRouter + DailyBudgetGuard,
-    # jadi WAJIB link frans_routing. Test file itu sendiri TIDAK diubah —
-    # dia hanya set deps.provider (bukan deps.router), jadi runtime path
-    # tetap mengikuti perilaku lama, tapi linker butuh simbol tetap ada
-    # karena Agent.cpp di-compile dengan kedua branch.
     # -----------------------------------------------------------------------
     add_executable(frans_agent_loop_test
         tests/agent_loop_smoke_test.cpp
@@ -242,9 +303,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
 
     # -----------------------------------------------------------------------
     # Stage 7e + 7g — TaskRunner smoke test
-    #
-    # Stage 9c: sama seperti frans_agent_loop_test — butuh frans_routing
-    # karena meng-link Agent.cpp.
     # -----------------------------------------------------------------------
     add_executable(frans_task_runner_test
         tests/task_runner_smoke_test.cpp
@@ -274,8 +332,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
 
     # -----------------------------------------------------------------------
     # Stage 7f — Project awareness smoke test
-    #
-    # Stage 9c: butuh frans_routing karena meng-link Agent.cpp.
     # -----------------------------------------------------------------------
     add_executable(frans_project_awareness_test
         tests/project_awareness_smoke_test.cpp
@@ -338,11 +394,6 @@ target_compile_options(frans_deepseek_test PRIVATE -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
 # Main executable (UI)
-#
-# Stage 9c: AgentPanel sekarang membuat ProviderRouter (via provider_router
-# header) + main.cpp membuat DailyBudgetGuard. Karena itu, frans_ai WAJIB
-# link frans_routing. Di-link di dalam if(FRANS_CODE_INTEL_ENABLED) karena
-# AgentPanel.cpp hanya di-compile kalau code_intel enabled.
 # ===========================================================================
 set(FRANS_AI_SOURCES
     # ---- bootstrap ----
@@ -356,7 +407,7 @@ set(FRANS_AI_SOURCES
     # ---- config ----
     src/config/AppConfig.cpp
     src/config/LlamaServerConfig.cpp
-    src/config/DeepSeekConfig.cpp          # Stage 8
+    src/config/DeepSeekConfig.cpp
 
     # ---- domain ----
     src/domain/command/MacroCommand.cpp
@@ -366,11 +417,11 @@ set(FRANS_AI_SOURCES
     src/infrastructure/llama/ModelRegistry.cpp
     src/infrastructure/llama/LlamaServerProcessController.cpp
     src/infrastructure/llama/LlamaCppProvider.cpp
-    src/infrastructure/api_providers/DeepSeekProvider.cpp   # Stage 8
+    src/infrastructure/api_providers/DeepSeekProvider.cpp
     src/infrastructure/system/ProcessExecutor.cpp
     src/infrastructure/system/MemoryInfo.cpp
     src/infrastructure/system/SystemMaintenanceFacade.cpp
-    src/infrastructure/system/DiffEngine.cpp       # Stage 7g
+    src/infrastructure/system/DiffEngine.cpp
 
     # ---- ui ----
     src/ui/ChatView.cpp
@@ -396,11 +447,6 @@ if(FRANS_CODE_INTEL_ENABLED)
 
         # ---- agent UI ----
         src/ui/AgentPanel.cpp
-
-        # NOTE Stage 9c: source file ProviderRouter.cpp, EscalationPolicy.cpp,
-        # dan DailyBudgetGuard.cpp TIDAK dimasukkan ke sini — mereka masuk
-        # via link ke frans_routing di bawah, supaya tidak terduplikasi
-        # dengan target test lain.
     )
 endif()
 
@@ -431,7 +477,7 @@ if(FRANS_CODE_INTEL_ENABLED)
     target_link_libraries(frans_ai PRIVATE
         frans_code_intel
         frans_context
-        frans_routing      # Stage 9c — ProviderRouter + DailyBudgetGuard
+        frans_routing
     )
     target_compile_definitions(frans_ai PRIVATE FRANS_HAS_AGENT_PANEL=1)
 endif()
@@ -514,10 +560,6 @@ target_compile_options(frans_escalation_policy_test PRIVATE -Wall -Wextra -Wpeda
 
 # ===========================================================================
 # Stage 9c — ProviderRouter + DailyBudgetGuard integration via Agent loop
-#
-# Link frans_routing sebagai ganti source file eksplisit, supaya konsisten
-# dengan target lain. frans_routing sendiri sudah membawa nlohmann_json +
-# Threads transitively (PUBLIC), jadi link tambahan tidak diperlukan.
 # ===========================================================================
 add_executable(frans_provider_router_integration_test
     tests/provider_router_integration_test.cpp
