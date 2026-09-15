@@ -17,6 +17,7 @@
 #include "infrastructure/llama/LlamaCppProvider.h"
 #include "infrastructure/llama/LlamaServerProcessController.h"
 #include "infrastructure/system/DiffEngine.h"
+#include "ui/ManualImportDialog.h"   // Stage 11b
 
 #include <FL/Fl.H>
 #include <FL/Fl_File_Chooser.H>
@@ -166,6 +167,9 @@ int AgentPanel::createWidgets(int x, int y, int w) {
     by += 20;
 
     // ---- Buttons ----
+    // Stage 11b: [Import Paste] ditambahkan di row yang sama. Layout
+    // total 130+10+100+10+100+10+110 = 470px — cukup untuk panel
+    // lebar ≥ 700px (typical dari MainWindow 800+ dengan padding).
     run_btn_ = new Fl_Button(x, by, 130, kBtnH, "Run Task");
     run_btn_->callback(onRunClicked, this);
 
@@ -175,6 +179,12 @@ int AgentPanel::createWidgets(int x, int y, int w) {
 
     clear_btn_ = new Fl_Button(x + 250, by, 100, kBtnH, "Clear Output");
     clear_btn_->callback(onClearClicked, this);
+
+    import_btn_ = new Fl_Button(x + 360, by, 110, kBtnH, "Import Paste");
+    import_btn_->callback(onImportClicked, this);
+    import_btn_->tooltip(
+        "Paste output multi-file dari chat AI di browser "
+        "(DeepSeek Chat / dsb) langsung ke project tanpa API call.");
 
     by += kBtnH + 6;
 
@@ -233,6 +243,7 @@ void AgentPanel::setEnabled(bool on) {
     apply(target_input_);
     apply(run_btn_);
     apply(clear_btn_);
+    apply(import_btn_);   // Stage 11b — cegah import saat task running
 }
 
 void AgentPanel::tick() {
@@ -708,6 +719,34 @@ void AgentPanel::onDiffViewClicked(Fl_Widget*, void* data) {
     if (self->diff_view_) self->diff_view_->show();
     if (self->btn_log_view_)  self->btn_log_view_->value(0);
     if (self->btn_diff_view_) self->btn_diff_view_->value(1);
+}
+
+// ---------------------------------------------------------------------------
+// Stage 11b — [Import Paste] callback.
+//
+// Guard: kalau task running, tolak (setEnabled(false) seharusnya sudah
+// mencegah, tapi defensive — bisa juga task dimulai dari sisi lain).
+// ---------------------------------------------------------------------------
+void AgentPanel::onImportClicked(Fl_Widget*, void* data) {
+    auto* self = static_cast<AgentPanel*>(data);
+    if (!self->ctx_) return;
+
+    if (self->runner_ && self->runner_->isRunning()) {
+        fl_message("Task masih berjalan. Tunggu sampai selesai.");
+        return;
+    }
+
+    const std::string initial_root =
+        self->root_input_ ? self->root_input_->value() : "";
+
+    const bool wrote = ManualImportDialog::show(self->ctx_, initial_root);
+
+    if (wrote) {
+        std::fprintf(stderr,
+            "[frans][agent_panel] Manual Import: minimal 1 file ditulis — "
+            "graph cache sudah di-invalidate\n");
+        std::fflush(stderr);
+    }
 }
 
 } // namespace frans::ui

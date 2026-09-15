@@ -37,6 +37,8 @@ namespace frans::ui {
 // Stage 7g: tambah toggle [Log]/[Diff] + render unified diff setelah run.
 // Stage 9c: tambah ProviderRouter + DailyBudgetGuard untuk hybrid routing,
 // plus label read-only untuk daily API budget.
+// Stage 11b: tambah tombol [Import Paste] — buka ManualImportDialog modal
+// untuk paste output AI browser (DeepSeek Chat) langsung ke project.
 class AgentPanel {
 public:
     struct Deps {
@@ -67,6 +69,7 @@ private:
     static void onClearClicked(Fl_Widget*, void*);
     static void onLogViewClicked(Fl_Widget*, void*);
     static void onDiffViewClicked(Fl_Widget*, void*);
+    static void onImportClicked(Fl_Widget*, void*);   // Stage 11b
 
     void startTask();
     void renderResult(const frans::application::TaskProgress& p);
@@ -94,6 +97,7 @@ private:
     Fl_Button*          run_btn_       = nullptr;
     Fl_Button*          cancel_btn_    = nullptr;
     Fl_Button*          clear_btn_     = nullptr;
+    Fl_Button*          import_btn_    = nullptr;   // Stage 11b
     Fl_Box*             status_label_  = nullptr;
 
     // Stage 7g — toggle [Log]/[Diff] + dua view yang overlap.

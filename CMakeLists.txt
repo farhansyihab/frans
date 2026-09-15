@@ -12,18 +12,12 @@ cmake_minimum_required(VERSION 3.16)
 #             + frans_js_parser_test.
 # Stage 10c — tambah VueParser (SFC extraction + delegasi ke TS/JS parser)
 #             + frans_vue_parser_test.
-# Stage 10d — multi-language integration:
-#             * TreeSitterGraphBuilder: parser registry + discovery
-#               multi-ekstensi + log summary.
-#             * ProjectGraphCache: discovery multi-ekstensi.
-#             * GenerateState: "Project languages detected" di prompt.
-#             * frans_multilang_test (mixed fixture smoke test).
-#             * FRANS_HAS_<LANG>_PARSER macros di frans_code_intel
-#               supaya TreeSitterGraphBuilder bisa conditional-compile
-#               registry (hindari link error kalau grammar tidak ada).
+# Stage 10d — multi-language integration.
 # Stage 11a — ManualImporter (application layer) + smoke test.
-#             Independent dari tree-sitter: butuh IFileSystemPort +
-#             MultiFileParser + DangerCheckHandler.
+# Stage 11b — ManualImportDialog (UI) + tombol [Import Paste] di AgentPanel.
+# Stage 11c — manual import E2E test (paste → write → graph rebuild).
+#             Guard FRANS_CODE_INTEL_ENABLED karena butuh ProjectGraphCache
+#             (transitively tree-sitter).
 project(frans_ai LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -91,6 +85,10 @@ target_compile_options(frans_diff PRIVATE -Wall -Wextra -Wpedantic)
 # TIDAK butuh tree-sitter → sengaja dipisah supaya bisa dibuild di mesin
 # tanpa grammar. Callback invalidation (std::function) memutus ketergantungan
 # ke ProjectGraphCache (blueprint §3 — Dependency Inversion).
+#
+# CATATAN Stage 11b: ManualImportDialog (UI) TIDAK masuk library ini —
+# lib ini bebas FLTK, dipakai oleh test CLI (frans_manual_import_test).
+# Dialog masuk langsung ke frans_ai exe (butuh FLTK).
 # ===========================================================================
 add_library(frans_manual_import STATIC
     src/application/manual_import/ManualImporter.cpp
@@ -426,8 +424,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
 
     # -----------------------------------------------------------------------
     # Stage 10d — multi-language integration test.
-    # Butuh SEMUA parser (Python + C++ + TS + JS + Vue). Vue implies
-    # TS + JS, jadi cukup cek CPP + VUE.
     # -----------------------------------------------------------------------
     if(FRANS_HAS_CPP_PARSER AND FRANS_HAS_VUE_PARSER)
         add_executable(frans_multilang_test tests/multilang_smoke_test.cpp)
@@ -555,6 +551,27 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
     target_compile_options(frans_project_awareness_test PRIVATE -Wall -Wextra -Wpedantic)
 
+    # -----------------------------------------------------------------------
+    # Stage 11c — Manual Import end-to-end test.
+    #
+    # Butuh tree-sitter (via frans_project → frans_context → frans_code_intel)
+    # karena menguji kontrak ManualImporter ↔ ProjectGraphCache (invalidate
+    # → rebuild). Kalau tree-sitter tidak ada, target ini di-skip — Stage 11a
+    # test (frans_manual_import_test) tetap bisa dijalankan standalone.
+    # -----------------------------------------------------------------------
+    add_executable(frans_manual_import_e2e_test
+        tests/manual_import_e2e_test.cpp
+    )
+    target_link_libraries(frans_manual_import_e2e_test PRIVATE
+        frans_manual_import
+        frans_project
+    )
+    target_include_directories(frans_manual_import_e2e_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    target_compile_options(frans_manual_import_e2e_test PRIVATE
+        -Wall -Wextra -Wpedantic)
+
     set(FRANS_CODE_INTEL_ENABLED ON)
 else()
     message(WARNING
@@ -638,8 +655,19 @@ if(FRANS_CODE_INTEL_ENABLED)
         src/application/safety/DangerCheckHandler.cpp
         src/application/task_runner/TaskRunner.cpp
 
+        # ---- manual import (Stage 11a application) ----
+        # ManualImporter.cpp sudah di frans_manual_import lib — WAJIB
+        # ditambahkan di sini juga karena static lib tidak transitively
+        # di-link ke executable. Sumber di-share, object file di-compile
+        # dua kali (sekali untuk lib, sekali untuk exe) — trade-off kecil,
+        # build time OK.
+        src/application/manual_import/ManualImporter.cpp
+
         # ---- agent UI ----
         src/ui/AgentPanel.cpp
+
+        # ---- manual import UI (Stage 11b) ----
+        src/ui/ManualImportDialog.cpp
     )
 endif()
 
@@ -684,10 +712,6 @@ target_compile_options(frans_sandbox_test PRIVATE -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
 # Stage 11a — ManualImporter smoke test (tidak butuh tree-sitter).
-#
-# Menyertakan ManualImporter.cpp + MultiFileParser.cpp + DangerCheckHandler.cpp
-# via frans_manual_import. Hanya depend pada frans_fs (IFileSystemPort +
-# SandboxedFileSystem).
 # ===========================================================================
 add_executable(frans_manual_import_test tests/manual_importer_smoke_test.cpp)
 target_link_libraries(frans_manual_import_test PRIVATE frans_manual_import)

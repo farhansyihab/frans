@@ -4,6 +4,7 @@
 #include "application/agent/CodeExtraction.h"
 
 #include <cctype>
+#include <cstdio>
 #include <utility>
 
 namespace frans::application {
@@ -49,12 +50,35 @@ std::vector<std::string> splitLines(const std::string& text) {
     return lines;
 }
 
+// ---------------------------------------------------------------------------
+// matchFileMarker — Stage 11b-fix
+//
+// SEBELUMNYA: cek langsung `line.substr(0, 5) == "file:"` — marker HARUS
+// persis di kolom 0. Paste dari web browser / chat UI / terminal sering
+// menambahkan indentasi (leading spaces/tabs) di tiap baris, sehingga
+// marker lolos deteksi → fallback single-file → semua konten di-anggap
+// 1 file (dan ditulis ke fallback_path).
+//
+// SESUDAH: trim leading ASCII whitespace dulu, baru cek prefix "File:".
+// False-positive tidak signifikan: baris yang setelah trim berawal "File:"
+// memang hampir pasti marker (kombinasi huruf f-i-l-e-: di posisi awal
+// baris sangat jarang muncul sebagai kata biasa dalam konteks source code).
+// ---------------------------------------------------------------------------
 bool matchFileMarker(const std::string& line, std::string& out_path) {
-    if (line.size() < 5) return false;
-    std::string head = toLowerAscii(line.substr(0, 5));
+    // Skip leading ASCII whitespace (spaces, tabs). Tidak skip '\r' di sini
+    // karena '\r' hanya muncul di akhir baris (CRLF) — sudah di-handle oleh
+    // trimRight di bawah.
+    std::size_t p = 0;
+    while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) {
+        ++p;
+    }
+
+    if (line.size() - p < 5) return false;
+
+    std::string head = toLowerAscii(line.substr(p, 5));
     if (head != "file:") return false;
 
-    std::string rest = trimLeft(line.substr(5));
+    std::string rest = trimLeft(line.substr(p + 5));
     rest = trimRight(std::move(rest));
 
     while (!rest.empty()
@@ -75,6 +99,40 @@ bool isFenceLine(const std::string& line) {
     return line.find("```") != std::string::npos;
 }
 
+// ---------------------------------------------------------------------------
+// Stage 11b-fix — diagnostic dump.
+//
+// Dipanggil HANYA kalau input mengandung substring "File:" tapi tidak ada
+// marker yang match. Menampilkan 5 baris non-empty pertama supaya user
+// bisa langsung lihat apa yang parser lihat (indentasi? bullet? Unicode?
+// BOM? dst). Maksimal 5 baris supaya tidak spam log.
+// ---------------------------------------------------------------------------
+void logFirstLines(const std::vector<std::string>& lines,
+                   const char* reason)
+{
+    std::fprintf(stderr,
+        "[frans][multi_file_parser] %s\n", reason);
+    std::fprintf(stderr,
+        "[frans][multi_file_parser] dumping first non-empty lines:\n");
+    int shown = 0;
+    for (const auto& l : lines) {
+        if (l.empty()) continue;
+        // Tampilkan dengan penanda visual spasi leading (·=space, →=tab)
+        // supaya indentasi tidak "hilang" di output terminal.
+        std::string visible;
+        visible.reserve(l.size());
+        for (char c : l) {
+            if (c == '\t')       visible += "\u2192";     // →
+            else if (c == ' ')   visible += "\u00b7";     // ·
+            else                 visible += c;
+        }
+        std::fprintf(stderr, "[frans][multi_file_parser]   | %s\n",
+                     visible.c_str());
+        if (++shown >= 5) break;
+    }
+    std::fflush(stderr);
+}
+
 } // namespace
 
 MultiFileParseResult parseModelOutput(const std::string& output,
@@ -82,7 +140,23 @@ MultiFileParseResult parseModelOutput(const std::string& output,
 {
     MultiFileParseResult r;
 
-    const auto lines = splitLines(output);
+    // Stage 11b-fix — strip UTF-8 BOM kalau ada.
+    //
+    // BOM adalah 3 byte (0xEF 0xBB 0xBF) di awal string yang secara visual
+    // tidak terlihat, tapi menggeser kolom line pertama sehingga
+    // line.substr(0, 5) tidak match "File:" (jadi "\xEF\xBB\xBFFi").
+    // Ini sering muncul kalau user paste dari editor yang menyimpan dengan
+    // BOM atau dari clipboard manager tertentu.
+    std::string normalized = output;
+    if (normalized.size() >= 3
+        && static_cast<unsigned char>(normalized[0]) == 0xEF
+        && static_cast<unsigned char>(normalized[1]) == 0xBB
+        && static_cast<unsigned char>(normalized[2]) == 0xBF)
+    {
+        normalized.erase(0, 3);
+    }
+
+    const auto lines = splitLines(normalized);
 
     std::string current_path;
     std::string current_content;
@@ -171,9 +245,29 @@ MultiFileParseResult parseModelOutput(const std::string& output,
         return r;
     }
 
+    // ---- Stage 11b-fix — diagnostic sebelum fallback single-file ----
+    //
+    // Kalau input mengandung "File:" / "file:" / "FILE:" di suatu tempat
+    // (tapi tidak match sebagai marker), kemungkinan besar user MEMANG
+    // berniat multi-file tapi formatnya tidak dikenali (bullet, bold markdown,
+    // Unicode, dst). Dump 5 baris pertama supaya user bisa langsung lihat
+    // apa yang parser lihat.
+    //
+    // Cek case-insensitive: cari salah satu dari tiga varian.
+    const bool looks_like_multi =
+        (normalized.find("File:") != std::string::npos)
+     || (normalized.find("file:") != std::string::npos)
+     || (normalized.find("FILE:") != std::string::npos);
+
+    if (looks_like_multi) {
+        logFirstLines(lines,
+            "input contains 'File:' substring but no marker matched — "
+            "kemungkinan ada prefix tak terduga (bullet? bold? unicode?)");
+    }
+
     // ---- Fallback single-file ----
     std::string code;
-    if (!extractFencedCodeBlock(output, code)) {
+    if (!extractFencedCodeBlock(normalized, code)) {
         r.error = "Tidak ditemukan fenced code block di response model.";
         return r;
     }
