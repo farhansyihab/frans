@@ -2,7 +2,7 @@
 #include "application/provider_router/ProviderRouter.h"
 
 #include "application/budget/DailyBudgetGuard.h"
-#include "domain/llm/ILlmProvider.h"        // ILlmProvider + GenOptions (ChatMessage)
+#include "domain/llm/ILlmProvider.h"
 
 #include <cstdio>
 #include <utility>
@@ -10,14 +10,42 @@
 
 namespace frans::application {
 
+// ---------------------------------------------------------------------------
+// Constructors
+// ---------------------------------------------------------------------------
 ProviderRouter::ProviderRouter(frans::domain::ILlmProvider& local,
-                               frans::domain::ILlmProvider*  paid,
-                               DailyBudgetGuard*             budget_guard,
-                               EscalationPolicy              policy)
+                                frans::domain::ILlmProvider*  paid_light,
+                                frans::domain::ILlmProvider*  paid_heavy,
+                                DailyBudgetGuard*             budget_guard,
+                                EscalationPolicy              policy)
     : local_(local),
-      paid_(paid),
+      paid_light_(paid_light),
+      paid_heavy_(paid_heavy),
       budget_guard_(budget_guard),
       policy_(std::move(policy)) {}
+
+ProviderRouter::ProviderRouter(frans::domain::ILlmProvider& local,
+                                frans::domain::ILlmProvider*  paid,
+                                DailyBudgetGuard*             budget_guard,
+                                EscalationPolicy              policy)
+    : local_(local),
+      paid_light_(nullptr),
+      paid_heavy_(paid),
+      budget_guard_(budget_guard),
+      policy_(std::move(policy)) {}
+
+// ---------------------------------------------------------------------------
+// Accessor
+// ---------------------------------------------------------------------------
+bool ProviderRouter::hasPaidProvider() const {
+    return (paid_light_ != nullptr) || (paid_heavy_ != nullptr);
+}
+bool ProviderRouter::hasPaidLightProvider() const {
+    return paid_light_ != nullptr;
+}
+bool ProviderRouter::hasPaidHeavyProvider() const {
+    return paid_heavy_ != nullptr;
+}
 
 // ---------------------------------------------------------------------------
 // estimatePaidCost
@@ -25,16 +53,14 @@ ProviderRouter::ProviderRouter(frans::domain::ILlmProvider& local,
 double ProviderRouter::estimatePaidCost(
     const std::string& task_description) const
 {
-    if (paid_ == nullptr) return 0.0;
+    // Estimasi hanya relevan untuk PaidHeavy (berbayar). PaidLight
+    // (Gemini) gratis — tidak butuh estimasi.
+    if (paid_heavy_ == nullptr) return 0.0;
 
-    // Bangun vector ChatMessage minimal — ILlmProvider::estimateCost()
-    // menerima vector<ChatMessage>. Kita hanya butuh approx input token
-    // count, jadi satu pesan user berisi task_description sudah cukup.
     std::vector<frans::domain::ChatMessage> probe;
     probe.push_back({"user", task_description});
 
-    const auto c = paid_->estimateCost(probe);
-    return c.total_usd();
+    return paid_heavy_->estimateCost(probe).total_usd();
 }
 
 // ---------------------------------------------------------------------------
@@ -45,64 +71,151 @@ RouteResult ProviderRouter::selectProvider(
     EscalationContext&  esc_ctx,
     double              estimated_cost_usd)
 {
-    const bool want_paid = policy_.shouldEscalate(esc_ctx, complexity);
+    const RoutingTier want_tier = policy_.decide(esc_ctx, complexity);
 
-    // ---- Tidak mau paid (policy bilang local) ----
-    if (!want_paid) {
-        return RouteResult{local_, /*is_paid=*/false, /*budget_blocked=*/false};
+    // =====================================================================
+    // 1. Local — policy bilang tetap lokal
+    // =====================================================================
+    if (want_tier == RoutingTier::Local) {
+        return RouteResult{local_, /*is_paid=*/false,
+                            /*budget_blocked=*/false,
+                            RoutingTier::Local};
     }
 
-    // ---- Policy bilang "harus paid" — tapi paid_ mungkin nullptr ----
-    if (paid_ == nullptr) {
+    // =====================================================================
+    // 2. PaidLight (Gemini — gratis)
+    // =====================================================================
+    if (want_tier == RoutingTier::PaidLight) {
+        // 2a. Gemini tersedia → pakai.
+        if (paid_light_ != nullptr && paid_light_->isAvailable()) {
+            esc_ctx.max_tier_reached = RoutingTier::PaidLight;
+            std::fprintf(stderr,
+                "[frans][router] route -> '%s' (tier=PaidLight, "
+                "complexity=%d, gratis)\n",
+                paid_light_->name().c_str(),
+                static_cast<int>(complexity));
+            std::fflush(stderr);
+            return RouteResult{*paid_light_, /*is_paid=*/true,
+                                /*budget_blocked=*/false,
+                                RoutingTier::PaidLight};
+        }
+
+        // 2b. Gemini tidak dikonfigurasi (paid_light_ == nullptr) →
+        //     fallback ke PaidHeavy kalau ada. Ini mendukung setup
+        //     2-tier (local + DeepSeek saja). Kalau paid_light_ ada
+        //     tapi !isAvailable() (mis. api_key belum di-set setelah
+        //     provider dibuat), kita juga fallback ke heavy — user
+        //     tetap mengharapkan escalation paid.
+        if (paid_heavy_ != nullptr && paid_heavy_->isAvailable()) {
+            const bool budget_ok = (budget_guard_ == nullptr)
+                ? true
+                : budget_guard_->canCallPaidAPI(estimated_cost_usd);
+            if (budget_ok) {
+                esc_ctx.max_tier_reached = RoutingTier::PaidHeavy;
+                std::fprintf(stderr,
+                    "[frans][router] route -> '%s' (tier=PaidHeavy, "
+                    "fallback dari PaidLight, estimate=$%.6f)\n",
+                    paid_heavy_->name().c_str(), estimated_cost_usd);
+                std::fflush(stderr);
+                return RouteResult{*paid_heavy_, true, false,
+                                    RoutingTier::PaidHeavy};
+            }
+            // Budget habis → fallback local.
+            const double remaining = budget_guard_
+                ? budget_guard_->remainingBudgetToday()
+                : 0.0;
+            std::fprintf(stderr,
+                "[frans][router] BUDGET HABIS (fallback dari PaidLight): "
+                "estimate=$%.6f > remaining=$%.6f -> local\n",
+                estimated_cost_usd, remaining);
+            std::fflush(stderr);
+            return RouteResult{local_, false, /*budget_blocked=*/true,
+                                RoutingTier::Local};
+        }
+
+        // 2c. Tidak ada paid yang tersedia → local (bukan budget_blocked;
+        //     ini soal ketersediaan provider, bukan budget).
         std::fprintf(stderr,
-            "[frans][router] policy=paid tapi paid provider nullptr "
-            "(belum dikonfigurasi) -> fallback local\n");
+            "[frans][router] policy=PaidLight tapi tidak ada paid "
+            "provider yang tersedia -> fallback local\n");
         std::fflush(stderr);
-        // budget_blocked=false: bukan soal budget, provider memang tidak ada.
-        return RouteResult{local_, false, false};
+        return RouteResult{local_, false, false, RoutingTier::Local};
     }
 
-    // ---- paid ada tapi tidak available (api_key kosong / server down) ----
-    if (!paid_->isAvailable()) {
-        std::fprintf(stderr,
-            "[frans][router] policy=paid tapi '%s' tidak available "
-            "(api_key kosong / endpoint down) -> fallback local\n",
-            paid_->name().c_str());
-        std::fflush(stderr);
-        return RouteResult{local_, false, false};
-    }
+    // =====================================================================
+    // 3. PaidHeavy (DeepSeek — berbayar)
+    // =====================================================================
+    // want_tier == RoutingTier::PaidHeavy
 
-    // ---- Budget check ----
-    const bool budget_ok =
-        (budget_guard_ == nullptr)
+    if (paid_heavy_ != nullptr && paid_heavy_->isAvailable()) {
+        const bool budget_ok = (budget_guard_ == nullptr)
             ? true
             : budget_guard_->canCallPaidAPI(estimated_cost_usd);
 
-    if (!budget_ok) {
+        if (budget_ok) {
+            esc_ctx.max_tier_reached = RoutingTier::PaidHeavy;
+            std::fprintf(stderr,
+                "[frans][router] route -> '%s' (tier=PaidHeavy, "
+                "complexity=%d, estimate=$%.6f)\n",
+                paid_heavy_->name().c_str(),
+                static_cast<int>(complexity),
+                estimated_cost_usd);
+            std::fflush(stderr);
+            return RouteResult{*paid_heavy_, /*is_paid=*/true,
+                                /*budget_blocked=*/false,
+                                RoutingTier::PaidHeavy};
+        }
+
+        // Budget habis → fallback ke PaidLight (gratis) kalau ada.
+        if (paid_light_ != nullptr && paid_light_->isAvailable()) {
+            esc_ctx.max_tier_reached = RoutingTier::PaidLight;
+            const double remaining = budget_guard_
+                ? budget_guard_->remainingBudgetToday()
+                : 0.0;
+            std::fprintf(stderr,
+                "[frans][router] BUDGET HABIS pada PaidHeavy: "
+                "estimate=$%.6f > remaining=$%.6f -> fallback PaidLight "
+                "('%s', gratis)\n",
+                estimated_cost_usd, remaining,
+                paid_light_->name().c_str());
+            std::fflush(stderr);
+            return RouteResult{*paid_light_, true, /*budget_blocked=*/true,
+                                RoutingTier::PaidLight};
+        }
+
+        // Tidak ada PaidLight → local, dengan flag budget_blocked.
         const double remaining = budget_guard_
             ? budget_guard_->remainingBudgetToday()
             : 0.0;
         std::fprintf(stderr,
-            "[frans][router] BUDGET HABIS: estimate=$%.6f > remaining=$%.6f "
-            "-> fallback ke local (task tetap dijalankan, tapi tanpa paid)\n",
+            "[frans][router] BUDGET HABIS dan tidak ada PaidLight: "
+            "estimate=$%.6f > remaining=$%.6f -> fallback local\n",
             estimated_cost_usd, remaining);
         std::fflush(stderr);
-        // es_ctx.escalated TIDAK di-set true: eskalasi tidak terjadi.
-        return RouteResult{local_, false, /*budget_blocked=*/true};
+        return RouteResult{local_, false, /*budget_blocked=*/true,
+                            RoutingTier::Local};
     }
 
-    // ---- Benar-benar naik ke paid ----
-    // Set sticky flag HANYA di sini — sekali berhasil naik, tetap naik.
-    esc_ctx.escalated = true;
+    // paid_heavy tidak tersedia → coba paid_light sebagai fallback
+    // (meskipun policy minta PaidHeavy — PaidLight lebih baik dari local).
+    if (paid_light_ != nullptr && paid_light_->isAvailable()) {
+        esc_ctx.max_tier_reached = RoutingTier::PaidLight;
+        std::fprintf(stderr,
+            "[frans][router] policy=PaidHeavy tapi paid_heavy tidak "
+            "tersedia -> fallback PaidLight ('%s', gratis)\n",
+            paid_light_->name().c_str());
+        std::fflush(stderr);
+        return RouteResult{*paid_light_, true, false,
+                            RoutingTier::PaidLight};
+    }
 
+    // Semua paid tidak tersedia → local (bukan budget_blocked; ini soal
+    // ketersediaan provider, bukan budget).
     std::fprintf(stderr,
-        "[frans][router] escalate -> '%s' (complexity=%d, estimate=$%.6f)\n",
-        paid_->name().c_str(),
-        static_cast<int>(complexity),
-        estimated_cost_usd);
+        "[frans][router] policy=PaidHeavy tapi tidak ada paid provider "
+        "yang tersedia -> fallback local\n");
     std::fflush(stderr);
-
-    return RouteResult{*paid_, /*is_paid=*/true, /*budget_blocked=*/false};
+    return RouteResult{local_, false, false, RoutingTier::Local};
 }
 
 } // namespace frans::application

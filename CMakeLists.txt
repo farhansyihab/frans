@@ -18,6 +18,10 @@ cmake_minimum_required(VERSION 3.16)
 # Stage 11c — manual import E2E test (paste → write → graph rebuild).
 #             Guard FRANS_CODE_INTEL_ENABLED karena butuh ProjectGraphCache
 #             (transitively tree-sitter).
+# Stage 12  — GeminiConfig + GeminiProvider (3-tier: Local/Gemini/DeepSeek)
+#             + ProviderRouter upgrade 3-tier + EscalationPolicy upgrade
+#             + free-tier audit di DailyBudgetGuard
+#             + frans_gemini_test + frans_router_3tier_test.
 project(frans_ai LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -41,17 +45,18 @@ find_package(Threads REQUIRED)
 
 # ===========================================================================
 # Stage 8 — OpenSSL (opsional). Diperlukan untuk DeepSeekProvider (HTTPS).
+# Stage 12 — Juga untuk GeminiProvider (HTTPS).
 # ===========================================================================
 find_package(OpenSSL QUIET)
 set(FRANS_HTTPLIB_DEFS "")
 set(FRANS_OPENSSL_LIBS "")
 if(OpenSSL_FOUND)
-    message(STATUS "OpenSSL ditemukan — HTTPS (DeepSeekProvider) enabled")
+    message(STATUS "OpenSSL ditemukan — HTTPS (DeepSeekProvider + GeminiProvider) enabled")
     list(APPEND FRANS_HTTPLIB_DEFS CPPHTTPLIB_OPENSSL_SUPPORT)
     list(APPEND FRANS_OPENSSL_LIBS OpenSSL::SSL OpenSSL::Crypto)
 else()
     message(WARNING
-        "OpenSSL TIDAK ditemukan — DeepSeekProvider (HTTPS) akan fail runtime.\n"
+        "OpenSSL TIDAK ditemukan — DeepSeekProvider/GeminiProvider (HTTPS) akan fail runtime.\n"
         "  Install: sudo apt install libssl-dev\n"
         "  Lalu reconfigure & rebuild.")
 endif()
@@ -80,15 +85,6 @@ target_compile_options(frans_diff PRIVATE -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
 # Stage 11a — ManualImporter (application layer, standalone).
-#
-# Butuh: IFileSystemPort (frans_fs) + MultiFileParser + DangerCheckHandler.
-# TIDAK butuh tree-sitter → sengaja dipisah supaya bisa dibuild di mesin
-# tanpa grammar. Callback invalidation (std::function) memutus ketergantungan
-# ke ProjectGraphCache (blueprint §3 — Dependency Inversion).
-#
-# CATATAN Stage 11b: ManualImportDialog (UI) TIDAK masuk library ini —
-# lib ini bebas FLTK, dipakai oleh test CLI (frans_manual_import_test).
-# Dialog masuk langsung ke frans_ai exe (butuh FLTK).
 # ===========================================================================
 add_library(frans_manual_import STATIC
     src/application/manual_import/ManualImporter.cpp
@@ -104,6 +100,8 @@ target_compile_options(frans_manual_import PRIVATE -Wall -Wextra -Wpedantic)
 # ===========================================================================
 # Stage 9c — frans_routing: ProviderRouter + EscalationPolicy +
 #            DailyBudgetGuard.
+# Stage 12 — ProviderRouter upgrade 3-tier (source tidak berubah di CMake;
+#            hanya isi .cpp).
 # ===========================================================================
 add_library(frans_routing STATIC
     src/application/provider_router/ProviderRouter.cpp
@@ -121,10 +119,6 @@ target_compile_options(frans_routing PRIVATE -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
 # Stage 5 + 6 — tree-sitter & context (opsional)
-# Stage 10a — C++ parser (opsional, conditional)
-# Stage 10b — TypeScript + JavaScript parser (opsional, conditional)
-# Stage 10c — Vue parser (opsional, conditional — butuh 10b)
-# Stage 10d — multi-language registry (conditional on 10a/10b/10c)
 # ===========================================================================
 set(TS_CORE "${CMAKE_SOURCE_DIR}/third_party/tree-sitter/lib/src/lib.c")
 set(TS_CORE_HDR "${CMAKE_SOURCE_DIR}/third_party/tree-sitter/lib/include/tree_sitter/api.h")
@@ -224,7 +218,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     if(EXISTS "${TS_TS_DIR}/parser.c" AND EXISTS "${TS_TSX_DIR}/parser.c")
         message(STATUS "tree-sitter-typescript ditemukan — TS + TSX parser enabled")
 
-        # TypeScript grammar
         set(TS_TS_SOURCES "${TS_TS_DIR}/parser.c")
         if(EXISTS "${TS_TS_DIR}/scanner.c")
             list(APPEND TS_TS_SOURCES "${TS_TS_DIR}/scanner.c")
@@ -233,7 +226,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         target_include_directories(tree_sitter_typescript PRIVATE "${TS_TS_DIR}")
         target_compile_options(tree_sitter_typescript PRIVATE -w)
 
-        # TSX grammar
         set(TS_TSX_SOURCES "${TS_TSX_DIR}/parser.c")
         if(EXISTS "${TS_TSX_DIR}/scanner.c")
             list(APPEND TS_TSX_SOURCES "${TS_TSX_DIR}/scanner.c")
@@ -313,11 +305,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     target_link_libraries(frans_code_intel PUBLIC ${FRANS_CODE_INTEL_LIBS})
     target_compile_options(frans_code_intel PRIVATE -Wall -Wextra -Wpedantic)
 
-    # -----------------------------------------------------------------------
-    # Stage 10d — macros untuk conditional registry di
-    # TreeSitterGraphBuilder.cpp. PRIVATE karena hanya .cpp builder yang
-    # butuh (supportedExtensions() meng-expose hasilnya via runtime).
-    # -----------------------------------------------------------------------
     if(FRANS_HAS_CPP_PARSER)
         target_compile_definitions(frans_code_intel PRIVATE
             FRANS_HAS_CPP_PARSER=1)
@@ -341,9 +328,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/python"
     )
 
-    # -----------------------------------------------------------------------
-    # Stage 10a — C++ parser smoke test.
-    # -----------------------------------------------------------------------
     if(FRANS_HAS_CPP_PARSER)
         add_executable(frans_cpp_parser_test tests/cpp_parser_smoke_test.cpp)
         target_link_libraries(frans_cpp_parser_test PRIVATE frans_code_intel)
@@ -354,9 +338,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
             -Wall -Wextra -Wpedantic)
     endif()
 
-    # -----------------------------------------------------------------------
-    # Stage 10b — TypeScript parser smoke test.
-    # -----------------------------------------------------------------------
     if(FRANS_HAS_TS_PARSER)
         add_executable(frans_ts_parser_test tests/ts_parser_smoke_test.cpp)
         target_link_libraries(frans_ts_parser_test PRIVATE frans_code_intel)
@@ -367,9 +348,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
             -Wall -Wextra -Wpedantic)
     endif()
 
-    # -----------------------------------------------------------------------
-    # Stage 10b — JavaScript parser smoke test.
-    # -----------------------------------------------------------------------
     if(FRANS_HAS_JS_PARSER)
         add_executable(frans_js_parser_test tests/js_parser_smoke_test.cpp)
         target_link_libraries(frans_js_parser_test PRIVATE frans_code_intel)
@@ -380,9 +358,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
             -Wall -Wextra -Wpedantic)
     endif()
 
-    # -----------------------------------------------------------------------
-    # Stage 10c — Vue parser smoke test.
-    # -----------------------------------------------------------------------
     if(FRANS_HAS_VUE_PARSER)
         add_executable(frans_vue_parser_test tests/vue_parser_smoke_test.cpp)
         target_link_libraries(frans_vue_parser_test PRIVATE frans_code_intel)
@@ -409,9 +384,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/python"
     )
 
-    # -----------------------------------------------------------------------
-    # Stage 7f — ProjectGraphCache + TargetScopeResolver
-    # -----------------------------------------------------------------------
     add_library(frans_project STATIC
         src/application/project/ProjectGraphCache.cpp
         src/application/agent/TargetScopeResolver.cpp
@@ -422,9 +394,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     target_link_libraries(frans_project PUBLIC frans_context)
     target_compile_options(frans_project PRIVATE -Wall -Wextra -Wpedantic)
 
-    # -----------------------------------------------------------------------
-    # Stage 10d — multi-language integration test.
-    # -----------------------------------------------------------------------
     if(FRANS_HAS_CPP_PARSER AND FRANS_HAS_VUE_PARSER)
         add_executable(frans_multilang_test tests/multilang_smoke_test.cpp)
         target_link_libraries(frans_multilang_test PRIVATE
@@ -441,9 +410,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
             "  Status: CPP=${FRANS_HAS_CPP_PARSER} VUE=${FRANS_HAS_VUE_PARSER}")
     endif()
 
-    # -----------------------------------------------------------------------
-    # Stage 7b — GenerateState smoke test
-    # -----------------------------------------------------------------------
     add_executable(frans_generate_test
         tests/generate_smoke_test.cpp
         src/application/agent/GenerateState.cpp
@@ -468,9 +434,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
     target_compile_options(frans_generate_test PRIVATE -Wall -Wextra -Wpedantic)
 
-    # -----------------------------------------------------------------------
-    # Stage 7d — Full agent loop smoke test
-    # -----------------------------------------------------------------------
     add_executable(frans_agent_loop_test
         tests/agent_loop_smoke_test.cpp
         src/application/agent/PlanState.cpp
@@ -495,9 +458,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
     target_compile_options(frans_agent_loop_test PRIVATE -Wall -Wextra -Wpedantic)
 
-    # -----------------------------------------------------------------------
-    # Stage 7e + 7g — TaskRunner smoke test
-    # -----------------------------------------------------------------------
     add_executable(frans_task_runner_test
         tests/task_runner_smoke_test.cpp
         src/application/agent/PlanState.cpp
@@ -524,9 +484,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
     target_compile_options(frans_task_runner_test PRIVATE -Wall -Wextra -Wpedantic)
 
-    # -----------------------------------------------------------------------
-    # Stage 7f — Project awareness smoke test
-    # -----------------------------------------------------------------------
     add_executable(frans_project_awareness_test
         tests/project_awareness_smoke_test.cpp
         src/application/agent/PlanState.cpp
@@ -551,14 +508,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
     target_compile_options(frans_project_awareness_test PRIVATE -Wall -Wextra -Wpedantic)
 
-    # -----------------------------------------------------------------------
-    # Stage 11c — Manual Import end-to-end test.
-    #
-    # Butuh tree-sitter (via frans_project → frans_context → frans_code_intel)
-    # karena menguji kontrak ManualImporter ↔ ProjectGraphCache (invalidate
-    # → rebuild). Kalau tree-sitter tidak ada, target ini di-skip — Stage 11a
-    # test (frans_manual_import_test) tetap bisa dijalankan standalone.
-    # -----------------------------------------------------------------------
     add_executable(frans_manual_import_e2e_test
         tests/manual_import_e2e_test.cpp
     )
@@ -603,6 +552,28 @@ target_compile_definitions(frans_deepseek_test PRIVATE
 target_compile_options(frans_deepseek_test PRIVATE -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
+# Stage 12 — GeminiProvider smoke test (independen dari tree-sitter)
+# ===========================================================================
+add_executable(frans_gemini_test
+    tests/gemini_provider_smoke_test.cpp
+    src/config/GeminiConfig.cpp
+    src/infrastructure/api_providers/GeminiProvider.cpp
+)
+target_link_libraries(frans_gemini_test PRIVATE
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+    ${FRANS_OPENSSL_LIBS}
+)
+target_include_directories(frans_gemini_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party
+)
+target_compile_definitions(frans_gemini_test PRIVATE
+    ${FRANS_HTTPLIB_DEFS}
+)
+target_compile_options(frans_gemini_test PRIVATE -Wall -Wextra -Wpedantic)
+
+# ===========================================================================
 # Main executable (UI)
 # ===========================================================================
 set(FRANS_AI_SOURCES
@@ -618,6 +589,7 @@ set(FRANS_AI_SOURCES
     src/config/AppConfig.cpp
     src/config/LlamaServerConfig.cpp
     src/config/DeepSeekConfig.cpp
+    src/config/GeminiConfig.cpp
 
     # ---- domain ----
     src/domain/command/MacroCommand.cpp
@@ -628,6 +600,7 @@ set(FRANS_AI_SOURCES
     src/infrastructure/llama/LlamaServerProcessController.cpp
     src/infrastructure/llama/LlamaCppProvider.cpp
     src/infrastructure/api_providers/DeepSeekProvider.cpp
+    src/infrastructure/api_providers/GeminiProvider.cpp
     src/infrastructure/system/ProcessExecutor.cpp
     src/infrastructure/system/MemoryInfo.cpp
     src/infrastructure/system/SystemMaintenanceFacade.cpp
@@ -656,11 +629,6 @@ if(FRANS_CODE_INTEL_ENABLED)
         src/application/task_runner/TaskRunner.cpp
 
         # ---- manual import (Stage 11a application) ----
-        # ManualImporter.cpp sudah di frans_manual_import lib — WAJIB
-        # ditambahkan di sini juga karena static lib tidak transitively
-        # di-link ke executable. Sumber di-share, object file di-compile
-        # dua kali (sekali untuk lib, sekali untuk exe) — trade-off kecil,
-        # build time OK.
         src/application/manual_import/ManualImporter.cpp
 
         # ---- agent UI ----
@@ -704,14 +672,14 @@ if(FRANS_CODE_INTEL_ENABLED)
 endif()
 
 # ===========================================================================
-# Stage 7a — SandboxedFileSystem smoke test (tidak butuh tree-sitter)
+# Stage 7a — SandboxedFileSystem smoke test
 # ===========================================================================
 add_executable(frans_sandbox_test tests/sandbox_smoke_test.cpp)
 target_link_libraries(frans_sandbox_test PRIVATE frans_fs)
 target_compile_options(frans_sandbox_test PRIVATE -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
-# Stage 11a — ManualImporter smoke test (tidak butuh tree-sitter).
+# Stage 11a — ManualImporter smoke test
 # ===========================================================================
 add_executable(frans_manual_import_test tests/manual_importer_smoke_test.cpp)
 target_link_libraries(frans_manual_import_test PRIVATE frans_manual_import)
@@ -737,7 +705,7 @@ target_include_directories(frans_execute_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(frans_execute_test PRIVATE -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
-# Stage 7g — DiffEngine smoke test (standalone)
+# Stage 7g — DiffEngine smoke test
 # ===========================================================================
 add_executable(frans_diff_engine_test tests/diff_engine_smoke_test.cpp)
 target_link_libraries(frans_diff_engine_test PRIVATE frans_diff)
@@ -761,6 +729,23 @@ target_include_directories(frans_provider_router_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_options(frans_provider_router_test PRIVATE -Wall -Wextra -Wpedantic)
+
+# ===========================================================================
+# Stage 12 — ProviderRouter 3-tier smoke test (baru)
+# ===========================================================================
+add_executable(frans_router_3tier_test
+    tests/router_3tier_smoke_test.cpp
+)
+target_link_libraries(frans_router_3tier_test PRIVATE
+    frans_routing
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+)
+target_include_directories(frans_router_3tier_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_options(frans_router_3tier_test PRIVATE
+    -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
 # Stage 9a — DailyBudgetGuard smoke test (unit-level)

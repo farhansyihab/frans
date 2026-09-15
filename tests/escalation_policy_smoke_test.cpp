@@ -1,150 +1,152 @@
 // ~/AgenAI/frans/tests/escalation_policy_smoke_test.cpp
 //
-// Smoke test Stage 9b: EscalationPolicy.
+// Stage 12 — EscalationPolicy smoke test (3-tier).
 //
-// Murni unit test — tidak butuh llama-server, tidak butuh API key,
-// tidak butuh network. Semua keputusan adalah fungsi murni dari
-// (EscalationContext, TaskComplexity).
+// API lama: bool shouldEscalate(const EscalationContext&, TaskComplexity)
+// API baru: RoutingTier decide(const EscalationContext&, TaskComplexity)
 //
-// EscalationPolicy tidak menyimpan state internal — semua informasi
-// keputusan datang dari parameter. Jadi test ini adalah tabel
-// input→expected yang straightforward.
-
+// Test di bawah murni menguji fungsi decide() — stateless, tanpa
+// filesystem, tanpa network.
 #include "application/provider_router/EscalationPolicy.h"
 
 #include <cstdio>
 #include <string>
-#include <vector>
 
-using frans::application::EscalationContext;
-using frans::application::EscalationPolicy;
-using frans::application::TaskComplexity;
+using namespace frans::application;
 
 namespace {
 
-int g_failures = 0;
-
 struct TestCase {
-    std::string       label;
-    EscalationContext esc;
-    TaskComplexity    complexity;
-    bool              expected;
+    std::string        name;
+    EscalationContext  esc;
+    TaskComplexity     complexity;
+    RoutingTier        expected;
 };
 
-void runCase(const TestCase& t, const EscalationPolicy& p) {
-    const bool got  = p.shouldEscalate(t.esc, t.complexity);
-    const bool pass = (got == t.expected);
-    std::printf("  %s  %-62s  (expected=%d, got=%d)\n",
-                pass ? "PASS" : "FAIL",
-                t.label.c_str(),
-                t.expected ? 1 : 0,
-                got ? 1 : 0);
-    if (!pass) ++g_failures;
+int runCase(const TestCase& t, const EscalationPolicy& p) {
+    const RoutingTier got = p.decide(t.esc, t.complexity);
+    if (got != t.expected) {
+        std::fprintf(stderr,
+            "FAIL [%s]: expected tier=%d, got tier=%d\n",
+            t.name.c_str(),
+            static_cast<int>(t.expected),
+            static_cast<int>(got));
+        return 1;
+    }
+    std::printf("PASS [%s] -> tier=%d\n",
+                t.name.c_str(), static_cast<int>(got));
+    return 0;
 }
 
 } // namespace
 
 int main() {
-    std::printf("=== frans_ai escalation policy smoke test (Stage 9b) ===\n\n");
+    std::printf("[escalation_policy_smoke] starting...\n");
 
     const EscalationPolicy policy;
+    int fails = 0;
 
-    const std::vector<TestCase> cases = {
-        // ================================================================
-        // Grup 1: Trivial / Moderate dengan streak rendah → tetap local
-        // ================================================================
-        {
-            "Trivial, streak=0, escalated=false -> false",
-            EscalationContext{0, false},
-            TaskComplexity::Trivial,
-            false,
-        },
-        {
-            "Moderate, streak=0, escalated=false -> false",
-            EscalationContext{0, false},
-            TaskComplexity::Moderate,
-            false,
-        },
-        {
-            "Moderate, streak=1, escalated=false -> false (belum 2x)",
-            EscalationContext{1, false},
-            TaskComplexity::Moderate,
-            false,
-        },
+    // -----------------------------------------------------------------
+    // Aturan 1: RequiresDeepReasoning -> PaidHeavy langsung
+    // -----------------------------------------------------------------
+    const TestCase cases[] = {
+        // ---------- Default: tetap Local ----------
+        {"trivial fresh",
+         EscalationContext{},
+         TaskComplexity::Trivial,
+         RoutingTier::Local},
 
-        // ================================================================
-        // Grup 2: Local gagal 2x / lebih → eskalasi
-        // ================================================================
-        {
-            "Moderate, streak=2, escalated=false -> true (2x gagal)",
-            EscalationContext{2, false},
-            TaskComplexity::Moderate,
-            true,
-        },
-        {
-            "Moderate, streak=3, escalated=false -> true (>2x gagal)",
-            EscalationContext{3, false},
-            TaskComplexity::Moderate,
-            true,
-        },
-        {
-            "Trivial, streak=5, escalated=false -> true (trivial pun bisa naik)",
-            EscalationContext{5, false},
-            TaskComplexity::Trivial,
-            true,
-        },
+        {"moderate fresh",
+         EscalationContext{},
+         TaskComplexity::Moderate,
+         RoutingTier::Local},
 
-        // ================================================================
-        // Grup 3: Sticky (sudah pernah eskalasi di run ini) → tetap true
-        // ================================================================
-        {
-            "Trivial, streak=0, escalated=true -> true (sticky)",
-            EscalationContext{0, true},
-            TaskComplexity::Trivial,
-            true,
-        },
-        {
-            "Moderate, streak=0, escalated=true -> true (sticky)",
-            EscalationContext{0, true},
-            TaskComplexity::Moderate,
-            true,
-        },
+        {"moderate local_fail=1",
+         EscalationContext{1, 0, RoutingTier::Local},
+         TaskComplexity::Moderate,
+         RoutingTier::Local},
 
-        // ================================================================
-        // Grup 4: Complex / RequiresDeepReasoning → selalu true (skip local)
-        // ================================================================
-        {
-            "Complex, streak=0, escalated=false -> true (skip local)",
-            EscalationContext{0, false},
-            TaskComplexity::Complex,
-            true,
-        },
-        {
-            "Complex, streak=0, escalated=true -> true (redundant, tetap true)",
-            EscalationContext{0, true},
-            TaskComplexity::Complex,
-            true,
-        },
-        {
-            "RequiresDeepReasoning, streak=0, escalated=false -> true",
-            EscalationContext{0, false},
-            TaskComplexity::RequiresDeepReasoning,
-            true,
-        },
-        {
-            "RequiresDeepReasoning, streak=0, escalated=true -> true",
-            EscalationContext{0, true},
-            TaskComplexity::RequiresDeepReasoning,
-            true,
-        },
+        // ---------- Naik ke PaidLight setelah 2x fail lokal ----------
+        {"moderate local_fail=2 -> PaidLight",
+         EscalationContext{2, 0, RoutingTier::Local},
+         TaskComplexity::Moderate,
+         RoutingTier::PaidLight},
+
+        {"moderate local_fail=5 -> PaidLight",
+         EscalationContext{5, 0, RoutingTier::Local},
+         TaskComplexity::Moderate,
+         RoutingTier::PaidLight},
+
+        // ---------- Complex: minimal PaidLight ----------
+        {"complex fresh -> PaidLight",
+         EscalationContext{},
+         TaskComplexity::Complex,
+         RoutingTier::PaidLight},
+
+        {"complex with max_tier=PaidHeavy -> tetap PaidHeavy",
+         EscalationContext{0, 0, RoutingTier::PaidHeavy},
+         TaskComplexity::Complex,
+         RoutingTier::PaidHeavy},
+
+        // ---------- RequiresDeepReasoning: PaidHeavy ----------
+        {"requires-deep-reasoning fresh -> PaidHeavy",
+         EscalationContext{},
+         TaskComplexity::RequiresDeepReasoning,
+         RoutingTier::PaidHeavy},
+
+        {"RDR dengan max_tier=PaidLight -> tetap PaidHeavy",
+         EscalationContext{0, 0, RoutingTier::PaidLight},
+         TaskComplexity::RequiresDeepReasoning,
+         RoutingTier::PaidHeavy},
+
+        // ---------- Sticky di PaidLight ----------
+        {"sticky PaidLight, light_fail=0 -> PaidLight",
+         EscalationContext{0, 0, RoutingTier::PaidLight},
+         TaskComplexity::Moderate,
+         RoutingTier::PaidLight},
+
+        {"sticky PaidLight, light_fail=1 -> PaidLight",
+         EscalationContext{0, 1, RoutingTier::PaidLight},
+         TaskComplexity::Moderate,
+         RoutingTier::PaidLight},
+
+        {"sticky PaidLight, light_fail=2 -> PaidHeavy",
+         EscalationContext{0, 2, RoutingTier::PaidLight},
+         TaskComplexity::Moderate,
+         RoutingTier::PaidHeavy},
+
+        {"sticky PaidLight, light_fail=3 -> PaidHeavy",
+         EscalationContext{0, 3, RoutingTier::PaidLight},
+         TaskComplexity::Trivial,
+         RoutingTier::PaidHeavy},
+
+        // ---------- Sticky di PaidHeavy (tidak turun) ----------
+        {"sticky PaidHeavy, complexity=Trivial -> tetap PaidHeavy",
+         EscalationContext{0, 0, RoutingTier::PaidHeavy},
+         TaskComplexity::Trivial,
+         RoutingTier::PaidHeavy},
+
+        {"sticky PaidHeavy, complexity=Moderate -> tetap PaidHeavy",
+         EscalationContext{0, 0, RoutingTier::PaidHeavy},
+         TaskComplexity::Moderate,
+         RoutingTier::PaidHeavy},
+
+        {"sticky PaidHeavy abaikan local_fail tinggi",
+         EscalationContext{99, 99, RoutingTier::PaidHeavy},
+         TaskComplexity::Trivial,
+         RoutingTier::PaidHeavy},
     };
 
     for (const auto& c : cases) {
-        runCase(c, policy);
+        fails += runCase(c, policy);
     }
 
-    std::printf("\n=== %s ===\n",
-                g_failures == 0 ? "ALL PASS" : "FAILURES");
-    std::printf("total failures: %d\n", g_failures);
-    return g_failures == 0 ? 0 : 1;
+    if (fails > 0) {
+        std::fprintf(stderr,
+            "[escalation_policy_smoke] %d check(s) FAILED\n", fails);
+        return 1;
+    }
+    std::printf("[escalation_policy_smoke] all %zu checks passed\n",
+                sizeof(cases) / sizeof(cases[0]));
+    return 0;
 }

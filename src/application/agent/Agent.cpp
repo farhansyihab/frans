@@ -24,6 +24,15 @@ const frans::code_intelligence::DependencyGraph& emptyGraph() {
     return g;
 }
 
+const char* tierName(RoutingTier t) {
+    switch (t) {
+        case RoutingTier::Local:     return "Local";
+        case RoutingTier::PaidLight: return "PaidLight";
+        case RoutingTier::PaidHeavy: return "PaidHeavy";
+    }
+    return "?";
+}
+
 void logStep(const char* state, int attempt, const AgentContext& ctx) {
     std::fprintf(stderr,
         "[frans][agent] attempt=%d step=%-8s success=%d%s%s\n",
@@ -78,7 +87,7 @@ bool Agent::run(AgentContext& ctx) {
 
     const auto& graph = deps_.graph ? *deps_.graph : emptyGraph();
 
-    // Stage 9c — escalation state fresh per run.
+    // Stage 9c + Stage 12 — escalation state fresh per run.
     // Tidak disimpan di AgentContext supaya tidak bocor lintas-run
     // (AgentContext dipakai ulang oleh TaskRunner).
     EscalationContext esc_ctx;
@@ -99,30 +108,36 @@ bool Agent::run(AgentContext& ctx) {
 
         const int attempt = ctx.attempt;
 
-        // ---- Stage 9c: provider selection ----
+        // ---- Stage 12: provider selection (3-tier) ----
         frans::domain::ILlmProvider* active_provider = deps_.provider;
         bool                         this_attempt_paid = false;
+        RoutingTier                  this_attempt_tier = RoutingTier::Local;
 
         if (deps_.router) {
             const double est_cost =
                 deps_.router->estimatePaidCost(ctx.taskDescription);
             const RouteResult route = deps_.router->selectProvider(
                 ctx.plannedComplexity, esc_ctx, est_cost);
-            active_provider   = &route.provider;
-            this_attempt_paid = route.is_paid;
+            active_provider    = &route.provider;
+            this_attempt_paid  = route.is_paid;
+            this_attempt_tier  = route.tier;
 
             if (route.budget_blocked) {
                 std::fprintf(stderr,
                     "[frans][agent] attempt=%d: budget API harian habis, "
-                    "fallback ke provider lokal.\n", attempt);
+                    "fallback ke tier bawah (%s).\n",
+                    attempt, tierName(route.tier));
                 std::fflush(stderr);
             }
             std::fprintf(stderr,
-                "[frans][agent] attempt=%d route: provider=%s paid=%d "
-                "streak=%d escalated=%d\n",
+                "[frans][agent] attempt=%d route: provider=%s tier=%s "
+                "paid=%d local_streak=%d light_streak=%d max_tier=%s\n",
                 attempt, active_provider->name().c_str(),
+                tierName(this_attempt_tier),
                 this_attempt_paid ? 1 : 0,
-                esc_ctx.local_fail_streak, esc_ctx.escalated ? 1 : 0);
+                esc_ctx.local_fail_streak,
+                esc_ctx.paid_light_fail_streak,
+                tierName(esc_ctx.max_tier_reached));
             std::fflush(stderr);
         }
 
@@ -182,23 +197,57 @@ bool Agent::run(AgentContext& ctx) {
             ctx.attemptHistory.push_back(std::move(rec));
         }
 
-        // ---- Stage 9c: escalation state + budget update ----
+        // ---- Stage 12: escalation state + budget update ----
         // Dilakukan SETELAH Observe (supaya ctx.success final attempt ini
         // sudah terisi) dan SEBELUM cek success di bawah.
         //
-        // recordUsage: hanya kalau attempt ini benar-benar pakai paid.
-        //   ctx.lastCallCostUsd diisi oleh GenerateState/FixState tepat
-        //   setelah provider.generate() return — 0.0 untuk provider lokal.
-        // local_fail_streak: increment hanya kalau attempt ini LOCAL dan
-        //   gagal. Attempt paid yang gagal TIDAK menaikkan streak (kita
-        //   sudah di paid, tidak perlu eskalasi lagi — sticky policy yang
-        //   menangani).
+        // Aturan update:
+        //   PaidHeavy selesai (sukses/gagal) -> recordUsage (biaya nyata).
+        //   PaidLight selesai (sukses/gagal) -> recordFreeTierUsage (audit).
+        //   PaidLight sukses                 -> reset kedua streak.
+        //   PaidHeavy sukses                 -> reset kedua streak.
+        //   Local gagal                      -> local_fail_streak++
+        //   PaidLight gagal                  -> paid_light_fail_streak++
+        //   PaidHeavy gagal                  -> tidak increment (sticky).
+        //
+        // ctx.lastCallCostUsd diisi oleh GenerateState/FixState tepat
+        // setelah provider.generate() return — 0.0 untuk provider gratis
+        // (Local, Gemini). Hanya dipakai untuk PaidHeavy.
+        //
+        // CATATAN Stage 12: audit token free-tier (Gemini) sementara
+        // dilewati karena AgentContext belum menyimpan prompt/completion
+        // tokens dari panggilan terakhir. TODO: tambah field
+        // `lastPromptTokens` / `lastCompletionTokens` ke AgentContext,
+        // isi di GenerateState/FixState setelah provider.generate(),
+        // lalu aktifkan recordFreeTierUsage di bawah.
         if (deps_.router) {
-            if (this_attempt_paid && deps_.budget_guard) {
-                deps_.budget_guard->recordUsage(ctx.lastCallCostUsd);
+            // 1. Budget per tier.
+            if (deps_.budget_guard) {
+                if (this_attempt_tier == RoutingTier::PaidHeavy) {
+                    deps_.budget_guard->recordUsage(ctx.lastCallCostUsd);
+                }
+                // else if (this_attempt_tier == RoutingTier::PaidLight) {
+                //     deps_.budget_guard->recordFreeTierUsage(
+                //         ctx.lastPromptTokens,
+                //         ctx.lastCompletionTokens);
+                // }
             }
-            if (!ctx.success && !this_attempt_paid) {
-                ++esc_ctx.local_fail_streak;
+
+            // 2. Streak update.
+            if (ctx.success) {
+                // Attempt ini sukses — reset kedua streak supaya attempt
+                // berikutnya (kalau ada, mis. multi-task) mulai dari Local
+                // lagi kecuali max_tier_reached sudah sticky.
+                esc_ctx.local_fail_streak      = 0;
+                esc_ctx.paid_light_fail_streak = 0;
+            } else {
+                if (this_attempt_tier == RoutingTier::Local) {
+                    ++esc_ctx.local_fail_streak;
+                } else if (this_attempt_tier == RoutingTier::PaidLight) {
+                    ++esc_ctx.paid_light_fail_streak;
+                }
+                // PaidHeavy gagal: tidak increment. Sticky di max_tier
+                // sudah menjamin attempt berikutnya tetap di PaidHeavy.
             }
         }
 

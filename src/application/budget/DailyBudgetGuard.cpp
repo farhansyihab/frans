@@ -20,18 +20,13 @@ namespace fs = std::filesystem;
 namespace {
 
 // Tanggal lokal hari ini, "YYYY-MM-DD". Pakai localtime_r (thread-safe
-// POSIX) supaya tidak race dengan worker thread lain.
-//
-// Memakai std::put_time (bukan snprintf) untuk menghindari false-positive
-// -Wformat-truncation: GCC tidak tahu tm_mon dibatasi 0..11 dan tm_mday
-// dibatasi 1..31, jadi dia asumsikan %02d bisa sampai 11 karakter.
-// std::put_time tidak lewat jalur analisis format-string itu.
+// POSIX). std::put_time (bukan snprintf) untuk hindari false-positive
+// -Wformat-truncation.
 std::string todayLocalDate() {
     const std::time_t t = std::chrono::system_clock::to_time_t(
         std::chrono::system_clock::now());
     std::tm tm_buf{};
     if (::localtime_r(&t, &tm_buf) == nullptr) {
-        // Fallback deterministik (harus tidak pernah terjadi di Linux).
         return "1970-01-01";
     }
 
@@ -67,9 +62,10 @@ DailyBudgetGuard::DailyBudgetGuard(double daily_budget_usd,
 void DailyBudgetGuard::loadStateLocked() {
     const std::string today = todayLocalDate();
 
-    // Default state — dipakai kalau file tidak ada / rusak.
     current_date_ = today;
     spent_usd_    = 0.0;
+    free_prompt_tokens_     = 0;
+    free_completion_tokens_ = 0;
 
     if (state_file_path_.empty()) {
         logBudget("state_file_path kosong — budget hanya in-memory "
@@ -100,6 +96,8 @@ void DailyBudgetGuard::loadStateLocked() {
 
     std::string file_date;
     double      file_spent = 0.0;
+    long long   file_fpt   = 0;
+    long long   file_fct   = 0;
 
     if (j.contains("date") && j["date"].is_string()) {
         file_date = j["date"].get<std::string>();
@@ -107,22 +105,32 @@ void DailyBudgetGuard::loadStateLocked() {
     if (j.contains("spent_usd") && j["spent_usd"].is_number()) {
         file_spent = j["spent_usd"].get<double>();
     }
+    if (j.contains("free_prompt_tokens")
+        && j["free_prompt_tokens"].is_number_integer()) {
+        file_fpt = j["free_prompt_tokens"].get<long long>();
+    }
+    if (j.contains("free_completion_tokens")
+        && j["free_completion_tokens"].is_number_integer()) {
+        file_fct = j["free_completion_tokens"].get<long long>();
+    }
 
     if (file_date != today) {
-        // Rollover saat load — file dibuat di hari lain. Reset.
         logBudget("rollover saat load: file date='%s', today='%s' "
-                  "-> spent direset ke 0",
+                  "-> semua counter direset ke 0",
                   file_date.empty() ? "(kosong)" : file_date.c_str(),
                   today.c_str());
-        current_date_ = today;
-        spent_usd_    = 0.0;
         return;
     }
 
-    current_date_ = today;
-    spent_usd_    = file_spent;
-    logBudget("state di-load: date=%s spent=$%.6f budget=$%.2f",
-              current_date_.c_str(), spent_usd_, budget_usd_);
+    current_date_           = today;
+    spent_usd_              = file_spent;
+    free_prompt_tokens_     = file_fpt;
+    free_completion_tokens_ = file_fct;
+
+    logBudget("state di-load: date=%s spent=$%.6f budget=$%.2f "
+              "free_tok=%lld/%lld",
+              current_date_.c_str(), spent_usd_, budget_usd_,
+              free_prompt_tokens_, free_completion_tokens_);
 }
 
 // ---------------------------------------------------------------------------
@@ -132,8 +140,6 @@ void DailyBudgetGuard::saveStateLocked() {
     if (state_file_path_.empty()) return;
 
     std::error_code ec;
-
-    // Buat parent directory kalau belum ada (nested).
     const fs::path p(state_file_path_);
     const fs::path parent = p.parent_path();
     if (!parent.empty()) {
@@ -142,13 +148,14 @@ void DailyBudgetGuard::saveStateLocked() {
             logBudget("create_directories('%s') gagal: %s "
                       "(tetap coba tulis file)",
                       parent.string().c_str(), ec.message().c_str());
-            // tidak return — coba tulis saja, mungkin parent sudah ada
         }
     }
 
     nlohmann::json j;
-    j["date"]      = current_date_;
-    j["spent_usd"] = spent_usd_;
+    j["date"]                   = current_date_;
+    j["spent_usd"]              = spent_usd_;
+    j["free_prompt_tokens"]     = free_prompt_tokens_;
+    j["free_completion_tokens"] = free_completion_tokens_;
 
     std::ofstream f(state_file_path_, std::ios::trunc);
     if (!f) {
@@ -169,17 +176,15 @@ void DailyBudgetGuard::checkRolloverLocked() {
     const std::string today = todayLocalDate();
     if (today == current_date_) return;
 
-    logBudget("rollover: '%s' -> '%s', spent=$%.6f direset ke 0",
-              current_date_.c_str(), today.c_str(), spent_usd_);
+    logBudget("rollover: '%s' -> '%s', spent=$%.6f direset ke 0 "
+              "(free_tok lama: %lld/%lld)",
+              current_date_.c_str(), today.c_str(), spent_usd_,
+              free_prompt_tokens_, free_completion_tokens_);
 
-    current_date_ = today;
-    spent_usd_    = 0.0;
-
-    // Tidak persist di sini — persist terjadi saat recordUsage berikutnya.
-    // State in-memory sudah benar untuk sisa sesi ini, dan kalau aplikasi
-    // restart tanpa recordUsage, loadStateLocked akan mendeteksi rollover
-    // lagi dari file (idempotent). Ini menghindari write yang tidak perlu
-    // saat canCallPaidAPI hanya untuk query.
+    current_date_           = today;
+    spent_usd_              = 0.0;
+    free_prompt_tokens_     = 0;
+    free_completion_tokens_ = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,7 +195,6 @@ bool DailyBudgetGuard::canCallPaidAPI(double estimated_cost_usd) {
     checkRolloverLocked();
 
     if (budget_usd_ <= 0.0) {
-        // Budget dimatikan = tidak pernah boleh call paid API.
         return false;
     }
     return (spent_usd_ + estimated_cost_usd) <= budget_usd_;
@@ -204,6 +208,24 @@ void DailyBudgetGuard::recordUsage(double actual_cost_usd) {
 
     logBudget("recordUsage($%.6f) -> spent=$%.6f / budget=$%.2f",
               actual_cost_usd, spent_usd_, budget_usd_);
+
+    saveStateLocked();
+}
+
+void DailyBudgetGuard::recordFreeTierUsage(int prompt_tokens,
+                                            int completion_tokens) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    checkRolloverLocked();
+
+    if (prompt_tokens > 0)
+        free_prompt_tokens_ += static_cast<long long>(prompt_tokens);
+    if (completion_tokens > 0)
+        free_completion_tokens_ += static_cast<long long>(completion_tokens);
+
+    logBudget("recordFreeTierUsage(prompt=%d, completion=%d) -> "
+              "free_total=%lld/%lld",
+              prompt_tokens, completion_tokens,
+              free_prompt_tokens_, free_completion_tokens_);
 
     saveStateLocked();
 }
@@ -222,9 +244,11 @@ BudgetStatus DailyBudgetGuard::status() {
     checkRolloverLocked();
 
     BudgetStatus s;
-    s.date       = current_date_;
-    s.budget_usd = budget_usd_;
-    s.spent_usd  = spent_usd_;
+    s.date                  = current_date_;
+    s.budget_usd            = budget_usd_;
+    s.spent_usd             = spent_usd_;
+    s.free_prompt_tokens    = free_prompt_tokens_;
+    s.free_completion_tokens = free_completion_tokens_;
 
     if (budget_usd_ <= 0.0) {
         s.remaining_usd = 0.0;

@@ -8,42 +8,46 @@ namespace frans::application {
 
 // Snapshot status budget untuk UI/log. Immutable copy — caller boleh
 // pegang melewati mutex guard.
+//
+// Stage 12 tambah: counter free-tier (Gemini) untuk audit. Nilai-nilai
+// ini TIDAK mempengaruhi canCallPaidAPI / remaining_usd — Gemini gratis.
 struct BudgetStatus {
     std::string date;           // "YYYY-MM-DD", local time
     double      budget_usd    = 0.0;
     double      spent_usd     = 0.0;
     double      remaining_usd = 0.0;
+
+    // Audit free-tier (Gemini) — kumulatif hari ini.
+    long long   free_prompt_tokens     = 0;
+    long long   free_completion_tokens = 0;
 };
 
 // Blueprint §5.3 — DailyBudgetGuard.
 //
-// Membatasi pengeluaran harian API berbayar (DeepSeek/Gemini). Dipanggil
-// dari Agent loop (worker thread) SEBELUM memanggil provider berbayar
-// (canCallPaidAPI) dan SESUDAH generation selesai (recordUsage).
+// Membatasi pengeluaran harian API berbayar (DeepSeek). Dipanggil dari
+// Agent loop SEBELUM memanggil provider berbayar (canCallPaidAPI) dan
+// SESUDAH generation selesai (recordUsage).
 //
-// State dipersist ke file JSON supaya usage survive restart aplikasi di
-// hari yang sama:
-//   {"date": "YYYY-MM-DD", "spent_usd": 0.1234}
+// Stage 12: PaidLight (Gemini) GRATIS — tidak dikenai budget check.
+// Namun usage Gemini tetap di-track via recordFreeTierUsage() untuk
+// audit (blueprint §5.3: "Gemini TIDAK dihitung di budget, tapi tetap
+// di-track untuk audit").
 //
-// Rollover harian: tiap pemanggilan canCallPaidAPI() / recordUsage()
-// mengecek tanggal lokal. Kalau tanggal sudah berganti sejak panggilan
-// terakhir, spent_usd direset ke 0 SEBELUM logika lain dijalankan.
+// State dipersist ke file JSON:
+//   {"date": "YYYY-MM-DD", "spent_usd": 0.1234,
+//    "free_prompt_tokens": 0, "free_completion_tokens": 0}
 //
-// Tanggal ditentukan dari LOCAL time (std::chrono::system_clock +
-// localtime_r), bukan UTC — user melihat "hari ini" menurut zona waktunya.
+// Rollover harian: tiap pemanggilan public method mengecek tanggal
+// lokal. Kalau berganti, semua counter direset ke 0 SEBELUM logika
+// lain dijalankan.
 //
-// Semua operasi thread-safe (mutex internal). Tidak throw: semua error
-// I/O ditelan dan fallback ke default (spent=0), dengan log ke stderr
-// ber-prefix "[frans][budget]".
+// Tanggal ditentukan dari LOCAL time (localtime_r).
+//
+// Semua operasi thread-safe (mutex internal). Tidak throw: error I/O
+// ditelan, fallback ke default (spent=0), log ke stderr prefix
+// "[frans][budget]".
 class DailyBudgetGuard {
 public:
-    // `daily_budget_usd` : dari AppConfig::daily_api_budget_usd.
-    //                      0 atau negatif = budget dimatikan (canCall
-    //                      selalu false).
-    // `state_file_path`  : file JSON untuk persist usage. Caller yang
-    //                      menentukan path (biasanya
-    //                      cfg.log_dir + "/budget_state.json"). Parent
-    //                      directory dibuat otomatis saat pertama write.
     DailyBudgetGuard(double daily_budget_usd, std::string state_file_path);
 
     DailyBudgetGuard(const DailyBudgetGuard&)            = delete;
@@ -56,18 +60,21 @@ public:
     // pernah boleh panggil API berbayar).
     bool canCallPaidAPI(double estimated_cost_usd);
 
-    // Catat biaya AKTUAL setelah panggilan API selesai. Menambah
+    // Catat biaya AKTUAL setelah panggilan PaidHeavy selesai. Menambah
     // spent_usd hari ini dan menulis ulang state_file_path.
     void recordUsage(double actual_cost_usd);
+
+    // Stage 12 — audit free-tier (Gemini). TIDAK mempengaruhi budget.
+    // Kumulatif per hari, ikut dipersist.
+    void recordFreeTierUsage(int prompt_tokens, int completion_tokens);
 
     // Sisa budget hari ini. 0.0 kalau sudah habis / budget dimatikan.
     double remainingBudgetToday();
 
-    // Snapshot status (date, budget, spent, remaining). Copy aman.
+    // Snapshot status (date, budget, spent, remaining, free-tier audit).
     BudgetStatus status();
 
 private:
-    // WAJIB dipanggil dengan mtx_ held.
     void loadStateLocked();
     void saveStateLocked();
     void checkRolloverLocked();
@@ -77,6 +84,10 @@ private:
     std::string        state_file_path_;
     std::string        current_date_;   // "YYYY-MM-DD", local time
     double             spent_usd_       = 0.0;
+
+    // Stage 12 — audit free-tier (Gemini).
+    long long          free_prompt_tokens_     = 0;
+    long long          free_completion_tokens_ = 0;
 };
 
 } // namespace frans::application
