@@ -5,10 +5,14 @@
 #include "application/agent/AgentContext.h"
 #include "application/agent/Agent.h"
 #include "application/agent/TargetScopeResolver.h"
+#include "application/budget/DailyBudgetGuard.h"
 #include "application/context_budget/ContextBudgetManager.h"
 #include "application/project/ProjectGraphCache.h"
+#include "application/provider_router/ProviderRouter.h"
+#include "config/DeepSeekConfig.h"
 #include "domain/fs/IFileSystemPort.h"
 #include "domain/llm/ILlmProvider.h"
+#include "infrastructure/api_providers/DeepSeekProvider.h"
 #include "infrastructure/fs/SandboxedFileSystem.h"
 #include "infrastructure/llama/LlamaCppProvider.h"
 #include "infrastructure/llama/LlamaServerProcessController.h"
@@ -33,9 +37,11 @@ using frans::application::Agent;
 using frans::application::AgentContext;
 using frans::application::AppContext;
 using frans::application::ContextBudgetManager;
+using frans::application::ProviderRouter;
 using frans::application::TargetScopeResolver;
 using frans::application::TaskProgress;
 using frans::application::TaskRunner;
+using frans::infrastructure::DeepSeekProvider;
 using frans::infrastructure::LlamaCppProvider;
 using frans::infrastructure::SandboxedFileSystem;
 
@@ -147,6 +153,15 @@ int AgentPanel::createWidgets(int x, int y, int w) {
     scope_label_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
     scope_label_->labelsize(10);
     scope_label_->labelcolor(FL_DARK_GREEN);
+
+    by += 20;
+
+    // ---- Stage 9c: Daily API budget label ----
+    budget_label_ = new Fl_Box(x + 100, by, w - 100, 18,
+        "Daily API budget: (menunggu data)");
+    budget_label_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+    budget_label_->labelsize(10);
+    budget_label_->labelcolor(FL_DARK_BLUE);
 
     by += 20;
 
@@ -290,6 +305,11 @@ void AgentPanel::tick() {
             updateScopeLabel(cur_task, cur_root);
         }
     }
+
+    // Stage 9c — budget label (hanya saat idle; hindari spam redraw).
+    if (!p.running) {
+        updateBudgetLabel();
+    }
 }
 
 void AgentPanel::updateScopeLabel(const std::string& task,
@@ -324,6 +344,49 @@ void AgentPanel::updateScopeLabel(const std::string& task,
     }
     scope_label_->copy_label(buf);
     scope_label_->redraw();
+}
+
+// ---------------------------------------------------------------------------
+// Stage 9c — update budget label dari ctx_->budget_guard->status().
+//
+// Hanya menulis ulang label kalau string berubah. tick() dipanggil tiap
+// 100ms — tanpa guard ini, label akan trigger redraw terus-menerus.
+// ---------------------------------------------------------------------------
+void AgentPanel::updateBudgetLabel() {
+    if (!budget_label_) return;
+    if (!ctx_ || !ctx_->budget_guard) {
+        const std::string s = "Daily API budget: (tidak tersedia)";
+        if (s != last_budget_str_) {
+            last_budget_str_ = s;
+            budget_label_->copy_label(last_budget_str_.c_str());
+            budget_label_->redraw();
+        }
+        return;
+    }
+
+    const auto st = ctx_->budget_guard->status();
+
+    char buf[224];
+    if (st.budget_usd <= 0.0) {
+        std::snprintf(buf, sizeof(buf),
+            "Daily API budget: DISABLED  (spent today: $%.6f)",
+            st.spent_usd);
+    } else {
+        const double pct = (st.budget_usd > 0.0)
+            ? (st.spent_usd / st.budget_usd) * 100.0
+            : 0.0;
+        std::snprintf(buf, sizeof(buf),
+            "Daily API budget: $%.4f / $%.2f used  (%.1f%%)  "
+            "— remaining $%.4f",
+            st.spent_usd, st.budget_usd, pct, st.remaining_usd);
+    }
+
+    const std::string s = buf;
+    if (s != last_budget_str_) {
+        last_budget_str_ = s;
+        budget_label_->copy_label(last_budget_str_.c_str());
+        budget_label_->redraw();
+    }
 }
 
 void AgentPanel::startTask() {
@@ -391,10 +454,35 @@ void AgentPanel::startTask() {
         return;
     }
 
+    // ---- Local provider (llama-server) ----
     LlamaCppProvider::Config cfg;
     cfg.host = deps_.get_host ? deps_.get_host() : std::string("127.0.0.1");
     cfg.port = deps_.get_port ? deps_.get_port() : 8080;
     provider_ = std::make_unique<LlamaCppProvider>(cfg);
+
+    // ---- Stage 9c: paid provider + router ----
+    // DeepSeekConfig::loadFromFile mengembalikan config dengan api_key kosong
+    // kalau env var / secrets file tidak ada. Dalam kasus itu,
+    // DeepSeekProvider::isAvailable() == false, dan ProviderRouter akan
+    // selalu fallback ke local — perilaku identik dengan sebelum Stage 9c.
+    const auto ds_cfg =
+        frans::config::DeepSeekConfig::loadFromFile("config/providers.json");
+    deepseek_provider_ =
+        std::make_unique<DeepSeekProvider>(ds_cfg);
+
+    router_ = std::make_unique<ProviderRouter>(
+        *provider_,
+        deepseek_provider_.get(),
+        ctx_->budget_guard.get());
+
+    std::fprintf(stderr,
+        "[frans][agent_panel] router: local='%s', paid='%s' (available=%d), "
+        "budget_guard=%p\n",
+        provider_->name().c_str(),
+        deepseek_provider_->name().c_str(),
+        deepseek_provider_->isAvailable() ? 1 : 0,
+        static_cast<const void*>(ctx_->budget_guard.get()));
+    std::fflush(stderr);
 
     result_shown_ = false;
     if (output_buf_) output_buf_->text("");
@@ -403,11 +491,13 @@ void AgentPanel::startTask() {
     if (deps_.on_activity) deps_.on_activity();
 
     Agent::Deps adeps;
-    adeps.provider            = provider_.get();
+    adeps.provider            = provider_.get();       // fallback kalau router null
     adeps.fs                  = fs_.get();
     adeps.graph               = &graph_ref;
     adeps.sandbox_root        = canonical_root;
     adeps.execute_timeout_sec = 30;
+    adeps.router              = router_.get();         // Stage 9c
+    adeps.budget_guard        = ctx_->budget_guard.get(); // Stage 9c
 
     AgentContext actx;
     actx.taskDescription    = task;
@@ -440,6 +530,8 @@ void AgentPanel::startTask() {
         hdr += "Task        : " + task + "\n";
         hdr += "Test-aware  : ON  (test_*.py / *_test.py akan dijalankan "
                "sebelum entry point)\n";
+        hdr += "Stage 9c    : hybrid routing (local + paid) + daily budget "
+               "guard\n";
         hdr += "Stage 7g    : cancel responsif (SIGKILL via cancel_flag) + "
                "diff view\n\n";
         output_buf_->append(hdr.c_str());

@@ -6,6 +6,8 @@
 #include "application/agent/GenerateState.h"
 #include "application/agent/ObserveState.h"
 #include "application/agent/PlanState.h"
+#include "application/budget/DailyBudgetGuard.h"
+#include "application/provider_router/ProviderRouter.h"
 #include "code_intelligence/graph/DependencyGraph.h"
 #include "domain/fs/IFileSystemPort.h"
 #include "domain/llm/ILlmProvider.h"
@@ -36,13 +38,15 @@ void logStep(const char* state, int attempt, const AgentContext& ctx) {
 Agent::Agent(Deps deps) : deps_(std::move(deps)) {}
 
 bool Agent::run(AgentContext& ctx) {
-    if (!deps_.provider || !deps_.fs) {
+    // ---- Precondition (Stage 9c: provider ATAU router) ----
+    if ((!deps_.router && !deps_.provider) || !deps_.fs) {
         ctx.success   = false;
-        ctx.lastError = "Agent: Deps::provider dan/atau Deps::fs belum "
-                        "di-set (nullptr).";
+        ctx.lastError = "Agent: Deps::fs belum di-set dan/atau tidak ada "
+                        "provider (set deps.provider atau deps.router).";
         std::fprintf(stderr,
-            "[frans][agent] ABORT: provider=%p fs=%p\n",
+            "[frans][agent] ABORT: provider=%p router=%p fs=%p\n",
             static_cast<const void*>(deps_.provider),
+            static_cast<const void*>(deps_.router),
             static_cast<const void*>(deps_.fs));
         std::fflush(stderr);
         return false;
@@ -74,6 +78,11 @@ bool Agent::run(AgentContext& ctx) {
 
     const auto& graph = deps_.graph ? *deps_.graph : emptyGraph();
 
+    // Stage 9c — escalation state fresh per run.
+    // Tidak disimpan di AgentContext supaya tidak bocor lintas-run
+    // (AgentContext dipakai ulang oleh TaskRunner).
+    EscalationContext esc_ctx;
+
     // =====================================================================
     // 2. Loop
     // =====================================================================
@@ -90,15 +99,42 @@ bool Agent::run(AgentContext& ctx) {
 
         const int attempt = ctx.attempt;
 
+        // ---- Stage 9c: provider selection ----
+        frans::domain::ILlmProvider* active_provider = deps_.provider;
+        bool                         this_attempt_paid = false;
+
+        if (deps_.router) {
+            const double est_cost =
+                deps_.router->estimatePaidCost(ctx.taskDescription);
+            const RouteResult route = deps_.router->selectProvider(
+                ctx.plannedComplexity, esc_ctx, est_cost);
+            active_provider   = &route.provider;
+            this_attempt_paid = route.is_paid;
+
+            if (route.budget_blocked) {
+                std::fprintf(stderr,
+                    "[frans][agent] attempt=%d: budget API harian habis, "
+                    "fallback ke provider lokal.\n", attempt);
+                std::fflush(stderr);
+            }
+            std::fprintf(stderr,
+                "[frans][agent] attempt=%d route: provider=%s paid=%d "
+                "streak=%d escalated=%d\n",
+                attempt, active_provider->name().c_str(),
+                this_attempt_paid ? 1 : 0,
+                esc_ctx.local_fail_streak, esc_ctx.escalated ? 1 : 0);
+            std::fflush(stderr);
+        }
+
         // ---- Generate / Fix ----
         if (attempt == 0) {
             announce("Generate", attempt);
-            GenerateState gen(graph, *deps_.provider, *deps_.fs);
+            GenerateState gen(graph, *active_provider, *deps_.fs);
             gen.run(ctx);
             logStep("Generate", attempt, ctx);
         } else {
             announce("Fix", attempt);
-            FixState fix(*deps_.provider, *deps_.fs);
+            FixState fix(*active_provider, *deps_.fs);
             fix.run(ctx);
             logStep("Fix", attempt, ctx);
         }
@@ -144,6 +180,26 @@ bool Agent::run(AgentContext& ctx) {
             rec.timed_out   = ctx.lastExecution.timed_out;
             rec.observation = ctx.lastObservation;
             ctx.attemptHistory.push_back(std::move(rec));
+        }
+
+        // ---- Stage 9c: escalation state + budget update ----
+        // Dilakukan SETELAH Observe (supaya ctx.success final attempt ini
+        // sudah terisi) dan SEBELUM cek success di bawah.
+        //
+        // recordUsage: hanya kalau attempt ini benar-benar pakai paid.
+        //   ctx.lastCallCostUsd diisi oleh GenerateState/FixState tepat
+        //   setelah provider.generate() return — 0.0 untuk provider lokal.
+        // local_fail_streak: increment hanya kalau attempt ini LOCAL dan
+        //   gagal. Attempt paid yang gagal TIDAK menaikkan streak (kita
+        //   sudah di paid, tidak perlu eskalasi lagi — sticky policy yang
+        //   menangani).
+        if (deps_.router) {
+            if (this_attempt_paid && deps_.budget_guard) {
+                deps_.budget_guard->recordUsage(ctx.lastCallCostUsd);
+            }
+            if (!ctx.success && !this_attempt_paid) {
+                ++esc_ctx.local_fail_streak;
+            }
         }
 
         // Cancel check — dipindah ke sini (setelah Observe + record) supaya

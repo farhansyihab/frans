@@ -184,6 +184,10 @@ void FixState::run(AgentContext& ctx) {
     // ---- 4. Generate ----
     const GenResult result = provider_.generate(messages, opts);
 
+    // Stage 9c — catat biaya AKTUAL sebelum cek success. Lihat komentar
+    // paralel di GenerateState.cpp.
+    ctx.lastCallCostUsd = result.cost_usd;
+
     if (!result.success) {
         ctx.lastError = "FixState: LLM generate gagal: " + result.error;
         return;

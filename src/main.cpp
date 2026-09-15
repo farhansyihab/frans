@@ -11,6 +11,7 @@
 // State non-UI dipindah ke application/AppContext.h.
 
 #include "application/AppContext.h"
+#include "application/budget/DailyBudgetGuard.h"
 #include "application/project/ProjectGraphCache.h"
 #include "application/resource_guard/IdleUnloadTimer.h"
 #include "application/resource_guard/ResourceGuard.h"
@@ -26,6 +27,7 @@
 #include <chrono>
 #include <cstdio>
 #include <memory>
+#include <string>
 #include <utility>
 
 namespace {
@@ -55,6 +57,14 @@ void printStartupBanner(const frans::application::AppContext& ctx,
                 ctx.config.ram_available_threshold_mb);
     std::printf("[frans_ai] chat provider: /v1/chat/completions (SSE streaming)\n");
     std::printf("[frans_ai] graph cache: single-slot (Stage 7f)\n");
+
+    // Stage 9c — info budget harian.
+    if (ctx.budget_guard) {
+        const auto st = ctx.budget_guard->status();
+        std::printf("[frans_ai] daily API budget: $%.2f  (spent today: $%.6f)\n",
+                    st.budget_usd, st.spent_usd);
+    }
+
     std::fflush(stdout);
 }
 
@@ -63,6 +73,7 @@ frans::application::AppContext buildAppContext(
     const frans::config::LlamaServerConfig& ls_cfg)
 {
     using frans::application::AppContext;
+    using frans::application::DailyBudgetGuard;
     using frans::application::IdleUnloadTimer;
     using frans::application::ProjectGraphCache;
     using frans::application::ResourceGuard;
@@ -91,6 +102,16 @@ frans::application::AppContext buildAppContext(
 
     // Stage 7f: project graph cache (single-slot).
     ctx.graph_cache = std::make_unique<ProjectGraphCache>();
+
+    // Stage 9c: daily budget guard. Hidup selama aplikasi supaya
+    // spent_usd konsisten lintas task run dalam sesi yang sama.
+    // Kalau log_dir kosong, fallback ke /tmp supaya file state tetap
+    // bisa ditulis (tidak menulis ke root filesystem).
+    const std::string log_dir =
+        cfg.log_dir.empty() ? std::string("/tmp") : cfg.log_dir;
+    ctx.budget_guard = std::make_unique<DailyBudgetGuard>(
+        cfg.daily_api_budget_usd,
+        log_dir + "/budget_state.json");
 
     return ctx;
 }

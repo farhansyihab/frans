@@ -19,11 +19,13 @@ class Fl_Widget;
 
 namespace frans::application {
 struct AppContext;
+class ProviderRouter;
 }
 
 namespace frans::infrastructure {
 class SandboxedFileSystem;
 class LlamaCppProvider;
+class DeepSeekProvider;
 }
 
 namespace frans::ui {
@@ -33,6 +35,8 @@ namespace frans::ui {
 // Stage 7f: tambah ProjectGraphCache (via AppContext) + TargetScopeResolver
 // untuk auto-detect entry point dan in-scope files.
 // Stage 7g: tambah toggle [Log]/[Diff] + render unified diff setelah run.
+// Stage 9c: tambah ProviderRouter + DailyBudgetGuard untuk hybrid routing,
+// plus label read-only untuk daily API budget.
 class AgentPanel {
 public:
     struct Deps {
@@ -72,6 +76,10 @@ private:
     // task & root input saat ini. Dipanggil dari tick() saat idle.
     void updateScopeLabel(const std::string& task, const std::string& root);
 
+    // Stage 9c — update label "Daily API budget: ..." dari
+    // ctx_->budget_guard->status(). Dipanggil dari tick() saat idle.
+    void updateBudgetLabel();
+
     // ---- deps ----
     frans::application::AppContext* ctx_;
     Deps                            deps_;
@@ -82,6 +90,7 @@ private:
     Fl_Multiline_Input* task_input_    = nullptr;
     Fl_Input*           target_input_  = nullptr;
     Fl_Box*             scope_label_   = nullptr;   // Stage 7f
+    Fl_Box*             budget_label_  = nullptr;   // Stage 9c
     Fl_Button*          run_btn_       = nullptr;
     Fl_Button*          cancel_btn_    = nullptr;
     Fl_Button*          clear_btn_     = nullptr;
@@ -100,6 +109,10 @@ private:
     std::unique_ptr<frans::infrastructure::SandboxedFileSystem>    fs_;
     std::unique_ptr<frans::infrastructure::LlamaCppProvider>       provider_;
 
+    // Stage 9c — paid provider + router. Dibangun ulang setiap startTask().
+    std::unique_ptr<frans::infrastructure::DeepSeekProvider>       deepseek_provider_;
+    std::unique_ptr<frans::application::ProviderRouter>            router_;
+
     bool        result_shown_ = false;
     std::string status_buf_;
 
@@ -110,6 +123,10 @@ private:
     // Stage 7f — tracking untuk hindari resolve berulang di tick().
     std::string last_scope_task_;
     std::string last_scope_root_;
+
+    // Stage 9c — tracking supaya label budget hanya di-redraw saat nilai
+    // berubah (menghindari spam redraw tiap tick 100ms).
+    std::string last_budget_str_;
 };
 
 } // namespace frans::ui

@@ -174,6 +174,11 @@ void GenerateState::run(AgentContext& ctx) {
     // ---- 4. Generate ----
     const GenResult result = provider_.generate(messages, opts);
 
+    // Stage 9c — catat biaya AKTUAL sebelum cek success, supaya biaya
+    // tetap tercatat walau generate gagal parsial (mis. HTTP 200 tapi
+    // content kosong, atau error setelah token usage terlaporkan).
+    ctx.lastCallCostUsd = result.cost_usd;
+
     if (!result.success) {
         ctx.success   = false;
         ctx.lastError = "LLM generate gagal: " + result.error;

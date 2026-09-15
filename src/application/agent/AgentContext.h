@@ -87,6 +87,14 @@ struct AgentContext {
     std::vector<GeneratedFile> generatedFiles;
     std::string lastGeneratedCode;
 
+    // Stage 9c — biaya AKTUAL panggilan LLM terakhir (dari
+    // GenResult::cost_usd). Diisi GenerateState & FixState setelah
+    // provider_.generate() return. 0.0 untuk provider lokal (selalu
+    // gratis). Dipakai Agent loop untuk memanggil
+    // DailyBudgetGuard::recordUsage() hanya saat attempt berjalan di
+    // provider berbayar.
+    double lastCallCostUsd = 0.0;
+
     // ---- hasil ExecuteState (Stage 7c) ----
 
     ExecutionOutcome lastExecution;

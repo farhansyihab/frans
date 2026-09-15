@@ -2,6 +2,12 @@
 cmake_minimum_required(VERSION 3.16)
 # Stage 5 — tambah C untuk compile tree-sitter core + grammar Python.
 # Stage 8 — tambah OpenSSL (opsional) untuk HTTPS (DeepSeek).
+# Stage 9c — tambah frans_routing (ProviderRouter + EscalationPolicy +
+#            DailyBudgetGuard) sebagai static library bersama. Agent.cpp
+#            sekarang mereferensikan simbol-simbol ini, jadi SEMUA target
+#            yang meng-link Agent.cpp WAJIB juga link frans_routing.
+#            Dikumpulkan jadi satu library untuk menghindari duplikasi
+#            source list yang riskan drift.
 project(frans_ai LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -63,6 +69,33 @@ target_include_directories(frans_diff PUBLIC
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_options(frans_diff PRIVATE -Wall -Wextra -Wpedantic)
+
+# ===========================================================================
+# Stage 9c — frans_routing: ProviderRouter + EscalationPolicy +
+#            DailyBudgetGuard.
+#
+# Static library bersama supaya Agent.cpp (yang mereferensikan ketiga
+# komponen ini) bisa di-link oleh SEMUA target test maupun frans_ai tanpa
+# perlu menduplikasi source list di setiap target.
+#
+# Dependency: nlohmann_json (DailyBudgetGuard.cpp pakai nlohmann::json
+# untuk persist state budget). Dideklarasikan PUBLIC supaya consumer yang
+# meng-link frans_routing otomatis mendapat nlohmann_json juga — mereka
+# tidak perlu tahu detail internal DailyBudgetGuard.
+# ===========================================================================
+add_library(frans_routing STATIC
+    src/application/provider_router/ProviderRouter.cpp
+    src/application/provider_router/EscalationPolicy.cpp
+    src/application/budget/DailyBudgetGuard.cpp
+)
+target_include_directories(frans_routing PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(frans_routing PUBLIC
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+)
+target_compile_options(frans_routing PRIVATE -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
 # Stage 5 + 6 — tree-sitter & context (opsional)
@@ -145,6 +178,10 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
 
     # -----------------------------------------------------------------------
     # Stage 7b — GenerateState smoke test
+    #
+    # Catatan: TIDAK link frans_routing karena test ini tidak memakai
+    # Agent.cpp (hanya GenerateState langsung). Kalau nanti test ini
+    # mulai memakai Agent, tambahkan frans_routing ke target_link_libraries.
     # -----------------------------------------------------------------------
     add_executable(frans_generate_test
         tests/generate_smoke_test.cpp
@@ -172,6 +209,12 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
 
     # -----------------------------------------------------------------------
     # Stage 7d — Full agent loop smoke test
+    #
+    # Stage 9c: Agent.cpp sekarang referensi ProviderRouter + DailyBudgetGuard,
+    # jadi WAJIB link frans_routing. Test file itu sendiri TIDAK diubah —
+    # dia hanya set deps.provider (bukan deps.router), jadi runtime path
+    # tetap mengikuti perilaku lama, tapi linker butuh simbol tetap ada
+    # karena Agent.cpp di-compile dengan kedua branch.
     # -----------------------------------------------------------------------
     add_executable(frans_agent_loop_test
         tests/agent_loop_smoke_test.cpp
@@ -189,6 +232,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         frans_context
         frans_project
         frans_fs
+        frans_routing
     )
     target_include_directories(frans_agent_loop_test PRIVATE
         ${CMAKE_SOURCE_DIR}/src
@@ -198,6 +242,9 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
 
     # -----------------------------------------------------------------------
     # Stage 7e + 7g — TaskRunner smoke test
+    #
+    # Stage 9c: sama seperti frans_agent_loop_test — butuh frans_routing
+    # karena meng-link Agent.cpp.
     # -----------------------------------------------------------------------
     add_executable(frans_task_runner_test
         tests/task_runner_smoke_test.cpp
@@ -217,6 +264,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         frans_context
         frans_project
         frans_fs
+        frans_routing
     )
     target_include_directories(frans_task_runner_test PRIVATE
         ${CMAKE_SOURCE_DIR}/src
@@ -226,6 +274,8 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
 
     # -----------------------------------------------------------------------
     # Stage 7f — Project awareness smoke test
+    #
+    # Stage 9c: butuh frans_routing karena meng-link Agent.cpp.
     # -----------------------------------------------------------------------
     add_executable(frans_project_awareness_test
         tests/project_awareness_smoke_test.cpp
@@ -243,6 +293,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         frans_context
         frans_project
         frans_fs
+        frans_routing
     )
     target_include_directories(frans_project_awareness_test PRIVATE
         ${CMAKE_SOURCE_DIR}/src
@@ -287,6 +338,11 @@ target_compile_options(frans_deepseek_test PRIVATE -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
 # Main executable (UI)
+#
+# Stage 9c: AgentPanel sekarang membuat ProviderRouter (via provider_router
+# header) + main.cpp membuat DailyBudgetGuard. Karena itu, frans_ai WAJIB
+# link frans_routing. Di-link di dalam if(FRANS_CODE_INTEL_ENABLED) karena
+# AgentPanel.cpp hanya di-compile kalau code_intel enabled.
 # ===========================================================================
 set(FRANS_AI_SOURCES
     # ---- bootstrap ----
@@ -340,6 +396,11 @@ if(FRANS_CODE_INTEL_ENABLED)
 
         # ---- agent UI ----
         src/ui/AgentPanel.cpp
+
+        # NOTE Stage 9c: source file ProviderRouter.cpp, EscalationPolicy.cpp,
+        # dan DailyBudgetGuard.cpp TIDAK dimasukkan ke sini — mereka masuk
+        # via link ke frans_routing di bawah, supaya tidak terduplikasi
+        # dengan target test lain.
     )
 endif()
 
@@ -367,7 +428,11 @@ target_compile_definitions(frans_ai PRIVATE
 target_compile_options(frans_ai PRIVATE -Wall -Wextra -Wpedantic)
 
 if(FRANS_CODE_INTEL_ENABLED)
-    target_link_libraries(frans_ai PRIVATE frans_code_intel frans_context)
+    target_link_libraries(frans_ai PRIVATE
+        frans_code_intel
+        frans_context
+        frans_routing      # Stage 9c — ProviderRouter + DailyBudgetGuard
+    )
     target_compile_definitions(frans_ai PRIVATE FRANS_HAS_AGENT_PANEL=1)
 endif()
 
@@ -400,3 +465,81 @@ add_executable(frans_diff_engine_test tests/diff_engine_smoke_test.cpp)
 target_link_libraries(frans_diff_engine_test PRIVATE frans_diff)
 target_include_directories(frans_diff_engine_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(frans_diff_engine_test PRIVATE -Wall -Wextra -Wpedantic)
+
+# ===========================================================================
+# Stage 9b — ProviderRouter + EscalationPolicy smoke test (unit-level)
+# ===========================================================================
+add_executable(frans_provider_router_test
+    tests/provider_router_smoke_test.cpp
+    src/application/provider_router/ProviderRouter.cpp
+    src/application/provider_router/EscalationPolicy.cpp
+    src/application/budget/DailyBudgetGuard.cpp
+)
+target_link_libraries(frans_provider_router_test PRIVATE
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+)
+target_include_directories(frans_provider_router_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_options(frans_provider_router_test PRIVATE -Wall -Wextra -Wpedantic)
+
+# ===========================================================================
+# Stage 9a — DailyBudgetGuard smoke test (unit-level)
+# ===========================================================================
+add_executable(frans_daily_budget_guard_test
+    tests/daily_budget_guard_smoke_test.cpp
+    src/application/budget/DailyBudgetGuard.cpp
+)
+target_link_libraries(frans_daily_budget_guard_test PRIVATE
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+)
+target_include_directories(frans_daily_budget_guard_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_options(frans_daily_budget_guard_test PRIVATE -Wall -Wextra -Wpedantic)
+
+# ===========================================================================
+# Stage 9b — EscalationPolicy smoke test (unit-level)
+# ===========================================================================
+add_executable(frans_escalation_policy_test
+    tests/escalation_policy_smoke_test.cpp
+    src/application/provider_router/EscalationPolicy.cpp
+)
+target_include_directories(frans_escalation_policy_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_options(frans_escalation_policy_test PRIVATE -Wall -Wextra -Wpedantic)
+
+# ===========================================================================
+# Stage 9c — ProviderRouter + DailyBudgetGuard integration via Agent loop
+#
+# Link frans_routing sebagai ganti source file eksplisit, supaya konsisten
+# dengan target lain. frans_routing sendiri sudah membawa nlohmann_json +
+# Threads transitively (PUBLIC), jadi link tambahan tidak diperlukan.
+# ===========================================================================
+add_executable(frans_provider_router_integration_test
+    tests/provider_router_integration_test.cpp
+    src/application/agent/PlanState.cpp
+    src/application/agent/GenerateState.cpp
+    src/application/agent/ExecuteState.cpp
+    src/application/agent/ObserveState.cpp
+    src/application/agent/FixState.cpp
+    src/application/agent/Agent.cpp
+    src/application/agent/MultiFileParser.cpp
+    src/application/safety/DangerCheckHandler.cpp
+    src/infrastructure/system/ProcessExecutor.cpp
+)
+target_link_libraries(frans_provider_router_integration_test PRIVATE
+    frans_context
+    frans_project
+    frans_fs
+    frans_routing
+)
+target_include_directories(frans_provider_router_integration_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party
+)
+target_compile_options(frans_provider_router_integration_test PRIVATE
+    -Wall -Wextra -Wpedantic)

@@ -20,8 +20,16 @@ namespace frans::application {
 
 struct AgentContext;
 
+// Blueprint Stage 9c — forward declarations. Hanya dipakai sebagai pointer
+// di Deps, jadi tidak perlu include penuh di sini (menghindari siklus
+// include: ProviderRouter.h sendiri include AgentContext.h untuk
+// TaskComplexity).
+class ProviderRouter;
+class DailyBudgetGuard;
+
 // Blueprint §5.7 — Agent orchestrator (Stage 7d).
 // Stage 7e: tambah cancel flag + state transition callback.
+// Stage 9c: tambah router + budget_guard (hybrid routing).
 class Agent {
 public:
     // Progress hook: dipanggil sebelum setiap state dijalankan.
@@ -33,9 +41,27 @@ public:
                                               int attempt)>;
 
     struct Deps {
-        // ---- providers & io (WAJIB) ----
+        // ---- providers & io ----
+        //
+        // Precondition: minimal salah satu dari `provider` atau `router`
+        // HARUS non-null, dan `fs` non-null. Kalau `router` di-set, ia
+        // memilih provider tiap attempt (dan `provider` jadi fallback
+        // kalau-kalau caller tidak memasang router). Kalau `router` null,
+        // perilaku identik dengan sebelum Stage 9c: langsung pakai
+        // `provider`.
         frans::domain::ILlmProvider*    provider = nullptr;
         frans::domain::IFileSystemPort* fs       = nullptr;
+
+        // ---- Stage 9c: hybrid routing ----
+        // Kalau non-null, Agent akan memanggil router->selectProvider()
+        // setiap attempt dan memakai provider yang dipilih. ProviderRouter
+        // menyentuh EscalationContext internal (fresh per run).
+        ProviderRouter*   router       = nullptr;
+
+        // Kalau non-null DAN attempt yang berjalan memakai paid provider,
+        // Agent akan memanggil budget_guard->recordUsage(cost) setelah
+        // attempt tersebut selesai (sebelum cek success).
+        DailyBudgetGuard* budget_guard = nullptr;
 
         // ---- code intelligence (opsional) ----
         const frans::code_intelligence::DependencyGraph* graph = nullptr;
@@ -59,7 +85,8 @@ public:
     // Jalankan loop penuh. Modifikasi ctx in-place.
     // Return true kalau attempt terakhir sukses.
     //
-    // Precondition: deps.provider != nullptr && deps.fs != nullptr.
+    // Precondition: deps.fs != nullptr DAN (deps.provider != nullptr ||
+    //               deps.router != nullptr).
     bool run(AgentContext& ctx);
 
 private:
