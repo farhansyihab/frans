@@ -42,6 +42,24 @@ public:
     // setelah return path sudah tidak ada, false kalau ditolak sandbox
     // atau ada error I/O.
     virtual bool deleteFile(const std::string& path) = 0;
+
+    // Stage 11a — query containment SEBELUM operasi apa pun.
+    //
+    // Dipakai ManualImporter::preview() untuk membedakan:
+    //   - path aman      → lanjut cek danger + exists
+    //   - path ditolak   → status Blocked (sandbox reject)
+    //
+    // Tanpa method ini, caller hanya bisa tahu path ditolak SETELAH
+    // memanggil writeFile() (yang punya side-effect). Query ini adalah
+    // alternatif murni-query yang bersih.
+    //
+    // Default: true — implementasi tanpa sandbox (mock in-memory FS)
+    // tidak perlu override. SandboxedFileSystem override untuk cek
+    // containment via resolveSafe().
+    virtual bool isPathSafe(const std::string& path) const {
+        (void)path;
+        return true;
+    }
 };
 
 } // namespace frans::domain

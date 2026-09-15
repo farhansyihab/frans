@@ -21,6 +21,9 @@ cmake_minimum_required(VERSION 3.16)
 #             * FRANS_HAS_<LANG>_PARSER macros di frans_code_intel
 #               supaya TreeSitterGraphBuilder bisa conditional-compile
 #               registry (hindari link error kalau grammar tidak ada).
+# Stage 11a — ManualImporter (application layer) + smoke test.
+#             Independent dari tree-sitter: butuh IFileSystemPort +
+#             MultiFileParser + DangerCheckHandler.
 project(frans_ai LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -80,6 +83,25 @@ target_include_directories(frans_diff PUBLIC
     ${CMAKE_SOURCE_DIR}/src
 )
 target_compile_options(frans_diff PRIVATE -Wall -Wextra -Wpedantic)
+
+# ===========================================================================
+# Stage 11a — ManualImporter (application layer, standalone).
+#
+# Butuh: IFileSystemPort (frans_fs) + MultiFileParser + DangerCheckHandler.
+# TIDAK butuh tree-sitter → sengaja dipisah supaya bisa dibuild di mesin
+# tanpa grammar. Callback invalidation (std::function) memutus ketergantungan
+# ke ProjectGraphCache (blueprint §3 — Dependency Inversion).
+# ===========================================================================
+add_library(frans_manual_import STATIC
+    src/application/manual_import/ManualImporter.cpp
+    src/application/agent/MultiFileParser.cpp
+    src/application/safety/DangerCheckHandler.cpp
+)
+target_include_directories(frans_manual_import PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(frans_manual_import PUBLIC frans_fs)
+target_compile_options(frans_manual_import PRIVATE -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
 # Stage 9c — frans_routing: ProviderRouter + EscalationPolicy +
@@ -659,6 +681,21 @@ endif()
 add_executable(frans_sandbox_test tests/sandbox_smoke_test.cpp)
 target_link_libraries(frans_sandbox_test PRIVATE frans_fs)
 target_compile_options(frans_sandbox_test PRIVATE -Wall -Wextra -Wpedantic)
+
+# ===========================================================================
+# Stage 11a — ManualImporter smoke test (tidak butuh tree-sitter).
+#
+# Menyertakan ManualImporter.cpp + MultiFileParser.cpp + DangerCheckHandler.cpp
+# via frans_manual_import. Hanya depend pada frans_fs (IFileSystemPort +
+# SandboxedFileSystem).
+# ===========================================================================
+add_executable(frans_manual_import_test tests/manual_importer_smoke_test.cpp)
+target_link_libraries(frans_manual_import_test PRIVATE frans_manual_import)
+target_include_directories(frans_manual_import_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_options(frans_manual_import_test PRIVATE
+    -Wall -Wextra -Wpedantic)
 
 # ===========================================================================
 # Stage 7c + 7g — ExecuteState + DangerCheckHandler smoke test

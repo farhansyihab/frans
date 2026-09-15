@@ -98,6 +98,13 @@ fs::path SandboxedFileSystem::resolveSafe(const std::string& path) const {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 11a — isPathSafe
+// ---------------------------------------------------------------------------
+bool SandboxedFileSystem::isPathSafe(const std::string& path) const {
+    return !resolveSafe(path).empty();
+}
+
+// ---------------------------------------------------------------------------
 // IFileSystemPort implementation
 // ---------------------------------------------------------------------------
 bool SandboxedFileSystem::writeFile(const std::string& path,

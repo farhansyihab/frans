@@ -42,6 +42,10 @@ public:
     bool        exists(const std::string& path) override;
     bool        deleteFile(const std::string& path) override;
 
+    // Stage 11a — override query containment. Return true kalau
+    // resolveSafe() berhasil (path di dalam root).
+    bool        isPathSafe(const std::string& path) const override;
+
     // Akses ke root canonical (untuk logging / test).
     const std::filesystem::path& root() const { return canonical_root_; }
 
