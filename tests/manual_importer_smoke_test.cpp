@@ -1,8 +1,9 @@
 // ~/AgenAI/frans/tests/manual_importer_smoke_test.cpp
 //
-// Manual smoke test Stage 11a: ManualImporter.
+// Manual smoke test Stage 11a/11b: ManualImporter.
 //
-// Cakupan (12 test):
+// Cakupan (17 test):
+//   --- Stage 11a (basic) ---
 //   1.  Preview single-file fallback (tanpa marker File:)
 //   2.  Preview multi-file (marker File: + fenced block)
 //   3.  Preview path escape → Blocked
@@ -15,6 +16,12 @@
 //   10. Invalidation callback terpanggil sekali
 //   11. Preview input kosong → parse_failed
 //   12. Preview tanpa marker + tanpa fallback_path → parse_failed
+//   --- Stage 11b-fix (subfolder + leading slash) ---
+//   13. Preview subfolder path → New (bukan Blocked)
+//   14. Commit subfolder → parent dir dibuat otomatis
+//   15. Preview leading slash → dinormalisasi, bukan Blocked
+//   16. Commit deep-nested (a/b/c/d.py) → semua parent dibuat
+//   17. Leading slash + escape ('/../evil.py') → tetap Blocked
 //
 // Jalankan: ./frans_manual_import_test [sandbox_root]
 // Default sandbox_root = /tmp/frans_manual_import_test_<pid>
@@ -67,7 +74,7 @@ int main(int argc, char** argv) {
                 .string();
     }
 
-    std::printf("=== frans_ai manual import smoke test (Stage 11a) ===\n");
+    std::printf("=== frans_ai manual import smoke test (Stage 11a/11b) ===\n");
     std::printf("root: %s\n\n", root.c_str());
 
     std::error_code ec;
@@ -384,6 +391,137 @@ int main(int argc, char** argv) {
         const auto r = imp.preview("```python\nprint(1)\n```\n", "");
         check(r.parse_failed, "parse_failed == true");
         check(!r.parse_error.empty(), "parse_error terisi");
+    }
+
+    // =====================================================================
+    // Test 13: preview subfolder path (parent belum ada)
+    // =====================================================================
+    std::printf("\n[Test 13] preview subfolder path (parent belum ada)\n");
+    {
+        ManualImporter imp(sb);
+        const std::string text =
+            "File: sub_pkg/module.py\n"
+            "```python\n"
+            "x = 1\n"
+            "```\n";
+        const auto r = imp.preview(text);
+
+        check(!r.parse_failed, "parse_failed == false");
+        check(r.files.size() == 1, "1 file");
+
+        const auto* f = findFile(r, "sub_pkg/module.py");
+        check(f != nullptr, "file sub_pkg/module.py ada di preview");
+        if (f) {
+            // HARUS New, bukan Blocked — path valid di dalam sandbox
+            // meskipun parent belum ada.
+            check(f->status == ImportFileStatus::New,
+                  "status == New (bukan Blocked)");
+        }
+        check(r.blocked_count == 0, "blocked_count == 0");
+        check(r.new_count == 1, "new_count == 1");
+    }
+
+    // =====================================================================
+    // Test 14: commit subfolder — parent dir dibuat otomatis
+    // =====================================================================
+    std::printf("\n[Test 14] commit subfolder — parent dir auto-create\n");
+    {
+        ManualImporter imp(sb);
+        const std::string text =
+            "File: auto_pkg/deep_file.py\n"
+            "```python\n"
+            "auto = True\n"
+            "```\n";
+        imp.preview(text);
+        const auto res = imp.commit();
+
+        check(res.written_count == 1, "written_count == 1");
+        check(res.failed_count  == 0, "failed_count == 0");
+        check(sb.exists("auto_pkg"),              "parent dir 'auto_pkg' ada");
+        check(sb.exists("auto_pkg/deep_file.py"), "file ada di disk");
+        check(sb.readFile("auto_pkg/deep_file.py") == "auto = True",
+              "content match");
+    }
+
+    // =====================================================================
+    // Test 15: leading slash di marker path → dinormalisasi
+    // =====================================================================
+    std::printf("\n[Test 15] leading slash dinormalisasi\n");
+    {
+        ManualImporter imp(sb);
+        const std::string text =
+            "File: /pkg_lead/mod.py\n"
+            "```python\n"
+            "lead = 1\n"
+            "```\n";
+        const auto r = imp.preview(text);
+
+        check(!r.parse_failed, "parse_failed == false");
+        check(r.files.size() == 1, "1 file");
+
+        // Path HARUS sudah dinormalisasi (tanpa leading slash).
+        const auto* f = findFile(r, "pkg_lead/mod.py");
+        check(f != nullptr, "path ternormalisasi ke 'pkg_lead/mod.py'");
+
+        const auto* raw = findFile(r, "/pkg_lead/mod.py");
+        check(raw == nullptr,
+              "path asli dengan leading slash tidak ada di preview");
+
+        if (f) {
+            check(f->status == ImportFileStatus::New,
+                  "status == New (leading slash tidak bikin Blocked)");
+        }
+        check(r.blocked_count == 0, "blocked_count == 0");
+    }
+
+    // =====================================================================
+    // Test 16: commit deep-nested path
+    // =====================================================================
+    std::printf("\n[Test 16] commit deep-nested path (a/b/c/d.py)\n");
+    {
+        ManualImporter imp(sb);
+        const std::string text =
+            "File: a/b/c/d.py\n"
+            "```python\n"
+            "deep = True\n"
+            "```\n";
+        imp.preview(text);
+        const auto res = imp.commit();
+
+        check(res.written_count == 1, "written_count == 1");
+        check(res.failed_count == 0,  "failed_count == 0");
+        check(sb.exists("a"),          "a/ ada");
+        check(sb.exists("a/b"),        "a/b/ ada");
+        check(sb.exists("a/b/c"),      "a/b/c/ ada");
+        check(sb.exists("a/b/c/d.py"), "a/b/c/d.py ada");
+        check(sb.readFile("a/b/c/d.py") == "deep = True", "content match");
+    }
+
+    // =====================================================================
+    // Test 17: leading slash + escape tetap ditolak
+    // =====================================================================
+    std::printf("\n[Test 17] leading slash + escape tetap ditolak\n");
+    {
+        ManualImporter imp(sb);
+        // Setelah normalize: "/../evil_lead.py" -> "../evil_lead.py" -> Blocked.
+        // Ini mengunci invariant keamanan: normalisasi leading slash TIDAK
+        // membuka celah untuk escape via '..'.
+        const std::string text =
+            "File: /../evil_lead.py\n"
+            "```python\n"
+            "x = 1\n"
+            "```\n";
+        const auto r = imp.preview(text);
+
+        check(r.files.size() == 1, "1 file");
+        check(r.blocked_count == 1, "blocked_count == 1");
+
+        const auto* f = findFile(r, "../evil_lead.py");
+        check(f != nullptr, "path ternormalisasi ke '../evil_lead.py'");
+        if (f) {
+            check(f->status == ImportFileStatus::Blocked,
+                  "status == Blocked (escape via '..' tetap dicegah)");
+        }
     }
 
     std::printf("\n=== %s ===\n", g_failures == 0 ? "ALL PASS" : "FAILURES");

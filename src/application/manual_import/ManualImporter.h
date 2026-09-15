@@ -19,22 +19,31 @@ namespace frans::application {
 // Tugasnya:
 //   1. Parse teks mentah dari chat AI browser menjadi vector<GeneratedFile>
 //      (reuse MultiFileParser — Stage 7e).
-//   2. Validasi setiap file:
+//   2. Normalisasi path (Stage 11b-fix) — strip leading '/' supaya
+//      "/src/main.py" dari AI output diinterpretasikan sebagai
+//      project-relative, bukan filesystem-absolute.
+//   3. Validasi setiap file:
 //        - sandbox containment (IFileSystemPort::isPathSafe)
 //        - danger check (DangerCheckHandler — Stage 7c)
 //        - deteksi file baru vs overwrite (IFileSystemPort::exists)
-//   3. Tulis file ke disk dengan snapshot-before-write (untuk diff/rollback).
+//   4. Tulis file ke disk dengan snapshot-before-write + auto-create
+//      parent directory (Stage 11b-fix) — supaya paste multi-folder
+//      langsung bekerja tanpa user harus mkdir manual.
 //
 // Desain 2-phase (WAJIB, blueprint §5.9):
 //
 //   Phase 1 — preview(text)
-//     Parse + validasi, TIDAK menulis apapun. Return ImportResult berisi
-//     daftar ImportFilePreview dengan status New/Overwrite/Blocked.
+//     Parse + normalize + validasi, TIDAK menulis apapun. Return
+//     ImportResult berisi daftar ImportFilePreview dengan status
+//     New/Overwrite/Blocked.
 //
 //   Phase 2 — commit()
-//     Tulis semua file yang status-nya bukan Blocked. Capture snapshot
-//     sebelum write. Panggil invalidation callback (biasanya
-//     ProjectGraphCache::invalidate) supaya graph rebuild.
+//     Untuk setiap file (status != Blocked):
+//       a. Create parent directory kalau perlu (idempotent).
+//       b. Snapshot isi lama (atau string kosong untuk file baru).
+//       c. Write via IFileSystemPort.
+//     Panggil invalidation callback (biasanya ProjectGraphCache::invalidate)
+//     TEPAT SEKALI kalau written_count > 0.
 //
 //   reset()
 //     Buang state preview + snapshot. UI panggil setelah dialog close.
@@ -53,6 +62,13 @@ namespace frans::application {
 //       1. Path escape (sandbox reject) — bukan urusan user, ini safety.
 //       2. Danger verdict == Blocked — path sistem kritis seperti
 //          /etc/passwd. Blocked mutlak, tidak ada override.
+//
+//   * Normalisasi leading '/' HANYA untuk Manual Import, bukan di
+//     SandboxedFileSystem. Alasan: konvensi "/path" sebagai
+//     project-relative adalah idiom yang sangat umum di output AI, tapi
+//     bukan idiom yang benar untuk pemanggilan filesystem generik.
+//     SandboxedFileSystem tetap ketat supaya Agent flow tidak bisa
+//     "kecolongan" path dari source yang tidak dipercaya.
 //
 //   * Snapshot diambil per file SEBELUM write, disimpan di map internal.
 //     Idempotent — kalau file yang sama muncul dua kali di satu preview
@@ -76,7 +92,11 @@ enum class ImportFileStatus {
 
 // Preview satu file (Phase 1). Content tidak ditulis sampai commit.
 struct ImportFilePreview {
+    // Path yang SUDAH dinormalisasi (tanpa leading '/'). Ini yang akan
+    // dipakai saat commit. Path asli dari parser tersedia implicit lewat
+    // log stderr kalau berbeda.
     std::string       relative_path;
+
     std::string       content;
     std::size_t       size_bytes = 0;
     ImportFileStatus  status     = ImportFileStatus::New;
@@ -139,9 +159,9 @@ public:
 
     // ---- Phase 1 ----
     //
-    // Parse + validasi. `fallback_path` dipakai kalau `text` tidak punya
-    // marker `File:` (single-file mode). Kalau fallback_path kosong DAN
-    // tidak ada marker, parse gagal (parse_failed=true).
+    // Parse + normalize + validasi. `fallback_path` dipakai kalau `text`
+    // tidak punya marker `File:` (single-file mode). Kalau fallback_path
+    // kosong DAN tidak ada marker, parse gagal (parse_failed=true).
     //
     // Return snapshot dari state internal. Caller TIDAK boleh simpan
     // reference ke field `files` — panggil preview() berikutnya
@@ -151,9 +171,11 @@ public:
 
     // ---- Phase 2 ----
     //
-    // Tulis file yang status != Blocked ke fs. Tidak parse ulang — pakai
-    // hasil preview() terakhir. Return ImportResult yang sama dengan
-    // preview ditambah field `written_count` dan `failed_count`.
+    // Tulis file yang status != Blocked ke fs. Untuk setiap file:
+    //   a. Create parent directory kalau belum ada (Stage 11b-fix).
+    //   b. Snapshot isi lama.
+    //   c. Write content.
+    // Tidak parse ulang — pakai hasil preview() terakhir.
     //
     // Kalau belum pernah preview() atau preview terakhir gagal:
     //   → return ImportResult{parse_failed=true, parse_error="..."}

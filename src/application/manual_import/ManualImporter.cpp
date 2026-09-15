@@ -18,6 +18,50 @@ std::string toLowerAscii(std::string s) {
     return s;
 }
 
+// ---------------------------------------------------------------------------
+// Stage 11b-fix — normalize path dari AI output.
+//
+// Masalah: AI chat sering menulis path dengan leading slash untuk
+// menandakan "relative dari project root", mis. `File: /src/main.py`.
+// Kalau diteruskan apa adanya, SandboxedFileSystem menganggapnya sebagai
+// filesystem-absolute path (bukan di bawah root) dan menolak.
+//
+// Solusi: strip SEMUA leading '/' di awal. Path yang sudah relative
+// (tanpa '/' di awal) tidak berubah.
+//
+// `..` TIDAK di-touch — escape via `../` tetap ditolak oleh sandbox.
+// Konsekuensinya, "/../evil.py" -> "../evil.py" -> tetap Blocked. Aman.
+//
+// Contoh:
+//   "main.py"                 -> "main.py"           (tidak berubah)
+//   "/main.py"                -> "main.py"
+//   "//src/main.py"           -> "src/main.py"
+//   "/src/sub/main.py"        -> "src/sub/main.py"
+//   "../escape.py"            -> "../escape.py"      (Blocked nanti)
+//   "./main.py"               -> "./main.py"         (weakly_canonical handles)
+//   "/"                       -> ""                  (edge case, jarang)
+// ---------------------------------------------------------------------------
+std::string normalizeRelativePath(std::string p) {
+    std::size_t i = 0;
+    while (i < p.size() && p[i] == '/') ++i;
+    if (i > 0) p.erase(0, i);
+    return p;
+}
+
+// ---------------------------------------------------------------------------
+// Stage 11b-fix — ekstrak parent directory dari path.
+//
+//   "main.py"            -> ""
+//   "src/main.py"        -> "src"
+//   "a/b/c/main.py"      -> "a/b/c"
+//   "a/b/c/"             -> "a/b/c"   (trailing slash diabaikan)
+// ---------------------------------------------------------------------------
+std::string parentDir(const std::string& path) {
+    const auto slash = path.find_last_of('/');
+    if (slash == std::string::npos) return {};
+    return path.substr(0, slash);
+}
+
 } // namespace
 
 ManualImporter::ManualImporter(frans::domain::IFileSystemPort& fs,
@@ -91,21 +135,33 @@ ImportResult ManualImporter::preview(const std::string& text,
 
     for (const auto& gf : parse.files) {
         ImportFilePreview p;
-        p.relative_path = gf.relative_path;
-        p.content       = gf.content;
-        p.size_bytes    = gf.content.size();
+        p.content    = gf.content;
+        p.size_bytes = gf.content.size();
+
+        // ---- Stage 11b-fix: normalize path (strip leading '/') ----
+        //
+        // Log perubahan supaya user tahu apa yang terjadi kalau path
+        // berbeda dari yang mereka paste.
+        const std::string normalized = normalizeRelativePath(gf.relative_path);
+        p.relative_path = normalized;
+        if (normalized != gf.relative_path) {
+            std::fprintf(stderr,
+                "%s   normalize path: '%s' -> '%s' "
+                "(leading slash dianggap project-relative)\n",
+                kLogPrefix, gf.relative_path.c_str(), normalized.c_str());
+        }
 
         // ---- 1. Sandbox containment ----
         // Ini yang mencegah path escape ("../x", symlink keluar, dll).
         // Path yang ditolak TIDAK akan sampai ke writeFile().
-        if (!fs_.isPathSafe(gf.relative_path)) {
+        if (!fs_.isPathSafe(p.relative_path)) {
             p.status         = ImportFileStatus::Blocked;
             p.danger         = DangerVerdict::Blocked;
             p.blocked_reason = "Path keluar dari sandbox (path escape) "
                                "atau tidak valid.";
             std::fprintf(stderr,
                 "%s   BLOCKED (path) %s\n",
-                kLogPrefix, gf.relative_path.c_str());
+                kLogPrefix, p.relative_path.c_str());
             last_preview_.files.push_back(std::move(p));
             ++last_preview_.blocked_count;
             continue;
@@ -115,8 +171,8 @@ ImportResult ManualImporter::preview(const std::string& text,
         // Untuk bahasa yang belum punya pattern list (Stage 7c hanya
         // Python), checkCode() return Safe — non-blocking, konsisten
         // dengan Agent flow.
-        const std::string lang = languageFromPath(gf.relative_path);
-        const auto dc = danger_.checkCode(gf.content, lang);
+        const std::string lang = languageFromPath(p.relative_path);
+        const auto dc = danger_.checkCode(p.content, lang);
         p.danger             = dc.verdict;
         p.danger_explanation = dc.explanation;
 
@@ -125,7 +181,7 @@ ImportResult ManualImporter::preview(const std::string& text,
             p.blocked_reason = dc.explanation;
             std::fprintf(stderr,
                 "%s   BLOCKED (danger) %s — %s\n",
-                kLogPrefix, gf.relative_path.c_str(),
+                kLogPrefix, p.relative_path.c_str(),
                 dc.explanation.c_str());
             last_preview_.files.push_back(std::move(p));
             ++last_preview_.blocked_count;
@@ -133,7 +189,7 @@ ImportResult ManualImporter::preview(const std::string& text,
         }
 
         // ---- 3. New vs Overwrite ----
-        if (fs_.exists(gf.relative_path)) {
+        if (fs_.exists(p.relative_path)) {
             p.status = ImportFileStatus::Overwrite;
             ++last_preview_.overwrite_count;
         } else {
@@ -143,20 +199,29 @@ ImportResult ManualImporter::preview(const std::string& text,
 
         last_preview_.total_bytes += p.size_bytes;
 
+        // Cek apakah parent directory ada — untuk log informatif.
+        // File yang path-nya punya subfolder tapi parent belum ada akan
+        // ditandai "[parent dir akan dibuat saat commit]" supaya user
+        // tahu apa yang akan terjadi.
+        const std::string parent = parentDir(p.relative_path);
+        const bool parent_exists = parent.empty() || fs_.exists(parent);
+
         // Logging per file: NeedsConfirm dan normal berbeda supaya mudah
         // di-grep (mis. `grep NEEDS-CONFIRM`).
         if (dc.needs_confirm()) {
             std::fprintf(stderr,
-                "%s   NEEDS-CONFIRM %s — %s (akan tetap ditulis saat commit)\n",
-                kLogPrefix, gf.relative_path.c_str(),
-                dc.explanation.c_str());
+                "%s   NEEDS-CONFIRM %s — %s (akan tetap ditulis saat commit)%s\n",
+                kLogPrefix, p.relative_path.c_str(),
+                dc.explanation.c_str(),
+                parent_exists ? "" : "   [parent dir akan dibuat saat commit]");
         } else {
             std::fprintf(stderr,
-                "%s   %s %s (%zu byte)\n",
+                "%s   %s %s (%zu byte)%s\n",
                 kLogPrefix,
                 (p.status == ImportFileStatus::Overwrite) ? "OVERWRITE" : "NEW",
-                gf.relative_path.c_str(),
-                p.size_bytes);
+                p.relative_path.c_str(),
+                p.size_bytes,
+                parent_exists ? "" : "   [parent dir akan dibuat saat commit]");
         }
 
         last_preview_.files.push_back(std::move(p));
@@ -192,6 +257,28 @@ ImportResult ManualImporter::commit() {
             continue;
         }
 
+        // ---- Stage 11b-fix: pastikan parent directory ada ----
+        //
+        // Kontrak IFileSystemPort::writeFile TIDAK auto-create parent
+        // (lihat header). ManualImporter yang bertanggung jawab, karena
+        // dia yang mengorkestrasi batch write dari AI output — di mana
+        // user tidak bisa diminta mkdir manual untuk setiap paste.
+        //
+        // createDirectory() idempotent (return true kalau sudah ada,
+        // return true kalau berhasil buat, false kalau sandbox tolak
+        // atau error I/O). Jadi aman dipanggil tanpa cek exists() dulu.
+        const std::string parent = parentDir(p.relative_path);
+        if (!parent.empty()) {
+            if (!fs_.createDirectory(parent)) {
+                ++result.failed_count;
+                std::fprintf(stderr,
+                    "%s commit: FAILED mkdir '%s' (untuk file '%s')\n",
+                    kLogPrefix, parent.c_str(), p.relative_path.c_str());
+                std::fflush(stderr);
+                continue;
+            }
+        }
+
         // Snapshot SEBELUM write. Idempotent — kalau sudah ada, tidak
         // ditimpa. Konsisten dengan snapshotBeforeWrite() AgentContext.
         if (snapshots_.count(p.relative_path) == 0) {
@@ -216,8 +303,8 @@ ImportResult ManualImporter::commit() {
     std::fflush(stderr);
 
     // Invalidate cache HANYA kalau ada file yang benar-benar tertulis.
-    // Commit dengan written_count==0 (semua blocked) tidak mengubah
-    // graph → tidak perlu rebuild.
+    // Commit dengan written_count==0 (semua blocked / semua gagal)
+    // tidak mengubah graph → tidak perlu rebuild.
     if (result.written_count > 0 && on_written_) {
         on_written_();
     }
