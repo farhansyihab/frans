@@ -11,13 +11,22 @@
 
 namespace frans::application {
 
-// Blueprint Stage 7f — cache DependencyGraph per project root.
+// Blueprint Stage 7f (cache per project root) + Stage 10d (multi-language).
 //
 // Single-slot: kalau project root berganti, cache lama dibuang TOTAL
 // (bukan multi-root map). Ini keputusan sadar, cocok untuk pola "satu
 // project per sesi kerja" yang jadi asumsi dasar personal tool ini.
 // Kalau nanti butuh multi-root, ganti internal jadi map<string, Entry>
 // — signature getOrBuild(root) tidak berubah.
+//
+// Stage 10d — `discoverSourceFiles` sekarang multi-ekstensi. List
+// ekstensi di-query dari `TreeSitterGraphBuilder::supportedExtensions()`
+// supaya cache dan builder selalu menggunakan list yang SAMA (mencegah
+// drift — file yang builder parse tapi cache tidak monitor, atau
+// sebaliknya). Ini deviasi kecil dari blueprint §7.10 (yang bilang
+// duplikasi intentional) dengan alasan: expose static extension list
+// TIDAK membocorkan detail internal builder, dan menghilangkan kelas
+// bug "drift list" yang sudah ada sejak Stage 7f.
 //
 // Thread-safe: getOrBuild() dan status() boleh dipanggil dari thread
 // mana pun. Caller TIDAK boleh menyimpan reference ke graph yang
@@ -37,7 +46,7 @@ public:
     //   c) needs_rebuild(project_root) == true
     //
     // needs_rebuild melakukan FULL SCAN direktori lalu bandingkan:
-    //   1. Set nama file .py SEKARANG vs keys(mtimes_) — kalau BEDA
+    //   1. Set nama file SEKARANG vs keys(mtimes_) — kalau BEDA
     //      (file baru ATAU file hilang) → rebuild.
     //   2. Kalau set sama, baru cek mtime tiap file — kalau ada yang
     //      berubah → rebuild.
@@ -55,7 +64,7 @@ public:
     struct Status {
         bool        valid           = false;
         std::string root;
-        std::size_t file_count      = 0;
+        std::size_t file_count      = 0;   // mencakup semua bahasa
         std::size_t symbol_count    = 0;
         std::size_t edge_count      = 0;
         double      last_build_sec  = 0.0;

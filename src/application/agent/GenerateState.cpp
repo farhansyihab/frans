@@ -13,6 +13,7 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,6 +25,62 @@ using frans::domain::GenOptions;
 using frans::domain::GenResult;
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// Stage 10d — petakan extension → label bahasa.
+//
+// Hanya label bahasa yang KITA DUKUNG di-return. Extension yang tidak
+// dikenal → "" (tidak masuk daftar "Project languages detected").
+//
+// Konsisten dengan TreeSitterGraphBuilder::supportedExtensions() —
+// kalau builder tidak parse .cpp, tetap kita map "C++" karena file .cpp
+// yang ada di graph berarti builder MEMANG punya C++ parser. File .cpp
+// yang tidak ter-parse tidak akan muncul di allFilePaths().
+// ---------------------------------------------------------------------------
+std::string languageLabelForExtension(const std::string& ext) {
+    if (ext == ".py") {
+        return "Python";
+    }
+    if (ext == ".h" || ext == ".hpp" || ext == ".hxx"
+     || ext == ".cc" || ext == ".cpp" || ext == ".cxx") {
+        return "C++";
+    }
+    if (ext == ".ts" || ext == ".tsx") {
+        return "TypeScript";
+    }
+    if (ext == ".js" || ext == ".jsx"
+     || ext == ".mjs" || ext == ".cjs") {
+        return "JavaScript";
+    }
+    if (ext == ".vue") {
+        return "Vue";
+    }
+    return {};
+}
+
+// ---------------------------------------------------------------------------
+// Stage 10d — scan file di graph, dedupe label bahasa, join dengan ", ".
+//
+// std::set → iterasi otomatis terurut alfabetis → deterministik.
+// Contoh output: "C++, JavaScript, Python, TypeScript, Vue"
+// ---------------------------------------------------------------------------
+std::string detectProjectLanguages(
+    const frans::code_intelligence::DependencyGraph& graph)
+{
+    std::set<std::string> langs;
+    for (const auto& path : graph.allFilePaths()) {
+        const auto ext = std::filesystem::path(path).extension().string();
+        const std::string label = languageLabelForExtension(ext);
+        if (!label.empty()) langs.insert(label);
+    }
+
+    std::string out;
+    for (const auto& l : langs) {
+        if (!out.empty()) out += ", ";
+        out += l;
+    }
+    return out;
+}
 
 // System prompt untuk multi-file response (Stage 7e).
 //
@@ -46,9 +103,14 @@ namespace {
 //      "output ONLY entry point + file yang disebut eksplisit di task".
 //   2. Tambah instruksi "preserve existing functions, edit surgically".
 //   3. Anotasi per-file: [ENTRY POINT] vs [READ-ONLY].
+//
+// Stage 10d: tambah baris "Project languages detected: ..." sesudah
+// in-scope list. Untuk project mixed-language, hint ini membantu model
+// memilih gaya/idiom yang tepat kalau task ambigu.
 std::string buildSystemPrompt(const std::string& target_path,
                               const std::string& context_block,
-                              const std::vector<std::string>& in_scope_files)
+                              const std::vector<std::string>& in_scope_files,
+                              const frans::code_intelligence::DependencyGraph& graph)
 {
     std::string p;
     p +=
@@ -104,6 +166,17 @@ std::string buildSystemPrompt(const std::string& target_path,
              "file the task explicitly asks to create).\n";
     }
 
+    // ---- Stage 10d: project languages detected ----
+    // Diletakkan langsung SETELAH in-scope list dan SEBELUM context block:
+    // memberi model gambaran cepat "project ini multi-bahasa apa" tanpa
+    // mengganggu alur baca dari scope → existing code.
+    const std::string langs = detectProjectLanguages(graph);
+    if (!langs.empty()) {
+        p += "\nProject languages detected: ";
+        p += langs;
+        p += "\n";
+    }
+
     if (!context_block.empty()) {
         p += "\nExisting related code from the project (for style/signature "
              "consistency):\n\n";
@@ -157,9 +230,11 @@ void GenerateState::run(AgentContext& ctx) {
     }
 
     // ---- 3. System prompt + messages ----
+    // Stage 10d: pass graph supaya "Project languages detected" bisa
+    // dihitung dari allFilePaths().
     const std::string systemPrompt =
         buildSystemPrompt(ctx.targetRelativePath, context_block,
-                          ctx.inScopeFiles);
+                          ctx.inScopeFiles, graph_);
 
     std::vector<ChatMessage> messages = {
         {"system", systemPrompt},

@@ -4,15 +4,23 @@ cmake_minimum_required(VERSION 3.16)
 # Stage 8 — tambah OpenSSL (opsional) untuk HTTPS (DeepSeek).
 # Stage 9c — tambah frans_routing (ProviderRouter + EscalationPolicy +
 #            DailyBudgetGuard) sebagai static library bersama.
-# Stage 10a — tambah tree_sitter_cpp (grammar C++) + CppParser +
-#             CppAstVisitor + frans_cpp_parser_test.
-#             FIX (v2): scanner lookup sekarang glob .cc DAN .c di
-#             src/, karena versi tree-sitter-cpp yang lebih baru
-#             memindahkan/mengganti nama scanner file.
-# Stage 10b — tambah tree_sitter_javascript + tree_sitter_typescript +
-#             tree_sitter_tsx + TsJsParserBase + TypeScriptParser +
-#             JavaScriptParser + TsJsAstVisitor + frans_ts_parser_test
+# Stage 10a — tambah tree_sitter_cpp + CppParser + CppAstVisitor
+#             + frans_cpp_parser_test.
+# Stage 10b — tambah tree_sitter_javascript + tree_sitter_typescript
+#             + tree_sitter_tsx + TsJsParserBase + TypeScriptParser
+#             + JavaScriptParser + TsJsAstVisitor + frans_ts_parser_test
 #             + frans_js_parser_test.
+# Stage 10c — tambah VueParser (SFC extraction + delegasi ke TS/JS parser)
+#             + frans_vue_parser_test.
+# Stage 10d — multi-language integration:
+#             * TreeSitterGraphBuilder: parser registry + discovery
+#               multi-ekstensi + log summary.
+#             * ProjectGraphCache: discovery multi-ekstensi.
+#             * GenerateState: "Project languages detected" di prompt.
+#             * frans_multilang_test (mixed fixture smoke test).
+#             * FRANS_HAS_<LANG>_PARSER macros di frans_code_intel
+#               supaya TreeSitterGraphBuilder bisa conditional-compile
+#               registry (hindari link error kalau grammar tidak ada).
 project(frans_ai LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -95,6 +103,8 @@ target_compile_options(frans_routing PRIVATE -Wall -Wextra -Wpedantic)
 # Stage 5 + 6 — tree-sitter & context (opsional)
 # Stage 10a — C++ parser (opsional, conditional)
 # Stage 10b — TypeScript + JavaScript parser (opsional, conditional)
+# Stage 10c — Vue parser (opsional, conditional — butuh 10b)
+# Stage 10d — multi-language registry (conditional on 10a/10b/10c)
 # ===========================================================================
 set(TS_CORE "${CMAKE_SOURCE_DIR}/third_party/tree-sitter/lib/src/lib.c")
 set(TS_CORE_HDR "${CMAKE_SOURCE_DIR}/third_party/tree-sitter/lib/include/tree_sitter/api.h")
@@ -124,11 +134,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
 
     # -----------------------------------------------------------------------
     # Stage 10a — tree-sitter-cpp (opsional)
-    #
-    # FIX (v2): scanner file di tree-sitter-cpp bisa hadir sebagai:
-    #   - src/scanner.cc  (C++, historis — wajib karena raw string literal)
-    #   - src/scanner.c   (C, versi baru setelah refactor)
-    # Kita cek keduanya, prioritaskan .cc (kalau ada), fallback .c.
     # -----------------------------------------------------------------------
     set(TS_CPP_DIR     "${CMAKE_SOURCE_DIR}/third_party/tree-sitter-cpp/src")
     set(TS_CPP_PARSER  "${TS_CPP_DIR}/parser.c")
@@ -152,10 +157,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
                 "tree-sitter-cpp: scanner TIDAK ditemukan di ${TS_CPP_DIR}.\n"
                 "  Dicek: scanner.cc dan scanner.c.\n"
                 "  Link akan gagal karena parser.c mereferensikan\n"
-                "  tree_sitter_cpp_external_scanner_*.\n"
-                "  Re-clone:\n"
-                "    cd third_party && rm -rf tree-sitter-cpp && \\\n"
-                "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter-cpp.git")
+                "  tree_sitter_cpp_external_scanner_*.")
         endif()
 
         add_library(tree_sitter_cpp STATIC ${TS_CPP_SOURCES})
@@ -165,17 +167,11 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     else()
         message(WARNING
             "tree-sitter-cpp TIDAK ditemukan — skip C++ parser.\n"
-            "  Jalankan:\n"
-            "    cd third_party && \\\n"
-            "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter-cpp.git\n"
             "  Target frans_cpp_parser_test tidak akan di-build.")
     endif()
 
     # -----------------------------------------------------------------------
     # Stage 10b — tree-sitter-javascript (opsional)
-    #
-    # Pure C (parser.c + scanner.c). Grammar ini juga support JSX,
-    # jadi .jsx dan .js diparse dengan cara yang sama.
     # -----------------------------------------------------------------------
     set(TS_JS_DIR     "${CMAKE_SOURCE_DIR}/third_party/tree-sitter-javascript/src")
     set(TS_JS_PARSER  "${TS_JS_DIR}/parser.c")
@@ -195,22 +191,11 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         set(FRANS_HAS_JS_PARSER ON)
     else()
         message(WARNING
-            "tree-sitter-javascript TIDAK ditemukan — skip JavaScript parser.\n"
-            "  Jalankan:\n"
-            "    cd third_party && \\\n"
-            "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter-javascript.git\n"
-            "  Target frans_js_parser_test tidak akan di-build.")
+            "tree-sitter-javascript TIDAK ditemukan — skip JavaScript parser.")
     endif()
 
     # -----------------------------------------------------------------------
     # Stage 10b — tree-sitter-typescript + tree-sitter-tsx (opsional)
-    #
-    # Repo tree-sitter-typescript punya DUA subdirektori grammar:
-    #   typescript/src/parser.c → tree_sitter_typescript()
-    #   tsx/src/parser.c        → tree_sitter_tsx()
-    # Keduanya pure C. Kita butuh keduanya karena .ts dan .tsx adalah
-    # dua ekstensi yang sering muncul berdampingan, dan `<` di TSX
-    # ambigu (generic vs JSX element).
     # -----------------------------------------------------------------------
     set(TS_TS_DIR  "${CMAKE_SOURCE_DIR}/third_party/tree-sitter-typescript/typescript/src")
     set(TS_TSX_DIR "${CMAKE_SOURCE_DIR}/third_party/tree-sitter-typescript/tsx/src")
@@ -240,11 +225,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         set(FRANS_HAS_TS_PARSER ON)
     else()
         message(WARNING
-            "tree-sitter-typescript TIDAK ditemukan — skip TypeScript parser.\n"
-            "  Jalankan:\n"
-            "    cd third_party && \\\n"
-            "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter-typescript.git\n"
-            "  Target frans_ts_parser_test tidak akan di-build.")
+            "tree-sitter-typescript TIDAK ditemukan — skip TypeScript parser.")
     endif()
 
     # -----------------------------------------------------------------------
@@ -269,9 +250,6 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         list(APPEND FRANS_CODE_INTEL_LIBS tree_sitter_cpp)
     endif()
 
-    # Stage 10b — shared base + visitor. Ditambahkan kalau SALAH SATU
-    # dari TS atau JS parser enabled. Tidak boleh di-add dua kali
-    # (duplikat symbol).
     if(FRANS_HAS_TS_PARSER OR FRANS_HAS_JS_PARSER)
         list(APPEND FRANS_CODE_INTEL_SOURCES
             src/code_intelligence/parsers/TsJsParserBase.cpp
@@ -296,12 +274,46 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
         list(APPEND FRANS_CODE_INTEL_LIBS tree_sitter_javascript)
     endif()
 
+    set(FRANS_HAS_VUE_PARSER OFF)
+    if(FRANS_HAS_TS_PARSER AND FRANS_HAS_JS_PARSER)
+        message(STATUS "Vue SFC parser enabled (delegasi ke TS + JS parser)")
+        list(APPEND FRANS_CODE_INTEL_SOURCES
+            src/code_intelligence/parsers/VueParser.cpp
+        )
+        set(FRANS_HAS_VUE_PARSER ON)
+    else()
+        message(WARNING
+            "Vue parser SKIP — butuh BAIK TypeScript maupun JavaScript parser.")
+    endif()
+
     add_library(frans_code_intel STATIC ${FRANS_CODE_INTEL_SOURCES})
     target_include_directories(frans_code_intel PUBLIC
         ${CMAKE_SOURCE_DIR}/src
     )
     target_link_libraries(frans_code_intel PUBLIC ${FRANS_CODE_INTEL_LIBS})
     target_compile_options(frans_code_intel PRIVATE -Wall -Wextra -Wpedantic)
+
+    # -----------------------------------------------------------------------
+    # Stage 10d — macros untuk conditional registry di
+    # TreeSitterGraphBuilder.cpp. PRIVATE karena hanya .cpp builder yang
+    # butuh (supportedExtensions() meng-expose hasilnya via runtime).
+    # -----------------------------------------------------------------------
+    if(FRANS_HAS_CPP_PARSER)
+        target_compile_definitions(frans_code_intel PRIVATE
+            FRANS_HAS_CPP_PARSER=1)
+    endif()
+    if(FRANS_HAS_TS_PARSER)
+        target_compile_definitions(frans_code_intel PRIVATE
+            FRANS_HAS_TS_PARSER=1)
+    endif()
+    if(FRANS_HAS_JS_PARSER)
+        target_compile_definitions(frans_code_intel PRIVATE
+            FRANS_HAS_JS_PARSER=1)
+    endif()
+    if(FRANS_HAS_VUE_PARSER)
+        target_compile_definitions(frans_code_intel PRIVATE
+            FRANS_HAS_VUE_PARSER=1)
+    endif()
 
     add_executable(frans_graph_test tests/graph_smoke_test.cpp)
     target_link_libraries(frans_graph_test PRIVATE frans_code_intel)
@@ -348,6 +360,19 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
             -Wall -Wextra -Wpedantic)
     endif()
 
+    # -----------------------------------------------------------------------
+    # Stage 10c — Vue parser smoke test.
+    # -----------------------------------------------------------------------
+    if(FRANS_HAS_VUE_PARSER)
+        add_executable(frans_vue_parser_test tests/vue_parser_smoke_test.cpp)
+        target_link_libraries(frans_vue_parser_test PRIVATE frans_code_intel)
+        target_compile_definitions(frans_vue_parser_test PRIVATE
+            FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/vue"
+        )
+        target_compile_options(frans_vue_parser_test PRIVATE
+            -Wall -Wextra -Wpedantic)
+    endif()
+
     add_library(frans_context STATIC
         src/application/context_budget/ContextBudgetManager.cpp
         src/application/context_selector/ContextSelector.cpp
@@ -376,6 +401,27 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     )
     target_link_libraries(frans_project PUBLIC frans_context)
     target_compile_options(frans_project PRIVATE -Wall -Wextra -Wpedantic)
+
+    # -----------------------------------------------------------------------
+    # Stage 10d — multi-language integration test.
+    # Butuh SEMUA parser (Python + C++ + TS + JS + Vue). Vue implies
+    # TS + JS, jadi cukup cek CPP + VUE.
+    # -----------------------------------------------------------------------
+    if(FRANS_HAS_CPP_PARSER AND FRANS_HAS_VUE_PARSER)
+        add_executable(frans_multilang_test tests/multilang_smoke_test.cpp)
+        target_link_libraries(frans_multilang_test PRIVATE
+            frans_project
+        )
+        target_compile_definitions(frans_multilang_test PRIVATE
+            FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/mixed"
+        )
+        target_compile_options(frans_multilang_test PRIVATE
+            -Wall -Wextra -Wpedantic)
+    else()
+        message(WARNING
+            "frans_multilang_test SKIP — butuh C++ + Vue parser.\n"
+            "  Status: CPP=${FRANS_HAS_CPP_PARSER} VUE=${FRANS_HAS_VUE_PARSER}")
+    endif()
 
     # -----------------------------------------------------------------------
     # Stage 7b — GenerateState smoke test
@@ -491,12 +537,7 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
 else()
     message(WARNING
         "tree-sitter submodules tidak ditemukan.\n"
-        "  Jalankan:\n"
-        "    cd third_party && \\\n"
-        "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter.git && \\\n"
-        "    git clone --depth=1 https://github.com/tree-sitter/tree-sitter-python.git\n"
-        "  Skip frans_code_intel + frans_context + frans_project + agent tests.\n"
-        "  Stage 7f (AgentPanel) TIDAK akan di-build.")
+        "  Skip frans_code_intel + frans_context + frans_project + agent tests.")
     set(FRANS_CODE_INTEL_ENABLED OFF)
 endif()
 
