@@ -51,7 +51,9 @@ bool isSkippedDir(const std::string& name) {
         || name == "node_modules"
         || name == "dist"  || name == ".next" || name == "out"
         || name == "target"
-        || name == "bin"   || name == "obj";
+        || name == "bin"   || name == "obj"
+        || name == "third_party";
+        || name == "logs";
 }
 
 } // namespace
