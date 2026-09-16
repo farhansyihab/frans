@@ -18,6 +18,10 @@ cmake_minimum_required(VERSION 3.16)
 # Stage 11c — manual import E2E test (paste → write → graph rebuild).
 #             Guard FRANS_CODE_INTEL_ENABLED karena butuh ProjectGraphCache
 #             (transitively tree-sitter).
+# Stage 11d — BuildRunner + IBuildStrategy (Python/C++/TS/JS) + tombol
+#             [Build/compile and Debug] di ManualImportDialog + error
+#             parser + related files enrichment via DependencyGraph.
+#             Guard FRANS_CODE_INTEL_ENABLED karena butuh frans_project.
 # Stage 12  — GeminiConfig + GeminiProvider (3-tier: Local/Gemini/DeepSeek)
 #             + ProviderRouter upgrade 3-tier + EscalationPolicy upgrade
 #             + free-tier audit di DailyBudgetGuard
@@ -394,6 +398,34 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
     target_link_libraries(frans_project PUBLIC frans_context)
     target_compile_options(frans_project PRIVATE -Wall -Wextra -Wpedantic)
 
+    # -----------------------------------------------------------------------
+    # Stage 11d — frans_build_runner: BuildRunner + IBuildStrategy.
+    #
+    # Butuh frans_project (ProjectGraphCache + DependencyGraph) untuk
+    # enrichment, dan frans_manual_import (GeneratedFile + DangerCheckHandler).
+    # ProcessExecutor.cpp disertakan di sini sebagai sumber karena tidak ada
+    # library frans_process terpisah. Duplikasi dengan FRANS_AI_SOURCES
+    # dihindari dengan cara: frans_ai TIDAK menyertakan ProcessExecutor.cpp
+    # dua kali — linker menyelesaikan symbol dari salah satu.
+    # -----------------------------------------------------------------------
+    add_library(frans_build_runner STATIC
+        src/application/build_runner/BuildRunner.cpp
+        src/application/build_runner/PythonBuildStrategy.cpp
+        src/application/build_runner/CppBuildStrategy.cpp
+        src/application/build_runner/TypeScriptBuildStrategy.cpp
+        src/application/build_runner/JavaScriptBuildStrategy.cpp
+        src/infrastructure/system/ProcessExecutor.cpp
+    )
+    target_include_directories(frans_build_runner PUBLIC
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    target_link_libraries(frans_build_runner PUBLIC
+        frans_manual_import
+        frans_project
+    )
+    target_compile_options(frans_build_runner PRIVATE
+        -Wall -Wextra -Wpedantic)
+
     if(FRANS_HAS_CPP_PARSER AND FRANS_HAS_VUE_PARSER)
         add_executable(frans_multilang_test tests/multilang_smoke_test.cpp)
         target_link_libraries(frans_multilang_test PRIVATE
@@ -409,6 +441,21 @@ if(EXISTS "${TS_CORE}" AND EXISTS "${TS_CORE_HDR}" AND EXISTS "${TS_PY_PARSER}")
             "frans_multilang_test SKIP — butuh C++ + Vue parser.\n"
             "  Status: CPP=${FRANS_HAS_CPP_PARSER} VUE=${FRANS_HAS_VUE_PARSER}")
     endif()
+
+    # -----------------------------------------------------------------------
+    # Stage 11d — BuildRunner smoke test.
+    # -----------------------------------------------------------------------
+    add_executable(frans_build_runner_test
+        tests/build_runner_smoke_test.cpp
+    )
+    target_link_libraries(frans_build_runner_test PRIVATE
+        frans_build_runner
+    )
+    target_include_directories(frans_build_runner_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    target_compile_options(frans_build_runner_test PRIVATE
+        -Wall -Wextra -Wpedantic)
 
     add_executable(frans_generate_test
         tests/generate_smoke_test.cpp
@@ -667,6 +714,7 @@ if(FRANS_CODE_INTEL_ENABLED)
         frans_code_intel
         frans_context
         frans_routing
+        frans_build_runner
     )
     target_compile_definitions(frans_ai PRIVATE FRANS_HAS_AGENT_PANEL=1)
 endif()

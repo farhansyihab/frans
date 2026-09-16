@@ -10,12 +10,10 @@
 //   4. BARU FLTK headers — <FL/Fl_Text_Editor.H> menarik <FL/x.H> yang
 //      meng-include <X11/Xlib.h> → mendefinisikan macro `Status`. Setelah
 //      titik ini `struct Status` sudah tidak bisa dipakai di file ini.
-//
-// Kalau ada penambahan header baru, jangan letakkan <FL/...> di atas
-// AppContext.h.
 #include "ui/ManualImportDialog.h"
 
 #include "application/AppContext.h"
+#include "application/build_runner/BuildRunner.h"
 #include "application/manual_import/ManualImporter.h"
 #include "application/project/ProjectGraphCache.h"
 #include "infrastructure/fs/SandboxedFileSystem.h"
@@ -37,11 +35,15 @@
 #include <exception>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace frans::ui {
 
 using frans::application::AppContext;
+using frans::application::BuildReport;
+using frans::application::BuildRunner;
 using frans::application::DangerVerdict;
+using frans::application::GeneratedFile;
 using frans::application::ImportFilePreview;
 using frans::application::ImportFileStatus;
 using frans::application::ImportResult;
@@ -50,19 +52,15 @@ using frans::infrastructure::SandboxedFileSystem;
 
 namespace {
 
-// Dialog tinggi naik dari 620 → 656 (Stage 11b fix) untuk memberi ruang
-// satu row "Default file (opt.)" di bawah paste area.
+// Layout — versi compact (2026-01 follow-up).
 constexpr int kW         = 720;
-constexpr int kH         = 656;
+constexpr int kH         = 620;
 constexpr int kPadX      = 15;
 constexpr int kInnerW    = kW - 2 * kPadX;
 
 constexpr int kBtnH      = 30;
 constexpr int kRowGap    = 6;
 
-// Escape text supaya aman dipakai di Fl_Browser. Fl_Browser interpretasi
-// '@' sebagai format char (mis. "@b" = bold, "@C1" = warna) dan '\n' sebagai
-// pemisah entry. Path user jarang mengandung '@' tapi kita defensive.
 std::string escapeBrowserText(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -77,8 +75,6 @@ std::string escapeBrowserText(const std::string& s) {
     return out;
 }
 
-// Format satu baris preview di browser. Panjang diusahakan tetap supaya
-// kolom "size" sejajar antar baris.
 std::string formatPreviewLine(const ImportFilePreview& p) {
     const char* tag = nullptr;
     if (p.status == ImportFileStatus::Blocked) {
@@ -121,18 +117,88 @@ std::string resolveTilde(const std::string& in) {
     return std::string(home) + in.substr(1);
 }
 
-// Normalisasi hasil Fl_Input::value() yang mungkin nullptr → std::string.
 std::string inputValue(const Fl_Input* in) {
     if (!in) return {};
     const char* v = in->value();
     return v ? std::string(v) : std::string{};
 }
 
+// Render BuildReport jadi text untuk area output.
+std::string formatBuildReport(const BuildReport& r) {
+    std::string s;
+    s.reserve(1024);
+
+    s += "Status: ";
+    if (r.timed_out)      s += "FAILED (timeout)";
+    else if (r.success)   s += "SUCCESS";
+    else                  s += "FAILED";
+    s += "  (exit=" + std::to_string(r.exit_code) + ")\n";
+
+    // Stage 11d follow-up — tampilkan mode kalau syntax-only.
+    if (r.syntax_only) {
+        s += "Mode             : SYNTAX CHECK ONLY "
+             "(tidak ada `int main` — tidak di-link, tidak dieksekusi)\n";
+    }
+
+    s += "Language detected: " + r.language + "\n";
+    if (!r.entry_point.empty()) {
+        s += "Entry point      : " + r.entry_point + "\n";
+    }
+    if (!r.command.empty()) {
+        s += "Command          : " + r.command + "\n";
+    }
+
+    if (!r.error_message.empty()) {
+        s += "\nError:\n";
+        std::string line;
+        for (char c : r.error_message) {
+            if (c == '\n') {
+                s += "  " + line + "\n";
+                line.clear();
+            } else {
+                line += c;
+            }
+        }
+        if (!line.empty()) s += "  " + line + "\n";
+    }
+
+    if (!r.related_files.empty()) {
+        s += "\nFiles related to error:\n";
+        for (const auto& rf : r.related_files) {
+            std::string marker;
+            if (rf.role == "PRIMARY_ERROR") marker = "    * ";
+            else                            marker = "    - ";
+
+            s += marker + rf.path;
+            if (rf.line > 0) {
+                s += " (line " + std::to_string(rf.line) + ")";
+            }
+            if (!rf.role.empty()) {
+                s += "  [" + rf.role + "]";
+            }
+            if (!rf.note.empty()) {
+                s += "\n        " + rf.note;
+            }
+            s += "\n";
+        }
+    }
+
+    if (!r.stdout_tail.empty()) {
+        s += "\n--- stdout (tail) ---\n";
+        s += r.stdout_tail;
+        if (s.back() != '\n') s += '\n';
+    }
+    if (!r.stderr_tail.empty() && !r.success) {
+        s += "\n--- stderr (tail) ---\n";
+        s += r.stderr_tail;
+        if (s.back() != '\n') s += '\n';
+    }
+
+    return s;
+}
+
 } // namespace
 
-// ---------------------------------------------------------------------------
-// show — entry point
-// ---------------------------------------------------------------------------
 bool ManualImportDialog::show(AppContext* ctx, const std::string& initial_root) {
     if (!ctx) {
         std::fprintf(stderr,
@@ -153,12 +219,10 @@ bool ManualImportDialog::show(AppContext* ctx, const std::string& initial_root) 
     return result;
 }
 
-// ---------------------------------------------------------------------------
-// Constructor / destructor
-// ---------------------------------------------------------------------------
 ManualImportDialog::ManualImportDialog(AppContext* ctx, std::string initial_root)
     : ctx_(ctx), current_root_(std::move(initial_root))
 {
+    build_runner_ = std::make_unique<BuildRunner>();
     build();
 }
 
@@ -170,26 +234,21 @@ ManualImportDialog::~ManualImportDialog() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// build — susun widget
-// ---------------------------------------------------------------------------
 void ManualImportDialog::build() {
     win_ = new Fl_Window(kW, kH, "Manual Import — Paste from AI Browser");
     win_->begin();
 
     int y = kPadX;
 
-    // ---- Title ----
     {
-        Fl_Box* t = new Fl_Box(kPadX, y, kInnerW, 22,
+        Fl_Box* t = new Fl_Box(kPadX, y, kInnerW, 20,
             "Paste AI output — multi-file (File: + block) atau single-file");
         t->labelfont(FL_BOLD);
         t->labelsize(13);
         t->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        y += 26;
+        y += 22;
     }
 
-    // ---- Project root row ----
     {
         Fl_Box* l = new Fl_Box(kPadX, y, 100, kBtnH, "Project root:");
         l->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
@@ -207,18 +266,17 @@ void ManualImportDialog::build() {
         y += kBtnH + kRowGap;
     }
 
-    // ---- Paste area label ----
     {
-        Fl_Box* l = new Fl_Box(kPadX, y, kInnerW, 18,
-            "Paste AI output below:");
+        Fl_Box* l = new Fl_Box(kPadX, y, kInnerW, 16,
+            "Paste AI output below  (wajib pakai format \"File: path\" di atas code block):");
         l->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
         l->labelsize(11);
-        y += 20;
+        l->labelcolor(FL_DARK_BLUE);
+        y += 18;
     }
 
-    // ---- Paste editor ----
     {
-        const int editor_h = 170;
+        const int editor_h = 100;
         paste_editor_ = new Fl_Text_Editor(kPadX, y, kInnerW, editor_h, nullptr);
         paste_buf_ = new Fl_Text_Buffer();
         paste_editor_->buffer(paste_buf_);
@@ -226,46 +284,29 @@ void ManualImportDialog::build() {
         paste_editor_->textsize(10);
         paste_editor_->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
         paste_editor_->color(FL_WHITE);
+
+        paste_buf_->add_modify_callback(onPasteModified, this);
+
         y += editor_h + kRowGap;
     }
 
-    // ---- Default filename (Stage 11b fix) ----
-    //
-    // Hanya relevan kalau paste TIDAK punya marker "File:" (output single-file
-    // dari chat AI biasa). Diabaikan kalau paste multi-file.
-    {
-        Fl_Box* l = new Fl_Box(kPadX, y, 220, kBtnH, "Default file (opt.):");
-        l->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        l->labelsize(11);
-
-        fallback_input_ = new Fl_Input(kPadX + 220, y, kInnerW - 220, kBtnH, nullptr);
-        fallback_input_->tooltip(
-            "Isi HANYA kalau paste tidak punya marker 'File:'. "
-            "Nama file target, mis. main.py. "
-            "Dikosongkan untuk paste multi-file (File: marker).");
-        y += kBtnH + kRowGap;
-    }
-
-    // ---- [Parse & Preview] ----
     {
         parse_btn_ = new Fl_Button(kPadX, y, 160, kBtnH, "Parse & Preview");
         parse_btn_->callback(cbParse, this);
         parse_btn_->tooltip(
             "Parse teks di atas. Tidak menulis apapun ke disk.");
-        y += kBtnH + kRowGap + 4;
+        y += kBtnH + kRowGap + 2;
     }
 
-    // ---- Preview label ----
     {
-        Fl_Box* l = new Fl_Box(kPadX, y, kInnerW, 18, "Preview:");
+        Fl_Box* l = new Fl_Box(kPadX, y, kInnerW, 16, "Preview:");
         l->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
         l->labelsize(11);
-        y += 20;
+        y += 18;
     }
 
-    // ---- Preview browser ----
     {
-        const int browser_h = 170;
+        const int browser_h = 80;
         preview_browser_ = new Fl_Browser(kPadX, y, kInnerW, browser_h, nullptr);
         preview_browser_->textfont(FL_COURIER);
         preview_browser_->textsize(10);
@@ -274,7 +315,6 @@ void ManualImportDialog::build() {
         y += browser_h + kRowGap;
     }
 
-    // ---- Status box ----
     {
         status_box_ = new Fl_Box(kPadX, y, kInnerW, 24,
             "Idle. Paste output lalu klik [Parse & Preview].");
@@ -284,11 +324,40 @@ void ManualImportDialog::build() {
         y += 24 + kRowGap;
     }
 
-    // ---- Bottom buttons ----
+    {
+        build_btn_ = new Fl_Button(kPadX, y, 200, kBtnH,
+            "Build/compile and Debug");
+        build_btn_->callback(cbBuild, this);
+        build_btn_->deactivate();
+        build_btn_->tooltip(
+            "Compile/run kode yang baru diimpor di sandbox. "
+            "Aktif setelah [Write to Disk] sukses.");
+        y += kBtnH + kRowGap;
+    }
+
+    {
+        build_label_ = new Fl_Box(kPadX, y, kInnerW, 16, "Build output:");
+        build_label_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        build_label_->labelsize(11);
+        y += 18;
+    }
+
+    {
+        const int out_h = 130;
+        build_output_ = new Fl_Text_Display(kPadX, y, kInnerW, out_h, nullptr);
+        build_buf_ = new Fl_Text_Buffer();
+        build_output_->buffer(build_buf_);
+        build_output_->textfont(FL_COURIER);
+        build_output_->textsize(10);
+        build_output_->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
+        build_output_->color(FL_WHITE);
+        y += out_h + kRowGap;
+    }
+
     {
         write_btn_ = new Fl_Button(kPadX, y, 160, kBtnH + 4, "Write to Disk");
         write_btn_->callback(cbWrite, this);
-        write_btn_->deactivate();   // sampai preview sukses
+        write_btn_->deactivate();
         write_btn_->tooltip("Tulis semua file berstatus NEW / OVERWRITE "
                             "ke disk. File BLOCKED dilewati.");
 
@@ -299,10 +368,6 @@ void ManualImportDialog::build() {
     win_->end();
 }
 
-// ---------------------------------------------------------------------------
-// rebuildImporter — construct sandbox + importer dari root input saat ini.
-// Return silently kalau root kosong.
-// ---------------------------------------------------------------------------
 void ManualImportDialog::rebuildImporter() {
     if (!root_input_) return;
 
@@ -316,9 +381,11 @@ void ManualImportDialog::rebuildImporter() {
 
     const std::string resolved = resolveTilde(raw);
 
-    // Rebuild HANYA kalau root berubah, supaya snapshot di importer
-    // sebelumnya tidak terbuang (relevan untuk diff view nanti di 11c).
     if (resolved == current_root_ && importer_) return;
+
+    if (!current_root_.empty() && resolved != current_root_) {
+        resetBuildState("project root berubah");
+    }
 
     current_root_ = resolved;
 
@@ -333,8 +400,6 @@ void ManualImportDialog::rebuildImporter() {
         return;
     }
 
-    // Invalidate callback: reset cache supaya Agent berikutnya lihat file
-    // baru. Konsisten dengan blueprint §5.9.
     AppContext* ctx = ctx_;
     ManualImporter::InvalidateFn cb = [ctx]() {
         if (ctx && ctx->graph_cache) {
@@ -349,24 +414,18 @@ void ManualImportDialog::rebuildImporter() {
     importer_ = std::make_unique<ManualImporter>(*fs_, std::move(cb));
 }
 
-// ---------------------------------------------------------------------------
-// doBrowse
-// ---------------------------------------------------------------------------
 void ManualImportDialog::doBrowse() {
     const char* start = root_input_ ? root_input_->value() : nullptr;
     const char* dir = fl_dir_chooser("Pilih project root", start, /*show_files=*/0);
     if (dir && *dir && root_input_) {
         root_input_->value(dir);
+        resetBuildState("project root diganti via Browse");
     }
 }
 
-// ---------------------------------------------------------------------------
-// doParse
-// ---------------------------------------------------------------------------
 void ManualImportDialog::doParse() {
     if (!root_input_ || !paste_buf_ || !preview_browser_) return;
 
-    // Snapshot root berubah antara parse & commit harus di-rebuild.
     rebuildImporter();
 
     if (!importer_) {
@@ -381,31 +440,25 @@ void ManualImportDialog::doParse() {
         return;
     }
 
-    // Stage 11b fix: teruskan field "Default file (opt.)" sebagai
-    // fallback_path. Kosong → parser akan tolak kalau paste tidak punya
-    // marker "File:" (pesan error informatif dari ManualImporter).
-    const std::string fallback = inputValue(fallback_input_);
-
     setStatus("Parsing...", FL_DARK_BLUE);
     setButtonsEnabled(/*parsing_enabled=*/false, /*writing_enabled=*/false);
-    Fl::check();   // paint "Parsing..." sebelum kerja sinkron
+    Fl::check();
 
-    last_preview_ = importer_->preview(text, fallback);
+    // fallback_path selalu "" — paste wajib pakai marker `File:`.
+    last_preview_ = importer_->preview(text, /*fallback_path=*/"");
 
     refreshPreviewBrowser(last_preview_);
 
     if (last_preview_.parse_failed) {
         std::string msg = "Parse FAILED: " + last_preview_.parse_error;
 
-        // Hint spesifik: kalau gagal karena fallback_path kosong, arahkan
-        // user ke field yang benar. Match substring — pesan aslinya dari
-        // ManualImporter ("Response single-file, tapi fallback_path kosong.")
-        // sengaja tidak di-copy persis supaya kalau wording berubah di masa
-        // depan, hint tetap muncul selama kata kuncinya sama.
         if (last_preview_.parse_error.find("fallback_path kosong")
             != std::string::npos) {
-            msg += "   —   Isi field \"Default file (opt.)\" di atas "
-                   "(mis. main.py), lalu klik Parse lagi.";
+            msg += "   —   Paste wajib menyertakan baris \"File: <nama_file.ext>\" "
+                   "di atas setiap code block. Contoh:\n"
+                   "    File: main.py\n"
+                   "    (baris kosong opsional)\n"
+                   "    <code block berpagar tiga-backtick di sini>";
         }
         setStatus(msg, FL_RED);
         setButtonsEnabled(true, false);
@@ -430,14 +483,10 @@ void ManualImportDialog::doParse() {
         setStatus(buf, FL_DARK_GREEN);
     }
 
-    // Enable Write hanya kalau ada file yang bisa ditulis.
     const bool can_write = last_preview_.has_writable();
     setButtonsEnabled(/*parsing_enabled=*/true, /*writing_enabled=*/can_write);
 }
 
-// ---------------------------------------------------------------------------
-// doWrite
-// ---------------------------------------------------------------------------
 void ManualImportDialog::doWrite() {
     if (!importer_ || !importer_->hasPreview()) {
         fl_message("Belum ada preview. Klik [Parse & Preview] dulu.");
@@ -449,8 +498,6 @@ void ManualImportDialog::doWrite() {
         return;
     }
 
-    // Konfirmasi eksplisit user — konteks ini user-mediated, tapi tetap
-    // minta konfirmasi untuk overwrite (kalau ada) karena destructive.
     if (last_preview_.overwrite_count > 0) {
         char prompt[256];
         std::snprintf(prompt, sizeof(prompt),
@@ -470,12 +517,35 @@ void ManualImportDialog::doWrite() {
 
     wrote_anything_ = wrote_anything_ || (res.written_count > 0);
 
+    if (res.written_count > 0 && fs_) {
+        if (last_commit_root_ != fs_->root().string()) {
+            files_written_.clear();
+            last_commit_root_ = fs_->root().string();
+        }
+
+        for (const auto& f : res.files) {
+            if (f.status == ImportFileStatus::Blocked) continue;
+            if (!fs_->exists(f.relative_path)) continue;
+
+            GeneratedFile gf;
+            gf.relative_path = f.relative_path;
+            gf.content       = f.content;
+            files_written_[f.relative_path] = std::move(gf);
+        }
+
+        std::fprintf(stderr,
+            "[frans][manual_import_dialog] files_written_ sekarang %zu file "
+            "(commit written=%zu)\n",
+            files_written_.size(), res.written_count);
+        std::fflush(stderr);
+    }
+
     char buf[320];
     if (res.written_count > 0 && res.failed_count == 0) {
         std::snprintf(buf, sizeof(buf),
             "Wrote %zu file(s), %zu blocked. "
-            "ProjectGraphCache invalidated — Agent berikutnya akan "
-            "lihat file baru.",
+            "ProjectGraphCache invalidated — klik [Build/compile and Debug] "
+            "untuk compile/run.",
             res.written_count, res.blocked_count);
         setStatus(buf, FL_DARK_GREEN);
     } else if (res.failed_count > 0) {
@@ -491,22 +561,102 @@ void ManualImportDialog::doWrite() {
         setStatus(buf, FL_DARK_RED);
     }
 
-    // Setelah commit, importer->hasPreview() == false. Untuk impor ulang,
-    // user harus Parse lagi. Ini by-design (Stage 11a) — mencegah
-    // double-write. Sinkronkan UI: disable Write.
     setButtonsEnabled(/*parsing_enabled=*/true, /*writing_enabled=*/false);
+    updateBuildButtonState();
 }
 
-// ---------------------------------------------------------------------------
-// doClose
-// ---------------------------------------------------------------------------
+void ManualImportDialog::doBuild() {
+    if (files_written_.empty()) {
+        fl_message("Belum ada file yang di-commit. "
+                   "Klik [Parse & Preview] lalu [Write to Disk] dulu.");
+        return;
+    }
+    if (!fs_) {
+        fl_message("Sandbox belum siap.");
+        return;
+    }
+    if (is_building_) return;
+
+    std::vector<GeneratedFile> files;
+    files.reserve(files_written_.size());
+    for (const auto& [path, gf] : files_written_) {
+        files.push_back(gf);
+    }
+
+    {
+        std::vector<GeneratedFile> existing;
+        existing.reserve(files.size());
+        for (auto& gf : files) {
+            if (fs_->exists(gf.relative_path)) {
+                existing.push_back(std::move(gf));
+            } else {
+                std::fprintf(stderr,
+                    "[frans][manual_import_dialog] build: SKIP '%s' "
+                    "(tidak ada di sandbox)\n",
+                    gf.relative_path.c_str());
+                std::fflush(stderr);
+            }
+        }
+        files = std::move(existing);
+    }
+
+    if (files.empty()) {
+        fl_message("Tidak ada file yang tersedia di sandbox untuk di-build. "
+                   "Coba commit ulang.");
+        return;
+    }
+
+    is_building_ = true;
+    updateBuildButtonState();
+
+    setStatus("Building... (menunggu subprocess, max 30s)", FL_DARK_BLUE);
+    if (build_buf_) build_buf_->text("");
+    Fl::check();
+
+    BuildRunner::ConfirmCallback confirm_cb =
+        [](const std::string& reason) -> bool {
+            const int ans = fl_choice(
+                "%s", "Batal", "Ya, jalankan", nullptr, reason.c_str());
+            return ans == 1;
+        };
+
+    frans::application::ProjectGraphCache* gc =
+        (ctx_ && ctx_->graph_cache) ? ctx_->graph_cache.get() : nullptr;
+
+    const BuildReport report = build_runner_->runBuild(
+        files,
+        fs_->root().string(),
+        *fs_,
+        gc,
+        /*timeout_sec=*/30,
+        confirm_cb);
+
+    is_building_ = false;
+
+    renderBuildReport(report);
+
+    if (report.success) {
+        char buf[200];
+        std::snprintf(buf, sizeof(buf),
+            "Build SUCCESS — %s, entry='%s'%s",
+            report.language.c_str(), report.entry_point.c_str(),
+            report.syntax_only ? " (syntax check only)" : "");
+        setStatus(buf, FL_DARK_GREEN);
+    } else {
+        char buf[200];
+        std::snprintf(buf, sizeof(buf),
+            "Build FAILED — %s  (lihat area Build output di bawah)",
+            report.language.c_str());
+        setStatus(buf, FL_RED);
+    }
+
+    updateBuildButtonState();
+}
+
 void ManualImportDialog::doClose() {
     if (win_) win_->hide();
 }
 
-// ---------------------------------------------------------------------------
-// refreshPreviewBrowser — render last_preview_ ke Fl_Browser.
-// ---------------------------------------------------------------------------
 void ManualImportDialog::refreshPreviewBrowser(const ImportResult& r) {
     if (!preview_browser_) return;
     preview_browser_->clear();
@@ -525,9 +675,17 @@ void ManualImportDialog::refreshPreviewBrowser(const ImportResult& r) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// setStatus / setButtonsEnabled
-// ---------------------------------------------------------------------------
+void ManualImportDialog::renderBuildReport(const BuildReport& r) {
+    if (!build_buf_) return;
+    build_buf_->text("");
+    const std::string text = formatBuildReport(r);
+    build_buf_->append(text.c_str());
+    if (build_output_) {
+        build_output_->insert_position(build_buf_->length());
+        build_output_->show_insert_position();
+    }
+}
+
 void ManualImportDialog::setStatus(const std::string& msg, unsigned color) {
     if (!status_box_) return;
     status_box_->copy_label(msg.c_str());
@@ -545,12 +703,41 @@ void ManualImportDialog::setButtonsEnabled(bool parsing_enabled,
         if (writing_enabled) write_btn_->activate();
         else                 write_btn_->deactivate();
     }
-    // Close selalu enabled — user bisa batal kapan saja.
 }
 
-// ---------------------------------------------------------------------------
-// Static callbacks
-// ---------------------------------------------------------------------------
+void ManualImportDialog::updateBuildButtonState() {
+    if (!build_btn_) return;
+
+    const bool can_build = !files_written_.empty() && !is_building_;
+
+    if (is_building_) {
+        build_btn_->label("Building...");
+        build_btn_->deactivate();
+    } else {
+        build_btn_->label("Build/compile and Debug");
+        if (can_build) build_btn_->activate();
+        else           build_btn_->deactivate();
+    }
+    build_btn_->redraw();
+}
+
+void ManualImportDialog::resetBuildState(const char* reason) {
+    if (files_written_.empty() && !is_building_) return;
+
+    std::fprintf(stderr,
+        "[frans][manual_import_dialog] resetBuildState: %s "
+        "(files_written_=%zu)\n",
+        reason ? reason : "(no reason)", files_written_.size());
+    std::fflush(stderr);
+
+    files_written_.clear();
+    last_commit_root_.clear();
+    is_building_ = false;
+
+    if (build_buf_) build_buf_->text("");
+    updateBuildButtonState();
+}
+
 void ManualImportDialog::cbBrowse(Fl_Widget*, void* data) {
     static_cast<ManualImportDialog*>(data)->doBrowse();
 }
@@ -563,8 +750,27 @@ void ManualImportDialog::cbWrite(Fl_Widget*, void* data) {
     static_cast<ManualImportDialog*>(data)->doWrite();
 }
 
+void ManualImportDialog::cbBuild(Fl_Widget*, void* data) {
+    static_cast<ManualImportDialog*>(data)->doBuild();
+}
+
 void ManualImportDialog::cbClose(Fl_Widget*, void* data) {
     static_cast<ManualImportDialog*>(data)->doClose();
+}
+
+void ManualImportDialog::onPasteModified(int /*pos*/,
+                                          int nInserted,
+                                          int nDeleted,
+                                          int /*nRestyled*/,
+                                          const char* /*deletedText*/,
+                                          void* cbArg)
+{
+    auto* self = static_cast<ManualImportDialog*>(cbArg);
+    if (!self) return;
+
+    if (nInserted == 0 && nDeleted == 0) return;
+
+    self->resetBuildState("paste area dimodifikasi");
 }
 
 } // namespace frans::ui
