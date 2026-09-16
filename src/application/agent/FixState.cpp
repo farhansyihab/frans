@@ -3,7 +3,7 @@
 
 #include "application/agent/AgentContext.h"
 #include "application/agent/MultiFileParser.h"
-#include "application/context_selector/ContextSelector.h"   // formatContextForPrompt
+#include "application/context_selector/ContextSelector.h"
 #include "domain/fs/IFileSystemPort.h"
 #include "domain/llm/GenOptions.h"
 #include "domain/llm/ILlmProvider.h"
@@ -23,11 +23,10 @@ using frans::domain::GenResult;
 
 namespace {
 
-// Stage 7g+1 (patch): perkuat instruksi serupa GenerateState.
-// "Output the FULL corrected file(s)" terlalu ambigu — model bisa
-// menginterpretasikan sebagai "semua file yang kamu lihat". Sekarang
-// eksplisit: hanya file yang ada di "Your previous attempt" di
-// user message.
+// Fenced block marker — dipecah jadi dua string literal supaya source
+// tidak mengandung literal triple backtick.
+constexpr const char* kFence = "``" "`";   // 3 backtick
+
 const char* kFixSystemPrompt =
     "You are frans_ai, a local coding assistant. Your previous attempt at "
     "the task FAILED. Analyze the error carefully and produce a corrected "
@@ -36,9 +35,9 @@ const char* kFixSystemPrompt =
     "Use EXACTLY this format for EACH file you output:\n"
     "\n"
     "File: <relative_path>\n"
-    "```<language>\n"
+    "``" "`<language>\n"
     "<file content>\n"
-    "```\n"
+    "``" "`\n"
     "\n"
     "Rules:\n"
     "- Fix the SPECIFIC problem described in the error observation.\n"
@@ -57,12 +56,6 @@ const char* kFixSystemPrompt =
     "- Do NOT write any text before the first \"File:\" line or after "
     "the last block.\n";
 
-// Blueprint Stage 7f — baca file dari DISK, bukan dari memory
-// (ctx.generatedFiles). Ini mencegah bug di mana IDE auto-format file
-// antara attempt 0 dan attempt 1, sehingga memory dan disk tidak sinkron.
-//
-// Kumpulkan union dari inScopeFiles (prioritas — entry + file relevan
-// lain) dan generatedFiles. Dedup lewat std::set.
 std::vector<std::string> collectFilesToRead(const AgentContext& ctx) {
     std::vector<std::string> files;
     std::set<std::string> seen;
@@ -78,9 +71,6 @@ std::vector<std::string> collectFilesToRead(const AgentContext& ctx) {
     return files;
 }
 
-// Render konten file yang dibaca dari disk dengan format File: + fenced
-// block. File yang tidak ada di disk (mis. user hapus manual) ditulis
-// sebagai blok kosong — model bisa generate ulang.
 std::string formatFilesFromDisk(const std::vector<std::string>& paths,
                                 frans::domain::IFileSystemPort& fs) {
     std::string out;
@@ -91,10 +81,10 @@ std::string formatFilesFromDisk(const std::vector<std::string>& paths,
     for (const auto& path : paths) {
         const std::string content = fs.readFile(path);
         out += "File: " + path + "\n";
-        out += "```\n";
+        out += "``" "`\n";
         out += content;
         if (content.empty() || content.back() != '\n') out += '\n';
-        out += "```\n\n";
+        out += "``" "`\n\n";
     }
     return out;
 }
@@ -145,6 +135,12 @@ void FixState::run(AgentContext& ctx) {
     ctx.success = false;
     ctx.lastError.clear();
 
+    // Reset metadata per-call (Stage 12d) — sama seperti GenerateState.
+    ctx.lastCallCostUsd      = 0.0;
+    ctx.lastCallRateLimited  = false;
+    ctx.lastPromptTokens     = 0;
+    ctx.lastCompletionTokens = 0;
+
     // ---- 1. Preconditions ----
     if (ctx.targetRelativePath.empty()) {
         ctx.lastError = "FixState: targetRelativePath kosong.";
@@ -170,7 +166,6 @@ void FixState::run(AgentContext& ctx) {
     }
 
     // ---- 3. Messages ----
-    // Stage 7f: buildUserMessage baca DISK (via fs), bukan memory.
     std::vector<ChatMessage> messages = {
         {"system", systemPrompt},
         {"user",   buildUserMessage(ctx, fs_)},
@@ -184,9 +179,11 @@ void FixState::run(AgentContext& ctx) {
     // ---- 4. Generate ----
     const GenResult result = provider_.generate(messages, opts);
 
-    // Stage 9c — catat biaya AKTUAL sebelum cek success. Lihat komentar
-    // paralel di GenerateState.cpp.
-    ctx.lastCallCostUsd = result.cost_usd;
+    // Stage 9c + 12d — catat metadata sebelum cek success.
+    ctx.lastCallCostUsd      = result.cost_usd;
+    ctx.lastCallRateLimited  = result.rate_limited;
+    ctx.lastPromptTokens     = result.prompt_tokens;
+    ctx.lastCompletionTokens = result.completion_tokens;
 
     if (!result.success) {
         ctx.lastError = "FixState: LLM generate gagal: " + result.error;
@@ -211,9 +208,6 @@ void FixState::run(AgentContext& ctx) {
     std::fflush(stderr);
 
     // ---- 6. Tulis semua file (overwrite) ----
-    // Snapshot pakai fungsi YANG SAMA dengan GenerateState — tidak
-    // reimplementasi logic terpisah. Idempotent: kalau sudah tercatat
-    // dari GenerateState, tidak overwrite.
     for (const auto& f : parsed.files) {
         const std::filesystem::path p(f.relative_path);
         const std::filesystem::path parent = p.parent_path();

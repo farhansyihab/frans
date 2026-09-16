@@ -27,18 +27,16 @@ using nlohmann::json;
 namespace {
 
 constexpr double kTokensPerMillion = 1'000'000.0;
-
-// Estimasi token output default untuk estimateCost (sebelum generation).
-// Nilai 500 diambil sebagai tengah-tengah antara "jawaban pendek" (100 tok)
-// dan "kode panjang" (1500 tok). Ini hanya untuk pra-estimasi budget,
-// bukan untuk billing.
 constexpr int kDefaultOutputTokenEstimate = 500;
 
-// Estimasi token dari panjang teks — rule-of-thumb sama dengan
-// ContextSelector::estimateTokens (chars/3, round-up). Konservatif.
 int estimateTokensFromText(const std::string& s) {
     if (s.empty()) return 0;
     return static_cast<int>((s.size() + 2) / 3);
+}
+
+// Stage 12d — HTTP status rate-limit / capacity.
+bool isRateLimitStatus(int status) {
+    return status == 429 || status == 503;
 }
 
 } // namespace
@@ -136,9 +134,6 @@ std::string DeepSeekProvider::name() const {
 }
 
 bool DeepSeekProvider::isAvailable() const {
-    // DeepSeek tidak punya endpoint /health publik. Kita hanya cek
-    // konfigurasi minimal (endpoint valid + api_key ada). Request aktual
-    // bisa gagal karena rate limit / network — itu ditangani di generate().
     return parsed_endpoint_.valid && cfg_.hasApiKey();
 }
 
@@ -168,8 +163,6 @@ std::string DeepSeekProvider::buildPayload(
         j["stop"] = json::array({opts.stop_sequence});
     }
 
-    // DeepSeek mengembalikan `usage` di stream hanya kalau diminta eksplisit
-    // (via stream_options). Ini penting untuk cost accounting yang akurat.
     if (stream) {
         j["stream_options"] = {{"include_usage", true}};
     }
@@ -201,7 +194,6 @@ GenResult DeepSeekProvider::generate(const std::vector<ChatMessage>& messages,
 {
     GenResult result;
 
-    // ---- Pre-flight checks ----
     if (!parsed_endpoint_.valid) {
         result.error = "DeepSeek: endpoint tidak valid: " + cfg_.endpoint;
         return result;
@@ -215,6 +207,8 @@ GenResult DeepSeekProvider::generate(const std::vector<ChatMessage>& messages,
     const auto t0 = std::chrono::steady_clock::now();
 
     const std::string payload = buildPayload(messages, opts, /*stream=*/false);
+
+    int http_status = 0;
 
     const std::string body_str =
 #if defined(CPPHTTPLIB_OPENSSL_SUPPORT)
@@ -237,6 +231,7 @@ GenResult DeepSeekProvider::generate(const std::vector<ChatMessage>& messages,
                 result.error = "HTTP error: " + httplib::to_string(res.error());
                 return std::string{};
             }
+            http_status = res->status;
             if (res->status != 200) {
                 std::string detail = res->body.substr(0, 300);
                 try {
@@ -266,11 +261,18 @@ GenResult DeepSeekProvider::generate(const std::vector<ChatMessage>& messages,
     const auto t1 = std::chrono::steady_clock::now();
     result.elapsed_sec = std::chrono::duration<double>(t1 - t0).count();
 
+    // Stage 12d — set rate_limited pada HTTP 429/503.
+    if (isRateLimitStatus(http_status)) {
+        result.rate_limited = true;
+        std::fprintf(stderr,
+            "[frans][deepseek] rate-limited (HTTP %d).\n", http_status);
+        std::fflush(stderr);
+    }
+
     if (!result.error.empty()) {
         return result;
     }
 
-    // ---- Parse response ----
     try {
         const auto j = json::parse(body_str);
 
@@ -306,9 +308,6 @@ GenResult DeepSeekProvider::generate(const std::vector<ChatMessage>& messages,
                     j["usage"]["completion_tokens"].get<int>();
         }
 
-        // Stage 8 patch — deteksi respons kosong & beri pesan yang bisa
-        // ditindaklanjuti. Sebelumnya, HTTP 200 dengan content kosong dianggap
-        // sukses (result.success=true, text="") — menyulitkan debugging.
         if (result.text.empty()) {
             result.cost_usd =
                 computeActualCost(result.prompt_tokens,
@@ -340,7 +339,7 @@ GenResult DeepSeekProvider::generate(const std::vector<ChatMessage>& messages,
                 finish_reason.c_str(), has_reasoning_content ? 1 : 0,
                 result.elapsed_sec);
             std::fflush(stderr);
-            return result;   // success tetap false
+            return result;
         }
 
         result.success  = true;
@@ -454,6 +453,16 @@ GenResult DeepSeekProvider::streamGenerate(
             }
         } catch (...) {}
         result.error = "HTTP " + std::to_string(res.status) + ": " + detail;
+
+        // Stage 12d.
+        if (isRateLimitStatus(res.status)) {
+            result.rate_limited = true;
+            std::fprintf(stderr,
+                "[frans][deepseek] stream rate-limited (HTTP %d).\n",
+                res.status);
+            std::fflush(stderr);
+        }
+
         result.text  = accumulated;
         return result;
     }
@@ -478,7 +487,7 @@ GenResult DeepSeekProvider::streamGenerate(
 }
 
 // ---------------------------------------------------------------------------
-// estimateCost (pra-generation)
+// estimateCost
 // ---------------------------------------------------------------------------
 CostEstimate DeepSeekProvider::estimateCost(
     const std::vector<ChatMessage>& messages) const

@@ -26,17 +26,7 @@ using frans::domain::GenResult;
 
 namespace {
 
-// ---------------------------------------------------------------------------
 // Stage 10d — petakan extension → label bahasa.
-//
-// Hanya label bahasa yang KITA DUKUNG di-return. Extension yang tidak
-// dikenal → "" (tidak masuk daftar "Project languages detected").
-//
-// Konsisten dengan TreeSitterGraphBuilder::supportedExtensions() —
-// kalau builder tidak parse .cpp, tetap kita map "C++" karena file .cpp
-// yang ada di graph berarti builder MEMANG punya C++ parser. File .cpp
-// yang tidak ter-parse tidak akan muncul di allFilePaths().
-// ---------------------------------------------------------------------------
 std::string languageLabelForExtension(const std::string& ext) {
     if (ext == ".py") {
         return "Python";
@@ -58,12 +48,7 @@ std::string languageLabelForExtension(const std::string& ext) {
     return {};
 }
 
-// ---------------------------------------------------------------------------
 // Stage 10d — scan file di graph, dedupe label bahasa, join dengan ", ".
-//
-// std::set → iterasi otomatis terurut alfabetis → deterministik.
-// Contoh output: "C++, JavaScript, Python, TypeScript, Vue"
-// ---------------------------------------------------------------------------
 std::string detectProjectLanguages(
     const frans::code_intelligence::DependencyGraph& graph)
 {
@@ -82,31 +67,13 @@ std::string detectProjectLanguages(
     return out;
 }
 
-// System prompt untuk multi-file response (Stage 7e).
-//
-// Instruksi format SANGAT eksplisit supaya qwen2.5-coder-7b mengikuti
-// konvensi "File: <path>" + fenced block. Konvensi ini dipakai
-// aider dan model ini sudah familiar dengannya.
-//
-// Stage 7f: tambah "Files currently in scope" header supaya model
-// tahu file apa saja yang dianggap relevan — membantu model
-// menghindari menulis file yang tidak perlu, dan menyelaraskan
-// pemahaman dengan ContextSelector.
-//
-// Stage 7g+1 (patch): perkuat instruksi supaya model TIDAK rewrite file
-// di luar scope. Sebelumnya baris "- You MAY output additional files
-// (tests, helpers)." secara literal meng-invite model menulis file apa
-// pun yang dia lihat di "in scope" — perilaku observed di real run
-// dengan 3B dan 7B: model rewrite test.py padahal task tidak minta.
-// Perbaikan:
-//   1. Buang "MAY output additional files" — ganti aturan eksplisit
-//      "output ONLY entry point + file yang disebut eksplisit di task".
-//   2. Tambah instruksi "preserve existing functions, edit surgically".
-//   3. Anotasi per-file: [ENTRY POINT] vs [READ-ONLY].
-//
-// Stage 10d: tambah baris "Project languages detected: ..." sesudah
-// in-scope list. Untuk project mixed-language, hint ini membantu model
-// memilih gaya/idiom yang tepat kalau task ambigu.
+// Catatan: fenced code block marker dipecah jadi dua string literal
+// berdampingan supaya source file tidak mengandung literal triple
+// backtick (menghindari konflik dengan tooling markdown-based).
+constexpr const char* kFenceOpen  = "``" "`";   // 3 backtick
+constexpr const char* kFenceClose = "``" "`";   // 3 backtick
+
+// System prompt untuk multi-file response (Stage 7e/7f/7g+1/10d).
 std::string buildSystemPrompt(const std::string& target_path,
                               const std::string& context_block,
                               const std::vector<std::string>& in_scope_files,
@@ -120,9 +87,9 @@ std::string buildSystemPrompt(const std::string& target_path,
         "Use EXACTLY this format for EACH file you output:\n"
         "\n"
         "File: <relative_path>\n"
-        "```<language>\n"
+        "``" "`<language>\n"
         "<file content>\n"
-        "```\n"
+        "``" "`\n"
         "\n"
         "Rules:\n"
         "- Paths are relative to the project root.\n"
@@ -167,9 +134,6 @@ std::string buildSystemPrompt(const std::string& target_path,
     }
 
     // ---- Stage 10d: project languages detected ----
-    // Diletakkan langsung SETELAH in-scope list dan SEBELUM context block:
-    // memberi model gambaran cepat "project ini multi-bahasa apa" tanpa
-    // mengganggu alur baca dari scope → existing code.
     const std::string langs = detectProjectLanguages(graph);
     if (!langs.empty()) {
         p += "\nProject languages detected: ";
@@ -193,7 +157,6 @@ void syncLastGeneratedCode(AgentContext& ctx) {
     if (const auto* entry = ctx.findEntryFile()) {
         ctx.lastGeneratedCode = entry->content;
     } else if (!ctx.generatedFiles.empty()) {
-        // Fallback kalau entry tidak ketemu: pakai file pertama.
         ctx.lastGeneratedCode = ctx.generatedFiles.front().content;
     }
 }
@@ -213,6 +176,13 @@ void GenerateState::run(AgentContext& ctx) {
     ctx.lastGeneratedCode.clear();
     ctx.contextSnippets.clear();
 
+    // Reset metadata per-call (Stage 12d) supaya attempt berikutnya
+    // tidak membaca stale value dari attempt sebelumnya.
+    ctx.lastCallCostUsd      = 0.0;
+    ctx.lastCallRateLimited  = false;
+    ctx.lastPromptTokens     = 0;
+    ctx.lastCompletionTokens = 0;
+
     // ---- 1. Token budget ----
     ContextBudgetManager budgetMgr;
     const auto alloc = budgetMgr.allocate(4096);
@@ -230,8 +200,6 @@ void GenerateState::run(AgentContext& ctx) {
     }
 
     // ---- 3. System prompt + messages ----
-    // Stage 10d: pass graph supaya "Project languages detected" bisa
-    // dihitung dari allFilePaths().
     const std::string systemPrompt =
         buildSystemPrompt(ctx.targetRelativePath, context_block,
                           ctx.inScopeFiles, graph_);
@@ -242,17 +210,18 @@ void GenerateState::run(AgentContext& ctx) {
     };
 
     GenOptions opts;
-    opts.max_tokens  = 2048;   // naik dari 1024 → ruang untuk multi-file
+    opts.max_tokens  = 2048;
     opts.temperature = 0.2;
     opts.top_p       = 0.9;
 
     // ---- 4. Generate ----
     const GenResult result = provider_.generate(messages, opts);
 
-    // Stage 9c — catat biaya AKTUAL sebelum cek success, supaya biaya
-    // tetap tercatat walau generate gagal parsial (mis. HTTP 200 tapi
-    // content kosong, atau error setelah token usage terlaporkan).
-    ctx.lastCallCostUsd = result.cost_usd;
+    // Stage 9c + 12d — catat semua metadata SEBELUM cek success.
+    ctx.lastCallCostUsd      = result.cost_usd;
+    ctx.lastCallRateLimited  = result.rate_limited;
+    ctx.lastPromptTokens     = result.prompt_tokens;
+    ctx.lastCompletionTokens = result.completion_tokens;
 
     if (!result.success) {
         ctx.success   = false;
@@ -280,9 +249,6 @@ void GenerateState::run(AgentContext& ctx) {
     std::fflush(stderr);
 
     // ---- 6. Tulis semua file ----
-    // Stage 7f: snapshotBeforeWrite dipanggil SEBELUM fs_.writeFile untuk
-    // SETIAP file yang akan ditulis — bukan hanya yang di inScopeFiles,
-    // karena model bisa saja menghasilkan file baru di luar scope awal.
     for (const auto& f : parsed.files) {
         const std::filesystem::path p(f.relative_path);
         const std::filesystem::path parent = p.parent_path();

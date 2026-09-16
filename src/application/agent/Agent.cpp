@@ -87,9 +87,7 @@ bool Agent::run(AgentContext& ctx) {
 
     const auto& graph = deps_.graph ? *deps_.graph : emptyGraph();
 
-    // Stage 9c + Stage 12 — escalation state fresh per run.
-    // Tidak disimpan di AgentContext supaya tidak bocor lintas-run
-    // (AgentContext dipakai ulang oleh TaskRunner).
+    // Stage 9c + 12 — escalation state fresh per run.
     EscalationContext esc_ctx;
 
     // =====================================================================
@@ -131,12 +129,14 @@ bool Agent::run(AgentContext& ctx) {
             }
             std::fprintf(stderr,
                 "[frans][agent] attempt=%d route: provider=%s tier=%s "
-                "paid=%d local_streak=%d light_streak=%d max_tier=%s\n",
+                "paid=%d local_streak=%d light_streak=%d "
+                "cooldown=%d max_tier=%s\n",
                 attempt, active_provider->name().c_str(),
                 tierName(this_attempt_tier),
                 this_attempt_paid ? 1 : 0,
                 esc_ctx.local_fail_streak,
                 esc_ctx.paid_light_fail_streak,
+                esc_ctx.paid_light_rate_limit_cooldown,
                 tierName(esc_ctx.max_tier_reached));
             std::fflush(stderr);
         }
@@ -163,8 +163,6 @@ bool Agent::run(AgentContext& ctx) {
         }
 
         // ---- Execute ----
-        // Stage 7g: pass cancel_flag supaya runCommand bisa SIGKILL child
-        // saat user klik Cancel (bukan cuma menunggu timeout).
         {
             announce("Execute", attempt);
             ExecuteState exec(deps_.sandbox_root,
@@ -177,9 +175,6 @@ bool Agent::run(AgentContext& ctx) {
         }
 
         // ---- Observe ----
-        // Stage 7g: SELALU jalan, termasuk saat cancelled_by_user — supaya
-        // observation-nya terekam dengan jelas (bukan langsung abort tanpa
-        // jejak). Cancel tetap dihormati di bawah, setelah record tercatat.
         {
             announce("Observe", attempt);
             ObserveState observe;
@@ -198,61 +193,73 @@ bool Agent::run(AgentContext& ctx) {
         }
 
         // ---- Stage 12: escalation state + budget update ----
-        // Dilakukan SETELAH Observe (supaya ctx.success final attempt ini
-        // sudah terisi) dan SEBELUM cek success di bawah.
         //
-        // Aturan update:
-        //   PaidHeavy selesai (sukses/gagal) -> recordUsage (biaya nyata).
-        //   PaidLight selesai (sukses/gagal) -> recordFreeTierUsage (audit).
-        //   PaidLight sukses                 -> reset kedua streak.
-        //   PaidHeavy sukses                 -> reset kedua streak.
-        //   Local gagal                      -> local_fail_streak++
-        //   PaidLight gagal                  -> paid_light_fail_streak++
-        //   PaidHeavy gagal                  -> tidak increment (sticky).
+        // Urutan:
+        //   1. Budget / audit per tier (PaidHeavy -> recordUsage,
+        //      PaidLight -> recordFreeTierUsage).
+        //   2. Streak / cooldown update.
+        //   3. Decrement cooldown (kalau attempt ini bukan yang baru
+        //      men-set cooldown).
         //
-        // ctx.lastCallCostUsd diisi oleh GenerateState/FixState tepat
-        // setelah provider.generate() return — 0.0 untuk provider gratis
-        // (Local, Gemini). Hanya dipakai untuk PaidHeavy.
+        // Aturan streak:
+        //   Sukses                       -> reset semua streak + cooldown.
+        //   Local gagal                  -> local_fail_streak++.
+        //   PaidLight gagal (biasa)      -> paid_light_fail_streak++.
+        //   PaidLight gagal (rate limit) -> cooldown=2, JANGAN increment
+        //                                   paid_light_fail_streak.
+        //   PaidHeavy gagal              -> no-op (sticky menangani).
         //
-        // CATATAN Stage 12: audit token free-tier (Gemini) sementara
-        // dilewati karena AgentContext belum menyimpan prompt/completion
-        // tokens dari panggilan terakhir. TODO: tambah field
-        // `lastPromptTokens` / `lastCompletionTokens` ke AgentContext,
-        // isi di GenerateState/FixState setelah provider.generate(),
-        // lalu aktifkan recordFreeTierUsage di bawah.
+        // Alasan rate-limit TIDAK increment paid_light_fail_streak:
+        // blueprint §10 — rate limit BUKAN alasan naik ke DeepSeek.
+        // Rate limit = kuota sementara; kita tunggu sambil pakai Local.
         if (deps_.router) {
-            // 1. Budget per tier.
+            bool just_set_cooldown = false;
+
+            // 1. Budget / audit.
             if (deps_.budget_guard) {
                 if (this_attempt_tier == RoutingTier::PaidHeavy) {
                     deps_.budget_guard->recordUsage(ctx.lastCallCostUsd);
+                } else if (this_attempt_tier == RoutingTier::PaidLight) {
+                    deps_.budget_guard->recordFreeTierUsage(
+                        ctx.lastPromptTokens,
+                        ctx.lastCompletionTokens);
                 }
-                // else if (this_attempt_tier == RoutingTier::PaidLight) {
-                //     deps_.budget_guard->recordFreeTierUsage(
-                //         ctx.lastPromptTokens,
-                //         ctx.lastCompletionTokens);
-                // }
             }
 
-            // 2. Streak update.
+            // 2. Streak / cooldown.
             if (ctx.success) {
-                // Attempt ini sukses — reset kedua streak supaya attempt
-                // berikutnya (kalau ada, mis. multi-task) mulai dari Local
-                // lagi kecuali max_tier_reached sudah sticky.
-                esc_ctx.local_fail_streak      = 0;
-                esc_ctx.paid_light_fail_streak = 0;
+                esc_ctx.local_fail_streak            = 0;
+                esc_ctx.paid_light_fail_streak       = 0;
+                esc_ctx.paid_light_rate_limit_cooldown = 0;
             } else {
                 if (this_attempt_tier == RoutingTier::Local) {
                     ++esc_ctx.local_fail_streak;
                 } else if (this_attempt_tier == RoutingTier::PaidLight) {
-                    ++esc_ctx.paid_light_fail_streak;
+                    if (ctx.lastCallRateLimited) {
+                        esc_ctx.paid_light_rate_limit_cooldown = 2;
+                        just_set_cooldown = true;
+                        std::fprintf(stderr,
+                            "[frans][agent] attempt=%d: PaidLight "
+                            "rate-limited — cooldown=2 attempt "
+                            "(fallback Local, TIDAK naik ke PaidHeavy).\n",
+                            attempt);
+                        std::fflush(stderr);
+                    } else {
+                        ++esc_ctx.paid_light_fail_streak;
+                    }
                 }
-                // PaidHeavy gagal: tidak increment. Sticky di max_tier
-                // sudah menjamin attempt berikutnya tetap di PaidHeavy.
+                // PaidHeavy gagal: no-op.
+            }
+
+            // 3. Decrement cooldown. Skip kalau attempt ini BARU
+            //    men-set cooldown (biar nilainya tidak langsung turun).
+            if (!just_set_cooldown
+                && esc_ctx.paid_light_rate_limit_cooldown > 0) {
+                --esc_ctx.paid_light_rate_limit_cooldown;
             }
         }
 
-        // Cancel check — dipindah ke sini (setelah Observe + record) supaya
-        // cancel-by-execute tetap menghasilkan attempt record yang informatif.
+        // Cancel check — dipindah ke sini (setelah Observe + record).
         if (is_cancelled()) {
             ctx.success = false;
             ctx.lastError = "Cancelled by user.";

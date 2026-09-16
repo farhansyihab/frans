@@ -20,10 +20,6 @@ enum class TaskComplexity {
 };
 
 // Hasil satu langkah eksekusi (Stage 7c — ExecuteState).
-//
-// Stage 7g: tambah `cancelled_by_user`. Field ini mutually exclusive
-// dengan `timed_out` — yang duluan terdeteksi di polling loop ProcessExecutor
-// yang menang. `is_success()` sekarang memperhitungkan keduanya.
 struct ExecutionOutcome {
     bool        ran               = false;
     int         exit_code         = -1;
@@ -40,14 +36,9 @@ struct ExecutionOutcome {
 };
 
 // Blueprint Stage 7f.5 — hasil eksekusi test file.
-//
-// Diisi ExecuteState. Field ini TIDAK dibaca ObserveState — ObserveState
-// hanya melihat lastExecution. Tujuan field ini: audit, UI (TaskProgress),
-// dan debugging di terminal. Pemisahan disengaja supaya ObserveState
-// tidak perlu tahu apakah eksekusi terakhir itu test atau entry point.
 struct TestOutcome {
     bool        ran          = false;
-    std::string test_file;              // relatif terhadap sandbox root
+    std::string test_file;
     int         exit_code    = -1;
     bool        timed_out    = false;
     double      duration_sec = 0.0;
@@ -64,21 +55,13 @@ struct AttemptRecord {
     std::string observation;
 };
 
-// State yang dibawa lintas state agent (Plan → Generate → Execute →
-// Observe → Fix → ... → Done).
+// State yang dibawa lintas state agent.
 struct AgentContext {
     // ---- input ----
 
-    // Instruksi user, mentah (natural language).
     std::string taskDescription;
-
-    // Path relatif terhadap sandbox root untuk ENTRY POINT file.
     std::string targetRelativePath;
-
-    // Blueprint Stage 7f — file in scope untuk run ini.
     std::vector<std::string> inScopeFiles;
-
-    // Blueprint Stage 7f — snapshot isi file SEBELUM pertama kali ditulis.
     std::map<std::string, std::string> fileSnapshots;
 
     // ---- hasil GenerateState / FixState ----
@@ -89,25 +72,25 @@ struct AgentContext {
 
     // Stage 9c — biaya AKTUAL panggilan LLM terakhir (dari
     // GenResult::cost_usd). Diisi GenerateState & FixState setelah
-    // provider_.generate() return. 0.0 untuk provider lokal (selalu
-    // gratis). Dipakai Agent loop untuk memanggil
-    // DailyBudgetGuard::recordUsage() hanya saat attempt berjalan di
-    // provider berbayar.
+    // provider_.generate() return. 0.0 untuk provider lokal / gratis.
     double lastCallCostUsd = 0.0;
+
+    // Stage 12d — true kalau panggilan LLM terakhir gagal karena rate
+    // limit / capacity (HTTP 429 / 503). Diisi dari GenResult::rate_limited.
+    // Dipakai Agent loop untuk memicu cooldown fallback ke Local,
+    // BUKAN naik ke paid tier berikutnya.
+    bool lastCallRateLimited = false;
+
+    // Stage 12d — token usage dari panggilan LLM terakhir. Dipakai
+    // DailyBudgetGuard::recordFreeTierUsage() untuk audit free-tier
+    // (Gemini). Provider lokal juga boleh mengisi (untuk audit saja).
+    int lastPromptTokens     = 0;
+    int lastCompletionTokens = 0;
 
     // ---- hasil ExecuteState (Stage 7c) ----
 
     ExecutionOutcome lastExecution;
-
-    // Blueprint Stage 7f.5 — hasil test terakhir (kalau test file
-    // terdeteksi dan dijalankan).
-    //
-    // Kontrak:
-    //   ran = false            → tidak ada test file, entry langsung jalan.
-    //   ran = true, exit_code=0 → test pass; entry point kemudian dijalankan.
-    //   ran = true, exit_code!=0 → test fail; entry point TIDAK dijalankan,
-    //                              dan lastExecution berisi hasil test.
-    TestOutcome lastTest;
+    TestOutcome      lastTest;
 
     // ---- hasil PlanState + ObserveState (Stage 7d) ----
 
@@ -134,10 +117,6 @@ struct AgentContext {
 };
 
 // Blueprint Stage 7f — snapshot capture sebelum write.
-//
-// Idempotent: kalau path sudah ada di ctx.fileSnapshots, tidak melakukan
-// apapun — snapshot harus tetap versi PALING AWAL sebelum attempt 0
-// menyentuhnya, tidak boleh tertimpa oleh attempt berikutnya.
 inline void snapshotBeforeWrite(AgentContext& ctx,
                                 frans::domain::IFileSystemPort& fs,
                                 const std::string& path)

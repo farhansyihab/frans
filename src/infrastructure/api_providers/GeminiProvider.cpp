@@ -34,6 +34,14 @@ int estimateTokensFromText(const std::string& s) {
     return static_cast<int>((s.size() + 2) / 3);
 }
 
+// Stage 12d — HTTP status yang dianggap rate limit / capacity issue.
+//   429 Too Many Requests — quota / RPM
+//   503 Service Unavailable — "high demand" / overload (Gemini free tier
+//                             sering mengembalikan ini, bukan 429)
+bool isRateLimitStatus(int status) {
+    return status == 429 || status == 503;
+}
+
 // ---------------------------------------------------------------------------
 // SSE accumulator inline untuk format Gemini.
 // ---------------------------------------------------------------------------
@@ -239,7 +247,6 @@ GeminiProvider::GeminiProvider(frans::config::GeminiConfig cfg)
         std::fflush(stderr);
     }
 
-    // Log thinking mode yang aktif (bantu debugging).
     if (cfg_.thinking_budget == 0) {
         std::fprintf(stderr,
             "[frans][gemini] thinking mode: DISABLED (thinkingBudget=0)\n");
@@ -329,20 +336,13 @@ std::string GeminiProvider::buildPayload(
         gen_cfg["stopSequences"] = json::array({opts.stop_sequence});
     }
 
-    // ---- Thinking control (Stage 12 follow-up) ----
-    // Google API: thinkingConfig.thinkingBudget = -1 (auto) / 0 (off) / N.
-    // CATATAN: Gemini 2.5 Pro menolak 0 (minimum 128) — Google akan
-    // mengabaikan nilai yang tidak didukung, bukan error. Gemini 3.x
-    // memakai thinkingLevel (string); API masih menerima thinkingBudget
-    // (number) sebagai backward-compat.
+    // Thinking control. Gemini 2.5 Pro menolak 0 (minimum 128);
+    // Google mengabaikan nilai tidak didukung (bukan error).
     if (cfg_.thinking_budget >= 0) {
         json thinking_cfg;
         thinking_cfg["thinkingBudget"] = cfg_.thinking_budget;
         gen_cfg["thinkingConfig"] = std::move(thinking_cfg);
     }
-    // Kalau -1, JANGAN kirim thinkingConfig — biarkan Google pakai default
-    // (dynamic). Mengirim -1 eksplisit juga valid, tapi omitting lebih
-    // bersih dan tidak bergantung pada interpretasi API.
 
     j["generationConfig"] = std::move(gen_cfg);
 
@@ -399,6 +399,8 @@ GenResult GeminiProvider::generate(const std::vector<ChatMessage>& messages,
     const auto t0 = std::chrono::steady_clock::now();
     const std::string payload = buildPayload(messages, opts, /*stream=*/false);
 
+    int http_status = 0;
+
     const std::string body_str =
 #if defined(CPPHTTPLIB_OPENSSL_SUPPORT)
         [&]() -> std::string {
@@ -421,6 +423,7 @@ GenResult GeminiProvider::generate(const std::vector<ChatMessage>& messages,
                              + httplib::to_string(res.error());
                 return std::string{};
             }
+            http_status = res->status;
             if (res->status != 200) {
                 std::string detail = res->body.substr(0, 300);
                 try {
@@ -449,6 +452,17 @@ GenResult GeminiProvider::generate(const std::vector<ChatMessage>& messages,
 
     const auto t1 = std::chrono::steady_clock::now();
     result.elapsed_sec = std::chrono::duration<double>(t1 - t0).count();
+
+    // Stage 12d — set rate_limited berdasarkan HTTP status. Kalau status
+    // adalah 429/503, agent akan fallback ke Local dan cooldown PaidLight.
+    if (isRateLimitStatus(http_status)) {
+        result.rate_limited = true;
+        std::fprintf(stderr,
+            "[frans][gemini] rate-limited (HTTP %d) — agent akan "
+            "cooldown PaidLight dan fallback ke Local.\n",
+            http_status);
+        std::fflush(stderr);
+    }
 
     if (!result.error.empty()) return result;
 
@@ -653,7 +667,18 @@ GenResult GeminiProvider::streamGenerate(
             }
         } catch (...) {}
         result.error = "HTTP " + std::to_string(res.status) + ": " + detail;
-        result.text  = accumulated;
+
+        // Stage 12d — set rate_limited kalau 429/503.
+        if (isRateLimitStatus(res.status)) {
+            result.rate_limited = true;
+            std::fprintf(stderr,
+                "[frans][gemini] stream rate-limited (HTTP %d) — agent "
+                "akan cooldown PaidLight dan fallback ke Local.\n",
+                res.status);
+            std::fflush(stderr);
+        }
+
+        result.text = accumulated;
         return result;
     }
 
