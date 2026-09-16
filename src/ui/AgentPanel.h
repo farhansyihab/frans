@@ -26,6 +26,7 @@ namespace frans::infrastructure {
 class SandboxedFileSystem;
 class LlamaCppProvider;
 class DeepSeekProvider;
+class GeminiProvider;   // Stage 12e
 }
 
 namespace frans::ui {
@@ -37,8 +38,11 @@ namespace frans::ui {
 // Stage 7g: tambah toggle [Log]/[Diff] + render unified diff setelah run.
 // Stage 9c: tambah ProviderRouter + DailyBudgetGuard untuk hybrid routing,
 // plus label read-only untuk daily API budget.
-// Stage 11b: tambah tombol [Import Paste] — buka ManualImportDialog modal
-// untuk paste output AI browser (DeepSeek Chat) langsung ke project.
+// Stage 11b: tambah tombol [Import Paste] — buka ManualImportDialog modal.
+// Stage 12e: tambah GeminiProvider sebagai PaidLight. Router di-upgrade
+// ke 3-tier (Local → Gemini → DeepSeek). Provider di-construct ulang
+// tiap startTask() supaya perubahan config (gemini.enabled) langsung
+// terbaca tanpa restart aplikasi.
 class AgentPanel {
 public:
     struct Deps {
@@ -54,10 +58,8 @@ public:
     AgentPanel(const AgentPanel&)            = delete;
     AgentPanel& operator=(const AgentPanel&) = delete;
 
-    // Bangun widget. Return y akhir (bottom + margin).
     int createWidgets(int x, int y, int w);
 
-    // Dipanggil dari timer main-thread (mis. 100ms).
     void tick();
 
     void setEnabled(bool on);
@@ -69,18 +71,13 @@ private:
     static void onClearClicked(Fl_Widget*, void*);
     static void onLogViewClicked(Fl_Widget*, void*);
     static void onDiffViewClicked(Fl_Widget*, void*);
-    static void onImportClicked(Fl_Widget*, void*);   // Stage 11b
+    static void onImportClicked(Fl_Widget*, void*);
 
     void startTask();
     void renderResult(const frans::application::TaskProgress& p);
-    void renderDiff(const frans::application::TaskProgress& p);   // Stage 7g
+    void renderDiff(const frans::application::TaskProgress& p);
 
-    // Stage 7f — update label "Detected scope: N file(s)" berdasarkan
-    // task & root input saat ini. Dipanggil dari tick() saat idle.
     void updateScopeLabel(const std::string& task, const std::string& root);
-
-    // Stage 9c — update label "Daily API budget: ..." dari
-    // ctx_->budget_guard->status(). Dipanggil dari tick() saat idle.
     void updateBudgetLabel();
 
     // ---- deps ----
@@ -92,15 +89,14 @@ private:
     Fl_Button*          browse_btn_    = nullptr;
     Fl_Multiline_Input* task_input_    = nullptr;
     Fl_Input*           target_input_  = nullptr;
-    Fl_Box*             scope_label_   = nullptr;   // Stage 7f
-    Fl_Box*             budget_label_  = nullptr;   // Stage 9c
+    Fl_Box*             scope_label_   = nullptr;
+    Fl_Box*             budget_label_  = nullptr;
     Fl_Button*          run_btn_       = nullptr;
     Fl_Button*          cancel_btn_    = nullptr;
     Fl_Button*          clear_btn_     = nullptr;
-    Fl_Button*          import_btn_    = nullptr;   // Stage 11b
+    Fl_Button*          import_btn_    = nullptr;
     Fl_Box*             status_label_  = nullptr;
 
-    // Stage 7g — toggle [Log]/[Diff] + dua view yang overlap.
     Fl_Light_Button*    btn_log_view_  = nullptr;
     Fl_Light_Button*    btn_diff_view_ = nullptr;
     Fl_Text_Display*    output_        = nullptr;
@@ -109,27 +105,23 @@ private:
     Fl_Text_Buffer*     diff_buf_      = nullptr;
 
     // ---- state ----
-    std::unique_ptr<frans::application::TaskRunner>                runner_;
-    std::unique_ptr<frans::infrastructure::SandboxedFileSystem>    fs_;
-    std::unique_ptr<frans::infrastructure::LlamaCppProvider>       provider_;
+    std::unique_ptr<frans::application::TaskRunner>              runner_;
+    std::unique_ptr<frans::infrastructure::SandboxedFileSystem>  fs_;
+    std::unique_ptr<frans::infrastructure::LlamaCppProvider>     provider_;
 
-    // Stage 9c — paid provider + router. Dibangun ulang setiap startTask().
-    std::unique_ptr<frans::infrastructure::DeepSeekProvider>       deepseek_provider_;
-    std::unique_ptr<frans::application::ProviderRouter>            router_;
+    // Stage 9c — paid providers. Dibangun ulang setiap startTask().
+    std::unique_ptr<frans::infrastructure::DeepSeekProvider>     deepseek_provider_;
+    // Stage 12e — PaidLight (Gemini). Nullptr kalau gemini.enabled=false.
+    std::unique_ptr<frans::infrastructure::GeminiProvider>       gemini_provider_;
+    std::unique_ptr<frans::application::ProviderRouter>          router_;
 
     bool        result_shown_ = false;
     std::string status_buf_;
 
-    // Stage 7f — budget token untuk context selection. Dihitung sekali
-    // di constructor lewat ContextBudgetManager, TIDAK di-hardcode.
     int         code_budget_ = 0;
 
-    // Stage 7f — tracking untuk hindari resolve berulang di tick().
     std::string last_scope_task_;
     std::string last_scope_root_;
-
-    // Stage 9c — tracking supaya label budget hanya di-redraw saat nilai
-    // berubah (menghindari spam redraw tiap tick 100ms).
     std::string last_budget_str_;
 };
 

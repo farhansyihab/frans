@@ -13,6 +13,7 @@
 #include "domain/llm/ILlmProvider.h"
 
 #include <cstdio>
+#include <string>
 #include <utility>
 
 namespace frans::application {
@@ -40,6 +41,30 @@ void logStep(const char* state, int attempt, const AgentContext& ctx) {
         ctx.lastError.empty() ? "" : "  err=",
         ctx.lastError.empty() ? "" : ctx.lastError.c_str());
     std::fflush(stderr);
+}
+
+// Stage 12e follow-up — deteksi error "provider tidak reachable".
+//
+// Bukan task error (kode model salah), tapi infrastruktur error:
+// provider lokal tidak jalan, network putus, endpoint down, dsb.
+// Agent harus perlakukan ini sebagai sinyal "naik tier" (kalau bisa),
+// bukan "task gagal → bail".
+//
+// String signature di bawah berasal dari cpp-httplib (`to_string(err)`)
+// yang dibungkus oleh provider sebagai `GenResult.error`.
+bool isProviderUnavailableError(const std::string& err) {
+    if (err.empty()) return false;
+    static const char* kSignatures[] = {
+        "Could not establish connection",
+        "Couldn't connect to server",
+        "Connection refused",
+        "Connection reset",
+        "Timeout was reached",
+    };
+    for (const char* sig : kSignatures) {
+        if (err.find(sig) != std::string::npos) return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -142,7 +167,21 @@ bool Agent::run(AgentContext& ctx) {
         }
 
         // ---- Generate / Fix ----
-        if (attempt == 0) {
+        //
+        // Stage 12e follow-up fix: pilih GenerateState kalau BELUM ada
+        // observasi error yang bisa di-fix. Ini penting ketika attempt
+        // sebelumnya di-skip karena provider unavailable — FixState
+        // butuh `lastObservation` yang tidak kosong, sedangkan skip
+        // tidak menghasilkan observasi.
+        //
+        // Aturan:
+        //   attempt == 0                     -> Generate (kasus biasa)
+        //   ctx.lastObservation kosong       -> Generate (skip-nya baru)
+        //   selain itu                       -> Fix (perbaiki error)
+        const bool use_generate =
+            (attempt == 0) || ctx.lastObservation.empty();
+
+        if (use_generate) {
             announce("Generate", attempt);
             GenerateState gen(graph, *active_provider, *deps_.fs);
             gen.run(ctx);
@@ -154,7 +193,52 @@ bool Agent::run(AgentContext& ctx) {
             logStep("Fix", attempt, ctx);
         }
 
-        if (!ctx.success) return false;
+        // ---- Stage 12e follow-up: provider unavailable → naik tier ----
+        //
+        // Kalau error-nya khas koneksi putus DAN kita masih bisa naik
+        // tier, treat sebagai sinyal eskalasi — record attempt,
+        // increment streak (+2 untuk capai threshold langsung), lalu
+        // `continue` ke attempt berikutnya.
+        if (!ctx.success) {
+            const bool is_provider_error =
+                deps_.router && isProviderUnavailableError(ctx.lastError);
+
+            if (is_provider_error
+                && this_attempt_tier != RoutingTier::PaidHeavy) {
+                std::fprintf(stderr,
+                    "[frans][agent] attempt=%d: provider '%s' (tier=%s) "
+                    "unavailable — naik tier, skip Execute.\n",
+                    attempt, active_provider->name().c_str(),
+                    tierName(this_attempt_tier));
+                std::fflush(stderr);
+
+                // Record attempt supaya UI bisa menampilkan jejaknya.
+                {
+                    AttemptRecord rec;
+                    rec.attempt     = attempt;
+                    rec.exit_code   = -1;
+                    rec.timed_out   = false;
+                    rec.observation = "Provider '" + active_provider->name()
+                                    + "' (" + tierName(this_attempt_tier)
+                                    + ") tidak tersedia: " + ctx.lastError;
+                    ctx.attemptHistory.push_back(std::move(rec));
+                }
+
+                // Streak +2 → capai threshold policy di attempt berikutnya.
+                if (this_attempt_tier == RoutingTier::Local) {
+                    esc_ctx.local_fail_streak += 2;
+                } else if (this_attempt_tier == RoutingTier::PaidLight) {
+                    esc_ctx.paid_light_fail_streak += 2;
+                }
+
+                // Jangan bail — loop ke attempt berikutnya.
+                continue;
+            }
+
+            // Task error sejati (kode model salah) ATAU PaidHeavy down
+            // ATAU mode legacy tanpa router → bail.
+            return false;
+        }
 
         if (is_cancelled()) {
             ctx.success = false;
@@ -193,25 +277,6 @@ bool Agent::run(AgentContext& ctx) {
         }
 
         // ---- Stage 12: escalation state + budget update ----
-        //
-        // Urutan:
-        //   1. Budget / audit per tier (PaidHeavy -> recordUsage,
-        //      PaidLight -> recordFreeTierUsage).
-        //   2. Streak / cooldown update.
-        //   3. Decrement cooldown (kalau attempt ini bukan yang baru
-        //      men-set cooldown).
-        //
-        // Aturan streak:
-        //   Sukses                       -> reset semua streak + cooldown.
-        //   Local gagal                  -> local_fail_streak++.
-        //   PaidLight gagal (biasa)      -> paid_light_fail_streak++.
-        //   PaidLight gagal (rate limit) -> cooldown=2, JANGAN increment
-        //                                   paid_light_fail_streak.
-        //   PaidHeavy gagal              -> no-op (sticky menangani).
-        //
-        // Alasan rate-limit TIDAK increment paid_light_fail_streak:
-        // blueprint §10 — rate limit BUKAN alasan naik ke DeepSeek.
-        // Rate limit = kuota sementara; kita tunggu sambil pakai Local.
         if (deps_.router) {
             bool just_set_cooldown = false;
 
@@ -228,8 +293,8 @@ bool Agent::run(AgentContext& ctx) {
 
             // 2. Streak / cooldown.
             if (ctx.success) {
-                esc_ctx.local_fail_streak            = 0;
-                esc_ctx.paid_light_fail_streak       = 0;
+                esc_ctx.local_fail_streak              = 0;
+                esc_ctx.paid_light_fail_streak         = 0;
                 esc_ctx.paid_light_rate_limit_cooldown = 0;
             } else {
                 if (this_attempt_tier == RoutingTier::Local) {
@@ -248,18 +313,15 @@ bool Agent::run(AgentContext& ctx) {
                         ++esc_ctx.paid_light_fail_streak;
                     }
                 }
-                // PaidHeavy gagal: no-op.
             }
 
-            // 3. Decrement cooldown. Skip kalau attempt ini BARU
-            //    men-set cooldown (biar nilainya tidak langsung turun).
+            // 3. Decrement cooldown.
             if (!just_set_cooldown
                 && esc_ctx.paid_light_rate_limit_cooldown > 0) {
                 --esc_ctx.paid_light_rate_limit_cooldown;
             }
         }
 
-        // Cancel check — dipindah ke sini (setelah Observe + record).
         if (is_cancelled()) {
             ctx.success = false;
             ctx.lastError = "Cancelled by user.";

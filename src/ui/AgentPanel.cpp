@@ -10,14 +10,16 @@
 #include "application/project/ProjectGraphCache.h"
 #include "application/provider_router/ProviderRouter.h"
 #include "config/DeepSeekConfig.h"
+#include "config/GeminiConfig.h"
 #include "domain/fs/IFileSystemPort.h"
 #include "domain/llm/ILlmProvider.h"
 #include "infrastructure/api_providers/DeepSeekProvider.h"
+#include "infrastructure/api_providers/GeminiProvider.h"
 #include "infrastructure/fs/SandboxedFileSystem.h"
 #include "infrastructure/llama/LlamaCppProvider.h"
 #include "infrastructure/llama/LlamaServerProcessController.h"
 #include "infrastructure/system/DiffEngine.h"
-#include "ui/ManualImportDialog.h"   // Stage 11b
+#include "ui/ManualImportDialog.h"
 
 #include <FL/Fl.H>
 #include <FL/Fl_File_Chooser.H>
@@ -43,6 +45,7 @@ using frans::application::TargetScopeResolver;
 using frans::application::TaskProgress;
 using frans::application::TaskRunner;
 using frans::infrastructure::DeepSeekProvider;
+using frans::infrastructure::GeminiProvider;
 using frans::infrastructure::LlamaCppProvider;
 using frans::infrastructure::SandboxedFileSystem;
 
@@ -100,14 +103,12 @@ AgentPanel::~AgentPanel() {
 int AgentPanel::createWidgets(int x, int y, int w) {
     int by = y;
 
-    // ---- Title ----
     Fl_Box* title = new Fl_Box(x, by, w, 20, "Agent Task Runner");
     title->labelfont(FL_BOLD);
     title->labelsize(12);
     title->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
     by += 22;
 
-    // ---- Project root row ----
     Fl_Box* lbl_root = new Fl_Box(x, by, 100, 20, "Project root:");
     lbl_root->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
     lbl_root->labelsize(11);
@@ -121,7 +122,6 @@ int AgentPanel::createWidgets(int x, int y, int w) {
 
     by += kBtnH + 4;
 
-    // ---- Task description ----
     Fl_Box* lbl_task = new Fl_Box(x, by, 100, 20, "Task:");
     lbl_task->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
     lbl_task->labelsize(11);
@@ -135,7 +135,6 @@ int AgentPanel::createWidgets(int x, int y, int w) {
 
     by += 60 + 4;
 
-    // ---- Target file ----
     Fl_Box* lbl_target = new Fl_Box(x, by, 100, 20, "Target file:");
     lbl_target->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
     lbl_target->labelsize(11);
@@ -148,7 +147,6 @@ int AgentPanel::createWidgets(int x, int y, int w) {
 
     by += kBtnH + 4;
 
-    // ---- Detected scope label ----
     scope_label_ = new Fl_Box(x + 100, by, w - 100, 18,
         "Detected scope: (isi task & root dulu)");
     scope_label_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
@@ -157,7 +155,6 @@ int AgentPanel::createWidgets(int x, int y, int w) {
 
     by += 20;
 
-    // ---- Stage 9c: Daily API budget label ----
     budget_label_ = new Fl_Box(x + 100, by, w - 100, 18,
         "Daily API budget: (menunggu data)");
     budget_label_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
@@ -166,10 +163,6 @@ int AgentPanel::createWidgets(int x, int y, int w) {
 
     by += 20;
 
-    // ---- Buttons ----
-    // Stage 11b: [Import Paste] ditambahkan di row yang sama. Layout
-    // total 130+10+100+10+100+10+110 = 470px — cukup untuk panel
-    // lebar ≥ 700px (typical dari MainWindow 800+ dengan padding).
     run_btn_ = new Fl_Button(x, by, 130, kBtnH, "Run Task");
     run_btn_->callback(onRunClicked, this);
 
@@ -188,17 +181,15 @@ int AgentPanel::createWidgets(int x, int y, int w) {
 
     by += kBtnH + 6;
 
-    // ---- Status ----
     status_label_ = new Fl_Box(x, by, w, 22, "Idle.");
     status_label_->box(FL_DOWN_BOX);
     status_label_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
     status_label_->labelsize(11);
     by += 26;
 
-    // ---- Stage 7g: toggle [Log] / [Diff] ----
     constexpr int kToggleH = 22;
     btn_log_view_ = new Fl_Light_Button(x, by, 70, kToggleH, "Log");
-    btn_log_view_->value(1);   // Log aktif secara default
+    btn_log_view_->value(1);
     btn_log_view_->callback(onLogViewClicked, this);
 
     btn_diff_view_ = new Fl_Light_Button(x + 76, by, 70, kToggleH, "Diff");
@@ -206,7 +197,6 @@ int AgentPanel::createWidgets(int x, int y, int w) {
 
     by += kToggleH + 2;
 
-    // ---- Output / Diff (overlapping, satu terlihat) ----
     const int out_h = 220;
 
     output_ = new Fl_Text_Display(x, by, w, out_h, nullptr);
@@ -224,7 +214,7 @@ int AgentPanel::createWidgets(int x, int y, int w) {
     diff_view_->textsize(10);
     diff_view_->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
     diff_view_->color(FL_WHITE);
-    diff_view_->hide();   // default: Log yang tampil
+    diff_view_->hide();
 
     by += out_h + 4;
 
@@ -243,7 +233,7 @@ void AgentPanel::setEnabled(bool on) {
     apply(target_input_);
     apply(run_btn_);
     apply(clear_btn_);
-    apply(import_btn_);   // Stage 11b — cegah import saat task running
+    apply(import_btn_);
 }
 
 void AgentPanel::tick() {
@@ -304,7 +294,7 @@ void AgentPanel::tick() {
     if (p.done && !result_shown_) {
         result_shown_ = true;
         renderResult(p);
-        renderDiff(p);   // Stage 7g
+        renderDiff(p);
     }
 
     if (!p.running && ctx_ && ctx_->graph_cache) {
@@ -317,7 +307,6 @@ void AgentPanel::tick() {
         }
     }
 
-    // Stage 9c — budget label (hanya saat idle; hindari spam redraw).
     if (!p.running) {
         updateBudgetLabel();
     }
@@ -357,12 +346,6 @@ void AgentPanel::updateScopeLabel(const std::string& task,
     scope_label_->redraw();
 }
 
-// ---------------------------------------------------------------------------
-// Stage 9c — update budget label dari ctx_->budget_guard->status().
-//
-// Hanya menulis ulang label kalau string berubah. tick() dipanggil tiap
-// 100ms — tanpa guard ini, label akan trigger redraw terus-menerus.
-// ---------------------------------------------------------------------------
 void AgentPanel::updateBudgetLabel() {
     if (!budget_label_) return;
     if (!ctx_ || !ctx_->budget_guard) {
@@ -421,10 +404,39 @@ void AgentPanel::startTask() {
     if (root_raw.empty()) { fl_message("Project root kosong."); return; }
     if (task.empty())     { fl_message("Task description kosong."); return; }
 
-    if (deps_.is_server_running && !deps_.is_server_running()) {
-        fl_message("Llama server tidak berjalan.\n"
-                   "Klik \"Start Server\" di panel Llama dulu.");
-        return;
+    // =====================================================================
+    // Stage 12e follow-up — llama-server TIDAK lagi hard-requirement.
+    //
+    // Sebelumnya (Stage 7): task tidak bisa start kalau llama-server down.
+    // Sekarang: user boleh lanjut tanpa llama-server — task dengan
+    // complexity tinggi (Complex/RequiresDeepReasoning) akan langsung
+    // route ke paid provider (Gemini/DeepSeek), tidak butuh local.
+    //
+    // KONSEKUENSI yang user HARUS tahu (dan kita jelaskan di dialog):
+    //   - Task Moderate/Trivial → policy pilih Local dulu.
+    //   - GenerateState gagal (connection refused) → Agent bail.
+    //   - Tidak retry, tidak escalate ke paid.
+    //   Jadi task pendek TETAP butuh llama-server.
+    // =====================================================================
+    const bool local_running =
+        deps_.is_server_running && deps_.is_server_running();
+
+    if (!local_running) {
+        const int ans = fl_choice(
+            "Llama-server belum berjalan.\n\n"
+            "Task dengan complexity TINGGI (refactor, arsitektur, "
+            "reasoning kompleks) → langsung ke paid provider "
+            "(Gemini/DeepSeek), TIDAK butuh llama-server.\n\n"
+            "Task sederhana (typo, helper, hello world) → coba Local "
+            "dulu; akan GAGAL kalau llama-server mati.\n\n"
+            "Lanjutkan tanpa llama-server?",
+            "Batal", "Ya, lanjut", nullptr);
+        if (ans != 1) return;
+
+        std::fprintf(stderr,
+            "[frans][agent_panel] WARNING: melanjutkan tanpa llama-server "
+            "(local tier akan gagal kalau dicoba)\n");
+        std::fflush(stderr);
     }
 
     const std::string resolved_root = resolveTilde(root_raw);
@@ -466,30 +478,46 @@ void AgentPanel::startTask() {
     }
 
     // ---- Local provider (llama-server) ----
+    // Konstruksi tetap dilakukan walau server down — LlamaCppProvider
+    // hanya menyimpan config HTTP, tidak konek saat konstruksi.
+    // Kalau dipanggil dan server down, generate() akan return error.
     LlamaCppProvider::Config cfg;
     cfg.host = deps_.get_host ? deps_.get_host() : std::string("127.0.0.1");
     cfg.port = deps_.get_port ? deps_.get_port() : 8080;
     provider_ = std::make_unique<LlamaCppProvider>(cfg);
 
-    // ---- Stage 9c: paid provider + router ----
-    // DeepSeekConfig::loadFromFile mengembalikan config dengan api_key kosong
-    // kalau env var / secrets file tidak ada. Dalam kasus itu,
-    // DeepSeekProvider::isAvailable() == false, dan ProviderRouter akan
-    // selalu fallback ke local — perilaku identik dengan sebelum Stage 9c.
+    // =====================================================================
+    // Stage 9c + 12e — paid providers + 3-tier router
+    // =====================================================================
+
     const auto ds_cfg =
         frans::config::DeepSeekConfig::loadFromFile("config/providers.json");
-    deepseek_provider_ =
-        std::make_unique<DeepSeekProvider>(ds_cfg);
+    deepseek_provider_ = std::make_unique<DeepSeekProvider>(ds_cfg);
+
+    const auto gem_cfg =
+        frans::config::GeminiConfig::loadFromFile("config/providers.json");
+    if (gem_cfg.enabled) {
+        gemini_provider_ = std::make_unique<GeminiProvider>(gem_cfg);
+    } else {
+        gemini_provider_.reset();
+    }
 
     router_ = std::make_unique<ProviderRouter>(
         *provider_,
+        gemini_provider_.get(),
         deepseek_provider_.get(),
         ctx_->budget_guard.get());
 
     std::fprintf(stderr,
-        "[frans][agent_panel] router: local='%s', paid='%s' (available=%d), "
-        "budget_guard=%p\n",
+        "[frans][agent_panel] router 3-tier:\n"
+        "  local      = '%s' (running=%d)\n"
+        "  paid_light = '%s' (available=%d)\n"
+        "  paid_heavy = '%s' (available=%d)\n"
+        "  budget_guard = %p\n",
         provider_->name().c_str(),
+        local_running ? 1 : 0,
+        gemini_provider_ ? gemini_provider_->name().c_str() : "(disabled)",
+        (gemini_provider_ && gemini_provider_->isAvailable()) ? 1 : 0,
         deepseek_provider_->name().c_str(),
         deepseek_provider_->isAvailable() ? 1 : 0,
         static_cast<const void*>(ctx_->budget_guard.get()));
@@ -502,13 +530,13 @@ void AgentPanel::startTask() {
     if (deps_.on_activity) deps_.on_activity();
 
     Agent::Deps adeps;
-    adeps.provider            = provider_.get();       // fallback kalau router null
+    adeps.provider            = provider_.get();
     adeps.fs                  = fs_.get();
     adeps.graph               = &graph_ref;
     adeps.sandbox_root        = canonical_root;
     adeps.execute_timeout_sec = 30;
-    adeps.router              = router_.get();         // Stage 9c
-    adeps.budget_guard        = ctx_->budget_guard.get(); // Stage 9c
+    adeps.router              = router_.get();
+    adeps.budget_guard        = ctx_->budget_guard.get();
 
     AgentContext actx;
     actx.taskDescription    = task;
@@ -541,8 +569,18 @@ void AgentPanel::startTask() {
         hdr += "Task        : " + task + "\n";
         hdr += "Test-aware  : ON  (test_*.py / *_test.py akan dijalankan "
                "sebelum entry point)\n";
-        hdr += "Stage 9c    : hybrid routing (local + paid) + daily budget "
-               "guard\n";
+        hdr += "Stage 12e   : 3-tier routing (Local -> Gemini -> DeepSeek)";
+        if (gemini_provider_) {
+            hdr += "  [Gemini ENABLED]";
+        } else {
+            hdr += "  [Gemini disabled]";
+        }
+        hdr += "\n";
+        hdr += "llama-server: ";
+        hdr += local_running ? "RUNNING" : "STOPPED (task sederhana akan gagal)";
+        hdr += "\n";
+        hdr += "Stage 9c    : daily budget guard (PaidHeavy only) + "
+               "rate-limit cooldown\n";
         hdr += "Stage 7g    : cancel responsif (SIGKILL via cancel_flag) + "
                "diff view\n\n";
         output_buf_->append(hdr.c_str());
@@ -570,7 +608,6 @@ void AgentPanel::renderResult(const TaskProgress& p) {
         oss << "\nFinal error: " << p.final_error << "\n";
     }
 
-    // ---- Stage 7f.5 — test execution summary ----
     oss << "\n--- Test execution (Stage 7f.5) ---\n";
     if (p.last_test_ran) {
         oss << "File  : " << p.last_test_file << "\n";
@@ -586,7 +623,6 @@ void AgentPanel::renderResult(const TaskProgress& p) {
         oss << "(no test file detected — entry point executed directly)\n";
     }
 
-    // ---- Attempt history ----
     oss << "\n--- Attempt history ---\n";
     for (const auto& a : p.history) {
         oss << "Attempt " << a.attempt << ": "
@@ -598,7 +634,6 @@ void AgentPanel::renderResult(const TaskProgress& p) {
         }
     }
 
-    // ---- Files written ----
     if (!p.files.empty()) {
         oss << "\n--- Files written ---\n";
         for (const auto& f : p.files) {
@@ -607,7 +642,6 @@ void AgentPanel::renderResult(const TaskProgress& p) {
         }
     }
 
-    // ---- Final stdout/stderr ----
     if (!p.stdout_text.empty()) {
         oss << "\n--- Final stdout ---\n";
         oss << p.stdout_text;
@@ -628,9 +662,6 @@ void AgentPanel::renderResult(const TaskProgress& p) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Stage 7g — render unified diff dari snapshot vs konten akhir
-// ---------------------------------------------------------------------------
 void AgentPanel::renderDiff(const TaskProgress& p) {
     if (!diff_buf_) return;
 
@@ -702,9 +733,6 @@ void AgentPanel::onClearClicked(Fl_Widget*, void* data) {
     self->result_shown_ = false;
 }
 
-// ---------------------------------------------------------------------------
-// Stage 7g — toggle callbacks
-// ---------------------------------------------------------------------------
 void AgentPanel::onLogViewClicked(Fl_Widget*, void* data) {
     auto* self = static_cast<AgentPanel*>(data);
     if (self->output_)    self->output_->show();
@@ -721,12 +749,6 @@ void AgentPanel::onDiffViewClicked(Fl_Widget*, void* data) {
     if (self->btn_diff_view_) self->btn_diff_view_->value(1);
 }
 
-// ---------------------------------------------------------------------------
-// Stage 11b — [Import Paste] callback.
-//
-// Guard: kalau task running, tolak (setEnabled(false) seharusnya sudah
-// mencegah, tapi defensive — bisa juga task dimulai dari sisi lain).
-// ---------------------------------------------------------------------------
 void AgentPanel::onImportClicked(Fl_Widget*, void* data) {
     auto* self = static_cast<AgentPanel*>(data);
     if (!self->ctx_) return;
