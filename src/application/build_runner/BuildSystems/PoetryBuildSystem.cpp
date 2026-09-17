@@ -2,6 +2,8 @@
 
 #include <regex>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace frans::application {
 
@@ -65,19 +67,31 @@ void PoetryBuildSystem::parseOutput(
                                ? cmd.stderr_tail : cmd.stdout_tail;
 
         std::smatch m;
-        std::string last_path;
-        int         last_line = 0;
         std::string s = src;
+
+        std::vector<std::pair<std::string, int>> frames;
         while (std::regex_search(s, m, rePy)) {
-            last_path = stripRoot(m[1].str(), info.project_root);
-            last_line = parseIntSafe(m[2].str(), 0);
+            frames.emplace_back(m[1].str(), parseIntSafe(m[2].str(), 0));
             s = m.suffix().str();
         }
 
-        if (!last_path.empty()) {
+        if (!frames.empty()) {
+            // Pilih frame PERTAMA di dalam project_root (file user),
+            // fallback ke frame pertama (entry point). Menghindari
+            // frame stdlib di akhir traceback.
+            std::size_t chosen = 0;
+            for (std::size_t i = 0; i < frames.size(); ++i) {
+                if (isInsideProject(frames[i].first,
+                                     info.project_root)) {
+                    chosen = i;
+                    break;
+                }
+            }
+
             RelatedFile rf;
-            rf.path = last_path;
-            rf.line = last_line;
+            rf.path = stripRoot(frames[chosen].first,
+                                 info.project_root);
+            rf.line = frames[chosen].second;
             rf.role = "PRIMARY_ERROR";
             rf.note = "python error";
             result.related_files.push_back(std::move(rf));

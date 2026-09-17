@@ -32,6 +32,7 @@ set(FRANS_SOURCES
 
     # Config
     src/config/AppConfig.cpp
+    src/config/AppPaths.cpp
 )
 
 if(WIN32)

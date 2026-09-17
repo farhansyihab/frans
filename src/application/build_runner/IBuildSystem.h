@@ -73,6 +73,34 @@ protected:
         return std::string("...(truncated)...\n")
              + s.substr(s.size() - max_chars);
     }
+
+    // Cek apakah `raw_path` merujuk ke file DI DALAM `project_root`.
+    //
+    // Dipakai error parser untuk memilih frame Python yang relevan
+    // (file user) dan menghindari frame stdlib seperti
+    // /usr/lib/python3.12/shutil.py.
+    //
+    // Boundary check: pastikan setelah prefix ada '/' supaya
+    // "/tmp/proj_evil/x.py" tidak match "/tmp/proj".
+    //
+    //   isInsideProject("/tmp/proj/cleanup.py", "/tmp/proj")     -> true
+    //   isInsideProject("/usr/lib/python3/shutil.py", "/tmp/proj") -> false
+    //   isInsideProject("/tmp/proj_evil/x.py", "/tmp/proj")        -> false
+    static bool isInsideProject(const std::string& raw_path,
+                                 const std::string& project_root)
+    {
+        if (raw_path.empty() || project_root.empty()) return false;
+
+        std::string root = project_root;
+        while (!root.empty() && root.back() == '/') root.pop_back();
+        if (root.empty()) return false;
+
+        if (raw_path.size() <= root.size()) return false;
+        if (raw_path.compare(0, root.size(), root) != 0) return false;
+        if (raw_path[root.size()] != '/') return false;
+
+        return true;
+    }
 };
 
 } // namespace frans::application

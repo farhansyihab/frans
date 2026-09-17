@@ -28,6 +28,7 @@ namespace frans::ui {
 using frans::application::BuildPhase;
 using frans::application::BuildReport;
 using frans::application::BuildRunner;
+using frans::application::CommandResult;
 using frans::application::GeneratedFile;
 using frans::application::ManualImporter;
 using frans::application::PhaseResult;
@@ -142,18 +143,52 @@ std::string formatPhase(const PhaseResult& pr) {
         }
     }
 
-    for (auto it = pr.commands.rbegin(); it != pr.commands.rend(); ++it) {
-        if (it->success) continue;
-        if (!it->stderr_tail.empty()) {
-            s += "  stderr tail:\n";
+    // Pilih command yang output-nya mau ditampilkan:
+    //   - command pertama yang GAGAL (kalau ada), atau
+    //   - command TERAKHIR untuk phase Run yang SUKSES
+    //     (supaya output program kelihatan — mis. print() Python).
+    //
+    // Command yang sukses di phase Build/Test tidak dirender supaya
+    // tidak noise (compiler output, ctest progress, dsb).
+    const CommandResult* show = nullptr;
+    for (const auto& cmd : pr.commands) {
+        if (!cmd.success) { show = &cmd; break; }
+    }
+    if (!show && pr.phase == BuildPhase::Run && !pr.commands.empty()) {
+        show = &pr.commands.back();
+    }
+
+    if (show) {
+        const std::string& err_text = show->stderr_tail;
+        const std::string& out_text = show->stdout_tail;
+
+        const std::string* text  = nullptr;
+        const char*        label = nullptr;
+
+        if (!err_text.empty()) {
+            text  = &err_text;
+            label = "stderr";
+        } else if (!out_text.empty()) {
+            text  = &out_text;
+            label = "stdout";
+        }
+
+        if (text) {
+            s += "  ";
+            s += label;
+            s += ":\n";
+
             std::string line;
-            for (char c : it->stderr_tail) {
-                if (c == '\n') { s += "    " + line + "\n"; line.clear(); }
-                else line += c;
+            for (char c : *text) {
+                if (c == '\n') {
+                    s += "    " + line + "\n";
+                    line.clear();
+                } else {
+                    line += c;
+                }
             }
             if (!line.empty()) s += "    " + line + "\n";
         }
-        break;
     }
 
     s += "\n";
