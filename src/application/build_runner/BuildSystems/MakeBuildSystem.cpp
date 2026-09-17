@@ -1,4 +1,3 @@
-// ~/AgenAI/frans/src/application/build_runner/BuildSystems/MakeBuildSystem.cpp
 #include "application/build_runner/BuildSystems/MakeBuildSystem.h"
 
 #include <regex>
@@ -21,34 +20,28 @@ int parseIntSafe(const std::string& s, int def = 0) {
 } // namespace
 
 std::vector<PhaseCommand> MakeBuildSystem::buildCommands(
-    const ProjectInfo& /*info*/,
-    const std::vector<GeneratedFile>& /*files*/,
-    frans::domain::IFileSystemPort& /*fs*/) const
+    const ProjectInfo&, const std::vector<GeneratedFile>&,
+    frans::domain::IFileSystemPort&) const
 {
-    return {{
-        "make",
-        {"make", "-j", std::to_string(hardwareThreads())}
-    }};
+    return {{ "make",
+              {"make", "-j", std::to_string(hardwareThreads())} }};
 }
 
 std::vector<PhaseCommand> MakeBuildSystem::testCommands(
-    const ProjectInfo& info,
-    frans::domain::IFileSystemPort& /*fs*/) const
+    const ProjectInfo& info, frans::domain::IFileSystemPort&) const
 {
     if (info.test_runner != "MakeTest") return {};
     return {{ "make-test", {"make", "test"} }};
 }
 
 std::vector<PhaseCommand> MakeBuildSystem::runCommands(
-    const ProjectInfo& /*info*/,
-    const std::vector<GeneratedFile>& /*files*/) const
+    const ProjectInfo&, const std::vector<GeneratedFile>&) const
 {
     return {};
 }
 
 void MakeBuildSystem::parseOutput(
-    PhaseResult& result,
-    const ProjectInfo& info) const
+    PhaseResult& result, const ProjectInfo& info) const
 {
     if (result.success) return;
 
@@ -57,8 +50,7 @@ void MakeBuildSystem::parseOutput(
 
     for (const auto& cmd : result.commands) {
         const std::string& src = !cmd.stderr_tail.empty()
-                               ? cmd.stderr_tail
-                               : cmd.stdout_tail;
+                               ? cmd.stderr_tail : cmd.stdout_tail;
 
         for (auto it = std::sregex_iterator(src.begin(), src.end(), reErr);
              it != std::sregex_iterator(); ++it)
@@ -79,13 +71,9 @@ void MakeBuildSystem::parseOutput(
          it != result.commands.rend(); ++it)
     {
         const std::string& src = !it->stderr_tail.empty()
-                               ? it->stderr_tail
-                               : it->stdout_tail;
+                               ? it->stderr_tail : it->stdout_tail;
         const std::string last = lastNonEmptyLine(src);
-        if (!last.empty()) {
-            result.error_message = last;
-            return;
-        }
+        if (!last.empty()) { result.error_message = last; return; }
     }
     result.error_message = "make failed.";
 }

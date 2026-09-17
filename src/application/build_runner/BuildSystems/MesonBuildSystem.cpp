@@ -1,4 +1,3 @@
-// ~/AgenAI/frans/src/application/build_runner/BuildSystems/MesonBuildSystem.cpp
 #include "application/build_runner/BuildSystems/MesonBuildSystem.h"
 
 #include <regex>
@@ -7,17 +6,14 @@
 namespace frans::application {
 
 namespace {
-
 int parseIntSafe(const std::string& s, int def = 0) {
     try { return std::stoi(s); } catch (...) { return def; }
 }
-
 } // namespace
 
 std::vector<PhaseCommand> MesonBuildSystem::buildCommands(
-    const ProjectInfo& /*info*/,
-    const std::vector<GeneratedFile>& /*files*/,
-    frans::domain::IFileSystemPort& /*fs*/) const
+    const ProjectInfo&, const std::vector<GeneratedFile>&,
+    frans::domain::IFileSystemPort&) const
 {
     std::vector<PhaseCommand> out;
     out.push_back({ "setup",   {"meson", "setup", "build"} });
@@ -26,26 +22,21 @@ std::vector<PhaseCommand> MesonBuildSystem::buildCommands(
 }
 
 std::vector<PhaseCommand> MesonBuildSystem::testCommands(
-    const ProjectInfo& info,
-    frans::domain::IFileSystemPort& /*fs*/) const
+    const ProjectInfo& info, frans::domain::IFileSystemPort&) const
 {
     if (info.test_runner != "MesonTest") return {};
-    return {{
-        "meson-test",
-        {"meson", "test", "-C", "build", "--print-errorlogs"}
-    }};
+    return {{ "meson-test",
+              {"meson", "test", "-C", "build", "--print-errorlogs"} }};
 }
 
 std::vector<PhaseCommand> MesonBuildSystem::runCommands(
-    const ProjectInfo& /*info*/,
-    const std::vector<GeneratedFile>& /*files*/) const
+    const ProjectInfo&, const std::vector<GeneratedFile>&) const
 {
     return {};
 }
 
 void MesonBuildSystem::parseOutput(
-    PhaseResult& result,
-    const ProjectInfo& info) const
+    PhaseResult& result, const ProjectInfo& info) const
 {
     if (result.success) return;
 
@@ -54,8 +45,7 @@ void MesonBuildSystem::parseOutput(
 
     for (const auto& cmd : result.commands) {
         const std::string& src = !cmd.stderr_tail.empty()
-                               ? cmd.stderr_tail
-                               : cmd.stdout_tail;
+                               ? cmd.stderr_tail : cmd.stdout_tail;
         for (auto it = std::sregex_iterator(src.begin(), src.end(), reErr);
              it != std::sregex_iterator(); ++it)
         {
@@ -75,13 +65,9 @@ void MesonBuildSystem::parseOutput(
          it != result.commands.rend(); ++it)
     {
         const std::string& src = !it->stderr_tail.empty()
-                               ? it->stderr_tail
-                               : it->stdout_tail;
+                               ? it->stderr_tail : it->stdout_tail;
         const std::string last = lastNonEmptyLine(src);
-        if (!last.empty()) {
-            result.error_message = last;
-            return;
-        }
+        if (!last.empty()) { result.error_message = last; return; }
     }
     result.error_message = "meson failed.";
 }

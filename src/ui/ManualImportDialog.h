@@ -1,25 +1,14 @@
-// ~/AgenAI/frans/src/ui/ManualImportDialog.h
 #pragma once
 
-#include "application/agent/MultiFileParser.h"        // GeneratedFile
-#include "application/build_runner/BuildReport.h"     // BuildReport
-#include "application/manual_import/ManualImporter.h"
+#include "application/build_runner/BuildReport.h"
+#include "application/import/MultiFileParser.h"
+#include "domain/import/ImportResult.h"
 
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
-// -----------------------------------------------------------------------------
-// FLTK forward declarations.
-//
-// SENGAJA tidak include <FL/...> di sini. Header ini bisa di-include dari
-// .cpp yang juga butuh <FL/Fl_Text_Editor.H> (via dialog sendiri) —
-// Fl_Text_Display.H menarik <FL/x.H> yang meng-include <X11/Xlib.h>, dan
-// Xlib mendefinisikan `Status` sebagai macro. Kalau header ini include FL
-// penuh di atas, maka siapapun yang meng-include kita LEBIH DULU sebelum
-// AppContext.h akan membuat `struct Status` di ProjectGraphCache.h hancur.
-// -----------------------------------------------------------------------------
 class Fl_Window;
 class Fl_Input;
 class Fl_Button;
@@ -31,8 +20,8 @@ class Fl_Box;
 class Fl_Widget;
 
 namespace frans::application {
-struct AppContext;
 class BuildRunner;
+class ManualImporter;
 }
 
 namespace frans::infrastructure {
@@ -41,26 +30,18 @@ class SandboxedFileSystem;
 
 namespace frans::ui {
 
-// Blueprint Stage 11b + 11d-revisi.
+// Dialog Manual Import + Build/Debug.
 //
-// ManualImportDialog sekarang mengintegrasikan BuildRunner yang mendeteksi
-// project root + build system dari marker file, BUKAN dari ekstensi file.
-//
-// UI menampilkan:
-//   - Project root detected + build system + test runner (dari BuildReport)
-//   - Per-phase output: [BUILD] / [TEST] / [RUN]
-//   - Error + related files dari phase yang gagal
+// Standalone — tidak butuh AppContext.
 class ManualImportDialog {
 public:
-    static bool show(frans::application::AppContext* ctx,
-                     const std::string&               initial_root);
+    static bool show(const std::string& initial_root);
 
     ManualImportDialog(const ManualImportDialog&)            = delete;
     ManualImportDialog& operator=(const ManualImportDialog&) = delete;
 
 private:
-    ManualImportDialog(frans::application::AppContext* ctx,
-                       std::string                    initial_root);
+    explicit ManualImportDialog(std::string initial_root);
     ~ManualImportDialog();
 
     void build();
@@ -72,12 +53,11 @@ private:
     void doBuild();
     void doClose();
 
-    void refreshPreviewBrowser(const frans::application::ImportResult& r);
+    void refreshPreviewBrowser(const frans::domain::ImportResult& r);
     void renderBuildReport(const frans::application::BuildReport& r);
     void setStatus(const std::string& msg, unsigned color);
     void setButtonsEnabled(bool parsing_enabled, bool writing_enabled);
     void updateBuildButtonState();
-
     void resetBuildState(const char* reason);
 
     static void cbBrowse(Fl_Widget*, void*);
@@ -90,9 +70,6 @@ private:
                                  int nRestyled, const char* deletedText,
                                  void* cbArg);
 
-    frans::application::AppContext* ctx_;
-
-    // ---- widgets ----
     Fl_Window*        win_             = nullptr;
     Fl_Input*         root_input_      = nullptr;
     Fl_Button*        browse_btn_      = nullptr;
@@ -110,15 +87,14 @@ private:
 
     Fl_Button*        close_btn_       = nullptr;
 
-    // ---- state ----
     std::unique_ptr<frans::infrastructure::SandboxedFileSystem> fs_;
     std::unique_ptr<frans::application::ManualImporter>         importer_;
     std::unique_ptr<frans::application::BuildRunner>            build_runner_;
 
-    frans::application::ImportResult last_preview_;
+    frans::domain::ImportResult      last_preview_;
     frans::application::BuildReport  last_build_report_;
 
-    std::map<std::string, frans::application::GeneratedFile> files_written_;
+    std::map<std::string, frans::domain::GeneratedFile> files_written_;
     std::string last_commit_root_;
 
     bool        wrote_anything_ = false;

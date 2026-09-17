@@ -1,4 +1,3 @@
-// ~/AgenAI/frans/src/infrastructure/system/DiffEngine.cpp
 #include "infrastructure/system/DiffEngine.h"
 
 #include <algorithm>
@@ -8,11 +7,9 @@ namespace frans::infrastructure {
 
 namespace {
 
-// Split "a\nb\n" -> {"a", "b"}. String kosong -> {} (bukan {""}).
 std::vector<std::string> splitLines(const std::string& s) {
     std::vector<std::string> lines;
     if (s.empty()) return lines;
-
     std::size_t start = 0;
     while (start < s.size()) {
         const std::size_t nl = s.find('\n', start);
@@ -35,8 +32,6 @@ FileDiff computeDiff(const std::string& path,
     FileDiff result;
     result.path = path;
 
-    // Deteksi new/deleted berdasarkan content kosong. Konvensi dari
-    // blueprint 7f §3.3: snapshot file baru = "" — di sini kita klasifikasikan.
     if (old_content.empty() && !new_content.empty()) result.is_new_file = true;
     if (!old_content.empty() && new_content.empty()) result.is_deleted  = true;
 
@@ -46,7 +41,6 @@ FileDiff computeDiff(const std::string& path,
     const int n = static_cast<int>(old_lines.size());
     const int m = static_cast<int>(new_lines.size());
 
-    // ---- LCS DP table ----
     std::vector<std::vector<int>> dp(
         static_cast<std::size_t>(n + 1),
         std::vector<int>(static_cast<std::size_t>(m + 1), 0));
@@ -69,7 +63,6 @@ FileDiff computeDiff(const std::string& path,
         }
     }
 
-    // ---- Backtrack dari (n, m), reverse hasilnya ----
     std::vector<DiffLine> reversed;
     reversed.reserve(static_cast<std::size_t>(n + m));
 
@@ -115,7 +108,6 @@ FileDiff computeDiff(const std::string& path,
 
 std::string formatDiff(const FileDiff& diff) {
     std::string out;
-
     out += "=== " + diff.path + " ===";
     if (diff.is_new_file) out += "  [NEW FILE]";
     if (diff.is_deleted)  out += "  [DELETED]";
@@ -128,15 +120,9 @@ std::string formatDiff(const FileDiff& diff) {
 
     for (const auto& l : diff.lines) {
         switch (l.kind) {
-            case DiffLine::Kind::Unchanged:
-                out += "  " + l.text + "\n";
-                break;
-            case DiffLine::Kind::Added:
-                out += "+ " + l.text + "\n";
-                break;
-            case DiffLine::Kind::Removed:
-                out += "- " + l.text + "\n";
-                break;
+            case DiffLine::Kind::Unchanged: out += "  " + l.text + "\n"; break;
+            case DiffLine::Kind::Added:     out += "+ " + l.text + "\n"; break;
+            case DiffLine::Kind::Removed:   out += "- " + l.text + "\n"; break;
         }
     }
 

@@ -1,15 +1,11 @@
 {
-  "ram_available_threshold_mb": 1500,
-  "idle_unload_minutes": 5,
-  "daily_api_budget_usd": 1.0,
-  "log_dir": "/home/farhan/AgenAI/frans/logs",
-  "default_model_role": "coder",
-  "default_context_size": 4096,
-  "default_threads": 4,
   "window": {
     "width": 0,
     "height": 0,
     "margin_px": 24,
-    "title": "frans_ai"
-  }
+    "title": "Frans"
+  },
+  "build_timeout_sec": 120,
+  "test_timeout_sec": 120,
+  "run_timeout_sec": 30
 }

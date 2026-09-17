@@ -1,8 +1,6 @@
-// ~/AgenAI/frans/src/application/build_runner/BuildSystems/CMakeBuildSystem.cpp
 #include "application/build_runner/BuildSystems/CMakeBuildSystem.h"
 
 #include <regex>
-#include <sstream>
 #include <string>
 #include <thread>
 
@@ -22,12 +20,10 @@ int parseIntSafe(const std::string& s, int def = 0) {
 } // namespace
 
 std::vector<PhaseCommand> CMakeBuildSystem::buildCommands(
-    const ProjectInfo& /*info*/,
-    const std::vector<GeneratedFile>& /*files*/,
-    frans::domain::IFileSystemPort& /*fs*/) const
+    const ProjectInfo&, const std::vector<GeneratedFile>&,
+    frans::domain::IFileSystemPort&) const
 {
     const int n = hardwareThreads();
-
     std::vector<PhaseCommand> out;
     out.push_back({
         "configure",
@@ -42,30 +38,24 @@ std::vector<PhaseCommand> CMakeBuildSystem::buildCommands(
 }
 
 std::vector<PhaseCommand> CMakeBuildSystem::testCommands(
-    const ProjectInfo& info,
-    frans::domain::IFileSystemPort& /*fs*/) const
+    const ProjectInfo& info, frans::domain::IFileSystemPort&) const
 {
     if (info.test_runner != "CTest") return {};
-    return {{
-        "ctest",
-        {"ctest", "--test-dir", "build", "--output-on-failure"}
-    }};
+    return {{ "ctest",
+              {"ctest", "--test-dir", "build", "--output-on-failure"} }};
 }
 
 std::vector<PhaseCommand> CMakeBuildSystem::runCommands(
-    const ProjectInfo& /*info*/,
-    const std::vector<GeneratedFile>& /*files*/) const
+    const ProjectInfo&, const std::vector<GeneratedFile>&) const
 {
-    return {};  // CMake tidak punya target run standar
+    return {};
 }
 
 void CMakeBuildSystem::parseOutput(
-    PhaseResult& result,
-    const ProjectInfo& info) const
+    PhaseResult& result, const ProjectInfo& info) const
 {
     if (result.success) return;
 
-    // Format GCC/Clang: `path:line:col: error|fatal error: message`
     static const std::regex reErr(
         R"re(([^:\n]+):(\d+):(\d+):\s+(fatal error|error):\s+([^\n]+))re");
     static const std::regex reCmakeErr(
@@ -73,11 +63,9 @@ void CMakeBuildSystem::parseOutput(
 
     for (const auto& cmd : result.commands) {
         const std::string& src = !cmd.stderr_tail.empty()
-                               ? cmd.stderr_tail
-                               : cmd.stdout_tail;
+                               ? cmd.stderr_tail : cmd.stdout_tail;
         if (src.empty()) continue;
 
-        // Coba format GCC/Clang dulu.
         for (auto it = std::sregex_iterator(src.begin(), src.end(), reErr);
              it != std::sregex_iterator(); ++it)
         {
@@ -92,7 +80,6 @@ void CMakeBuildSystem::parseOutput(
             return;
         }
 
-        // Fallback: CMake configuration error.
         std::smatch m;
         if (std::regex_search(src, m, reCmakeErr)) {
             RelatedFile rf;
@@ -106,18 +93,13 @@ void CMakeBuildSystem::parseOutput(
         }
     }
 
-    // Fallback: baris non-empty terakhir.
     for (auto it = result.commands.rbegin();
          it != result.commands.rend(); ++it)
     {
         const std::string& src = !it->stderr_tail.empty()
-                               ? it->stderr_tail
-                               : it->stdout_tail;
+                               ? it->stderr_tail : it->stdout_tail;
         const std::string last = lastNonEmptyLine(src);
-        if (!last.empty()) {
-            result.error_message = last;
-            return;
-        }
+        if (!last.empty()) { result.error_message = last; return; }
     }
     result.error_message = "CMake build failed.";
 }

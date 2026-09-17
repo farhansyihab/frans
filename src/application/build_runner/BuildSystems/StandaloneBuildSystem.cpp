@@ -1,9 +1,7 @@
-// ~/AgenAI/frans/src/application/build_runner/BuildSystems/StandaloneBuildSystem.cpp
 #include "application/build_runner/BuildSystems/StandaloneBuildSystem.h"
 
 #include <algorithm>
 #include <regex>
-#include <sstream>
 #include <string>
 
 namespace frans::application {
@@ -35,8 +33,8 @@ std::string StandaloneBuildSystem::findPythonEntry(
 {
     for (const auto& f : files) {
         if (!hasSuffix(f.relative_path, ".py")) continue;
-        if (f.content.find("__name__")    != std::string::npos
-         && f.content.find("__main__")    != std::string::npos) {
+        if (f.content.find("__name__") != std::string::npos
+         && f.content.find("__main__") != std::string::npos) {
             return f.relative_path;
         }
     }
@@ -91,11 +89,9 @@ std::string StandaloneBuildSystem::findJsEntry(
 }
 
 std::vector<PhaseCommand> StandaloneBuildSystem::buildCommands(
-    const ProjectInfo& info,
-    const std::vector<GeneratedFile>& files,
-    frans::domain::IFileSystemPort& /*fs*/) const
+    const ProjectInfo& info, const std::vector<GeneratedFile>& files,
+    frans::domain::IFileSystemPort&) const
 {
-    // C++: kumpulkan semua source, compile.
     if (info.primary_language == "C++") {
         std::vector<std::string> sources;
         bool has_main = false;
@@ -123,46 +119,33 @@ std::vector<PhaseCommand> StandaloneBuildSystem::buildCommands(
         return {{ has_main ? "compile" : "syntax-check", std::move(argv) }};
     }
 
-    // TypeScript: tsc --noEmit pada entry.
     if (info.primary_language == "TypeScript") {
         const std::string entry = findTsEntry(files);
         if (entry.empty()) return {};
-        return {{
-            "tsc-check",
-            {"npx", "--no-install", "tsc", "--noEmit", entry}
-        }};
+        return {{ "tsc-check",
+                  {"npx", "--no-install", "tsc", "--noEmit", entry} }};
     }
 
-    // JavaScript: node --check.
     if (info.primary_language == "JavaScript") {
         const std::string entry = findJsEntry(files);
         if (entry.empty()) return {};
-        return {{
-            "node-check",
-            {"node", "--check", entry}
-        }};
+        return {{ "node-check", {"node", "--check", entry} }};
     }
 
-    // Python: skip build.
     return {};
 }
 
 std::vector<PhaseCommand> StandaloneBuildSystem::testCommands(
-    const ProjectInfo& info,
-    frans::domain::IFileSystemPort& /*fs*/) const
+    const ProjectInfo& info, frans::domain::IFileSystemPort&) const
 {
     if (info.test_runner != "Pytest") return {};
-    // Hanya untuk project Python.
     if (info.primary_language != "Python") return {};
-    return {{
-        "pytest",
-        {"python3", "-m", "pytest", "-q", "--no-header"}
-    }};
+    return {{ "pytest",
+              {"python3", "-m", "pytest", "-q", "--no-header"} }};
 }
 
 std::vector<PhaseCommand> StandaloneBuildSystem::runCommands(
-    const ProjectInfo& info,
-    const std::vector<GeneratedFile>& files) const
+    const ProjectInfo& info, const std::vector<GeneratedFile>& files) const
 {
     if (info.primary_language == "Python") {
         const std::string entry = findPythonEntry(files);
@@ -170,7 +153,6 @@ std::vector<PhaseCommand> StandaloneBuildSystem::runCommands(
         return {{ "run", {"python3", entry} }};
     }
     if (info.primary_language == "C++") {
-        // Cek apakah ada main.
         for (const auto& f : files) {
             if (isCppSource(f.relative_path)
                 && hasMainFunction(f.content)) {
@@ -188,12 +170,10 @@ std::vector<PhaseCommand> StandaloneBuildSystem::runCommands(
 }
 
 void StandaloneBuildSystem::parseOutput(
-    PhaseResult& result,
-    const ProjectInfo& info) const
+    PhaseResult& result, const ProjectInfo& info) const
 {
     if (result.success) return;
 
-    // Coba parsing error tergantung bahasa.
     const bool is_cpp = (info.primary_language == "C++");
     const bool is_py  = (info.primary_language == "Python");
     const bool is_js  = (info.primary_language == "JavaScript"
@@ -201,8 +181,7 @@ void StandaloneBuildSystem::parseOutput(
 
     for (const auto& cmd : result.commands) {
         const std::string& src = !cmd.stderr_tail.empty()
-                               ? cmd.stderr_tail
-                               : cmd.stdout_tail;
+                               ? cmd.stderr_tail : cmd.stdout_tail;
         if (src.empty()) continue;
 
         if (is_cpp) {
@@ -262,18 +241,13 @@ void StandaloneBuildSystem::parseOutput(
         }
     }
 
-    // Fallback: last non-empty line.
     for (auto it = result.commands.rbegin();
          it != result.commands.rend(); ++it)
     {
         const std::string& src = !it->stderr_tail.empty()
-                               ? it->stderr_tail
-                               : it->stdout_tail;
+                               ? it->stderr_tail : it->stdout_tail;
         const std::string last = lastNonEmptyLine(src);
-        if (!last.empty()) {
-            result.error_message = last;
-            return;
-        }
+        if (!last.empty()) { result.error_message = last; return; }
     }
     result.error_message = "Standalone build failed.";
 }

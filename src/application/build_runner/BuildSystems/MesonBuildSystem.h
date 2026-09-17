@@ -1,17 +1,9 @@
-// ~/AgenAI/frans/src/application/build_runner/BuildSystems/MesonBuildSystem.h
 #pragma once
 
 #include "application/build_runner/IBuildSystem.h"
 
 namespace frans::application {
 
-// Build system untuk Meson.
-//
-// Commands:
-//   Build: meson setup build    (idempotent)
-//          meson compile -C build
-//   Test:  meson test -C build --print-errorlogs
-//   Run:   di-skip
 class MesonBuildSystem : public IBuildSystem {
 public:
     std::string name() const override { return "Meson"; }

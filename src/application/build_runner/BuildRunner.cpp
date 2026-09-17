@@ -1,4 +1,6 @@
-// ~/AgenAI/frans/src/application/build_runner/BuildRunner.cpp
+// Ganti seluruh isi BuildRunner.cpp dengan ini. Perubahan ada di bagian
+// "Inisialisasi label phase" — komentar jelas menandai.
+
 #include "application/build_runner/BuildRunner.h"
 
 #include "application/build_runner/BuildSystems/CMakeBuildSystem.h"
@@ -8,15 +10,12 @@
 #include "application/build_runner/BuildSystems/PoetryBuildSystem.h"
 #include "application/build_runner/BuildSystems/StandaloneBuildSystem.h"
 #include "application/build_runner/ProjectDetector.h"
-#include "application/project/ProjectGraphCache.h"
 #include "application/safety/DangerCheckHandler.h"
-#include "code_intelligence/graph/DependencyGraph.h"
 #include "infrastructure/system/ProcessExecutor.h"
 
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -25,25 +24,9 @@ namespace frans::application {
 namespace fs = std::filesystem;
 
 namespace {
-
 constexpr const char* kLogPrefix = "[frans][build_runner]";
-
-// Helper: strip prefix `root` dari path absolut `raw`.
-// Return relative path kalau `raw` berada di bawah `root`,
-// atau `raw` apa adanya kalau tidak match.
-std::string stripPrefix(const std::string& raw, const std::string& root) {
-    if (root.empty() || raw.empty()) return raw;
-    std::string prefix = root;
-    if (prefix.back() != '/') prefix += '/';
-    if (raw.size() > prefix.size() && raw.rfind(prefix, 0) == 0) {
-        return raw.substr(prefix.size());
-    }
-    return raw;
-}
-
 } // namespace
 
-// ---------------------------------------------------------------------------
 const char* buildPhaseName(BuildPhase p) {
     switch (p) {
         case BuildPhase::Build: return "BUILD";
@@ -53,34 +36,23 @@ const char* buildPhaseName(BuildPhase p) {
     return "?";
 }
 
-// ---------------------------------------------------------------------------
 BuildSystemKind BuildRunner::detectBuildSystemKind(const std::string& root) {
-    namespace fsl = std::filesystem;
     std::error_code ec;
-
-    if (fsl::exists(fsl::path(root) / "CMakeLists.txt", ec) && !ec) {
+    if (fs::exists(fs::path(root) / "CMakeLists.txt", ec) && !ec)
         return BuildSystemKind::CMake;
-    }
-    if (fsl::exists(fsl::path(root) / "meson.build", ec) && !ec) {
+    if (fs::exists(fs::path(root) / "meson.build", ec) && !ec)
         return BuildSystemKind::Meson;
-    }
-    if ((fsl::exists(fsl::path(root) / "Makefile", ec) && !ec)
-        || (fsl::exists(fsl::path(root) / "GNUmakefile", ec) && !ec)) {
+    if ((fs::exists(fs::path(root) / "Makefile", ec) && !ec)
+        || (fs::exists(fs::path(root) / "GNUmakefile", ec) && !ec))
         return BuildSystemKind::Make;
-    }
-    if (fsl::exists(fsl::path(root) / "package.json", ec) && !ec) {
+    if (fs::exists(fs::path(root) / "package.json", ec) && !ec)
         return BuildSystemKind::Npm;
-    }
-    if (fsl::exists(fsl::path(root) / "pyproject.toml", ec) && !ec) {
+    if (fs::exists(fs::path(root) / "pyproject.toml", ec) && !ec)
         return BuildSystemKind::Poetry;
-    }
     return BuildSystemKind::Standalone;
 }
 
-// ---------------------------------------------------------------------------
-std::unique_ptr<IBuildSystem> BuildRunner::makeBuildSystem(
-    BuildSystemKind kind)
-{
+std::unique_ptr<IBuildSystem> BuildRunner::makeBuildSystem(BuildSystemKind kind) {
     switch (kind) {
         case BuildSystemKind::CMake:      return std::make_unique<CMakeBuildSystem>();
         case BuildSystemKind::Make:       return std::make_unique<MakeBuildSystem>();
@@ -92,7 +64,6 @@ std::unique_ptr<IBuildSystem> BuildRunner::makeBuildSystem(
     return nullptr;
 }
 
-// ---------------------------------------------------------------------------
 std::string BuildRunner::formatArgv(const std::vector<std::string>& argv) {
     std::string s;
     for (std::size_t i = 0; i < argv.size(); ++i) {
@@ -102,7 +73,6 @@ std::string BuildRunner::formatArgv(const std::vector<std::string>& argv) {
     return s;
 }
 
-// ---------------------------------------------------------------------------
 PhaseResult BuildRunner::runPhase(
     BuildPhase phase,
     const std::vector<PhaseCommand>& commands,
@@ -117,7 +87,7 @@ PhaseResult BuildRunner::runPhase(
 
     if (commands.empty()) {
         result.skipped = true;
-        result.success = true;   // skip = tidak menghalangi phase berikutnya
+        result.success = true;
         return result;
     }
 
@@ -136,7 +106,6 @@ PhaseResult BuildRunner::runPhase(
                      cr.command.c_str(), cwd.c_str());
         std::fflush(stderr);
 
-        // Safety check per command.
         DangerCheckHandler danger;
         const DangerCheckResult dr = danger.checkCommand(pc.argv);
 
@@ -178,11 +147,7 @@ PhaseResult BuildRunner::runPhase(
         const auto cmd_t0 = std::chrono::steady_clock::now();
 
         const auto proc = frans::infrastructure::runCommand(
-            pc.argv,
-            eff_timeout,
-            /*stdin_data=*/"",
-            /*working_dir=*/cwd,
-            /*cancel_flag=*/nullptr);
+            pc.argv, eff_timeout, "", cwd, nullptr);
 
         const auto cmd_t1 = std::chrono::steady_clock::now();
         cr.duration_sec = std::chrono::duration<double>(cmd_t1 - cmd_t0).count();
@@ -211,7 +176,7 @@ PhaseResult BuildRunner::runPhase(
             cr.success = false;
             result.success = false;
             result.commands.push_back(std::move(cr));
-            break;   // stop on first failing command in a phase
+            break;
         }
 
         cr.success = true;
@@ -221,13 +186,9 @@ PhaseResult BuildRunner::runPhase(
     const auto t1 = std::chrono::steady_clock::now();
     result.duration_sec = std::chrono::duration<double>(t1 - t0).count();
 
-    // Parse error dari stderr kalau gagal.
     if (!result.success) {
-        BuildSystemKind kind = info.kind;
-        auto sys = makeBuildSystem(kind);
-        if (sys) {
-            sys->parseOutput(result, info);
-        }
+        auto sys = makeBuildSystem(info.kind);
+        if (sys) sys->parseOutput(result, info);
         if (result.error_message.empty()) {
             result.error_message = "Phase " + std::string(buildPhaseName(phase))
                                  + " gagal (exit code != 0).";
@@ -237,12 +198,10 @@ PhaseResult BuildRunner::runPhase(
     return result;
 }
 
-// ---------------------------------------------------------------------------
 BuildReport BuildRunner::runBuild(
     const std::vector<GeneratedFile>& files_written,
     const std::string& sandbox_root,
     frans::domain::IFileSystemPort& fs,
-    ProjectGraphCache* graph_cache,
     int build_timeout_sec,
     int test_timeout_sec,
     int run_timeout_sec,
@@ -250,6 +209,14 @@ BuildReport BuildRunner::runBuild(
 {
     BuildReport report;
     report.sandbox_root = sandbox_root;
+
+    // ---- Inisialisasi label phase ----
+    // PENTING: jangan dihapus. Default PhaseResult::phase = BuildPhase::Build,
+    // jadi kalau kita return lebih awal sebelum set, UI akan menampilkan
+    // semua phase sebagai [BUILD].
+    report.build.phase = BuildPhase::Build;
+    report.test.phase  = BuildPhase::Test;
+    report.run.phase   = BuildPhase::Run;
 
     if (files_written.empty()) {
         report.overall_success = false;
@@ -260,7 +227,6 @@ BuildReport BuildRunner::runBuild(
         return report;
     }
 
-    // ---- Step 1-3: deteksi project root + build system + test runner ----
     const ProjectInfo info =
         ProjectDetector::detect(files_written, sandbox_root);
 
@@ -268,13 +234,6 @@ BuildReport BuildRunner::runBuild(
     report.build_system     = buildSystemKindName(info.kind);
     report.test_runner      = info.test_runner;
     report.primary_language = info.primary_language;
-
-    std::fprintf(stderr,
-        "%s runBuild: project_root=%s build_system=%s test_runner=%s\n",
-        kLogPrefix,
-        info.project_root.c_str(), report.build_system.c_str(),
-        report.test_runner.empty() ? "(none)" : report.test_runner.c_str());
-    std::fflush(stderr);
 
     auto system = makeBuildSystem(info.kind);
     if (!system) {
@@ -286,7 +245,6 @@ BuildReport BuildRunner::runBuild(
         return report;
     }
 
-    // ---- Cek bahwa project_root ada dan di bawah sandbox_root. ----
     {
         std::error_code ec;
         if (!fs::exists(info.project_root, ec)
@@ -301,7 +259,6 @@ BuildReport BuildRunner::runBuild(
         }
     }
 
-    // ---- Step 4: Build phase ----
     const auto build_cmds = system->buildCommands(info, files_written, fs);
     report.build = runPhase(
         BuildPhase::Build, build_cmds, info.project_root,
@@ -310,15 +267,9 @@ BuildReport BuildRunner::runBuild(
     if (!report.build.success) {
         report.overall_success = false;
         report.failed_phase    = BuildPhase::Build;
-        if (graph_cache && !report.build.related_files.empty()) {
-            enrichRelatedFiles(report.build, info.project_root,
-                               info.sandbox_root, graph_cache);
-        }
         return report;
     }
 
-    // ---- Step 5: Test phase (opsional) ----
-    // Skip kalau: tidak ada test runner ATAU tidak ada command test.
     if (!info.test_runner.empty()) {
         const auto test_cmds = system->testCommands(info, fs);
         report.test = runPhase(
@@ -328,20 +279,14 @@ BuildReport BuildRunner::runBuild(
         if (!report.test.success && !report.test.skipped) {
             report.overall_success = false;
             report.failed_phase    = BuildPhase::Test;
-            if (graph_cache && !report.test.related_files.empty()) {
-                enrichRelatedFiles(report.test, info.project_root,
-                                   info.sandbox_root, graph_cache);
-            }
             return report;
         }
     } else {
-        // Set phase supaya label UI benar ([TEST], bukan default [BUILD]).
         report.test.phase   = BuildPhase::Test;
         report.test.skipped = true;
         report.test.success = true;
     }
 
-    // ---- Step 6: Run phase (opsional) ----
     {
         const auto run_cmds = system->runCommands(info, files_written);
         report.run = runPhase(
@@ -351,10 +296,6 @@ BuildReport BuildRunner::runBuild(
         if (!report.run.success && !report.run.skipped) {
             report.overall_success = false;
             report.failed_phase    = BuildPhase::Run;
-            if (graph_cache && !report.run.related_files.empty()) {
-                enrichRelatedFiles(report.run, info.project_root,
-                                   info.sandbox_root, graph_cache);
-            }
             return report;
         }
     }
@@ -364,90 +305,7 @@ BuildReport BuildRunner::runBuild(
         report.build.duration_sec + report.test.duration_sec
         + report.run.duration_sec;
 
-    std::fprintf(stderr,
-        "%s runBuild SUCCESS: build=%.3fs test=%.3fs run=%.3fs\n",
-        kLogPrefix,
-        report.build.duration_sec, report.test.duration_sec,
-        report.run.duration_sec);
-    std::fflush(stderr);
-
     return report;
-}
-
-// ---------------------------------------------------------------------------
-void BuildRunner::enrichRelatedFiles(
-    PhaseResult& result,
-    const std::string& project_root,
-    const std::string& sandbox_root,
-    ProjectGraphCache* graph_cache)
-{
-    if (!graph_cache) return;
-
-    std::string error_file;
-    for (const auto& rf : result.related_files) {
-        if (rf.role == "PRIMARY_ERROR") { error_file = rf.path; break; }
-    }
-    if (error_file.empty()) return;
-
-    std::string abs_err = error_file;
-    if (!error_file.empty() && error_file[0] != '/') {
-        abs_err = project_root + "/" + error_file;
-    }
-
-    std::fprintf(stderr,
-        "%s   enrichment: query graph untuk '%s'\n",
-        kLogPrefix, error_file.c_str());
-    std::fflush(stderr);
-
-    const auto& graph = graph_cache->getOrBuild(sandbox_root);
-
-    std::set<std::string> forward;
-    std::set<std::string> reverse;
-
-    for (const auto& [sym_name, _occ] : graph.allSymbols()) {
-        const auto snippets = graph.findBySymbol(sym_name);
-        const auto related  = graph.getRelatedSymbols(sym_name, 1);
-        if (related.empty()) continue;
-
-        for (const auto& snip : snippets) {
-            for (const auto& rel : related) {
-                if (rel.file_path.empty()) continue;
-                const std::string snip_rel =
-                    stripPrefix(snip.file_path, sandbox_root);
-                const std::string rel_rel =
-                    stripPrefix(rel.file_path, sandbox_root);
-
-                if (snip_rel == error_file && rel_rel != error_file) {
-                    forward.insert(rel_rel);
-                }
-                if (snip_rel != error_file && rel_rel == error_file) {
-                    reverse.insert(snip_rel);
-                }
-            }
-        }
-    }
-
-    std::set<std::string> existing;
-    for (const auto& rf : result.related_files) existing.insert(rf.path);
-
-    for (const auto& f : reverse) {
-        if (existing.count(f)) continue;
-        RelatedFile rf;
-        rf.path = f;
-        rf.role = "IMPORTS";
-        rf.note = "imports " + error_file;
-        result.related_files.push_back(std::move(rf));
-        existing.insert(f);
-    }
-    for (const auto& f : forward) {
-        if (existing.count(f)) continue;
-        RelatedFile rf;
-        rf.path = f;
-        rf.role = "DEPENDENT";
-        rf.note = "referenced by " + error_file;
-        result.related_files.push_back(std::move(rf));
-        existing.insert(f);
-    }
 }
 
 } // namespace frans::application

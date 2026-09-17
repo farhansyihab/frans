@@ -1,4 +1,3 @@
-// ~/AgenAI/frans/src/application/build_runner/ProjectDetector.cpp
 #include "application/build_runner/ProjectDetector.h"
 
 #include <algorithm>
@@ -17,11 +16,10 @@ namespace {
 
 constexpr const char* kLogPrefix = "[frans][project_detector]";
 
-// Marker file per build system. Urutan prioritas (CMake > Meson > Make > ...).
 struct MarkerSpec {
     BuildSystemKind           kind;
-    std::vector<std::string>  filenames;    // dicek di setiap level walk-up
-    std::string               language;     // untuk display
+    std::vector<std::string>  filenames;
+    std::string               language;
 };
 
 const std::vector<MarkerSpec>& markerSpecs() {
@@ -35,8 +33,6 @@ const std::vector<MarkerSpec>& markerSpecs() {
     return specs;
 }
 
-// Cek apakah directory `dir` punya salah satu marker file. Kalau ya,
-// isi `out_kind` dan `out_marker` dengan yang ditemukan.
 bool probeDir(const fs::path& dir,
               BuildSystemKind& out_kind,
               std::string& out_marker,
@@ -58,20 +54,18 @@ bool probeDir(const fs::path& dir,
     return false;
 }
 
-// Deteksi test runner berdasarkan project_root + kind.
 std::string detectTestRunner(const fs::path& root, BuildSystemKind kind) {
     std::error_code ec;
 
     if (kind == BuildSystemKind::CMake) {
-        // Cek "enable_testing" atau "add_test" di CMakeLists.txt.
         std::ifstream f(root / "CMakeLists.txt");
         if (f) {
             std::ostringstream ss;
             ss << f.rdbuf();
             const std::string txt = ss.str();
-            if (txt.find("enable_testing")  != std::string::npos
-             || txt.find("add_test")        != std::string::npos
-             || txt.find("include(CTest)")  != std::string::npos) {
+            if (txt.find("enable_testing") != std::string::npos
+             || txt.find("add_test")       != std::string::npos
+             || txt.find("include(CTest)") != std::string::npos) {
                 return "CTest";
             }
         }
@@ -79,7 +73,6 @@ std::string detectTestRunner(const fs::path& root, BuildSystemKind kind) {
     }
 
     if (kind == BuildSystemKind::Make) {
-        // Cek target "test:" di Makefile.
         const char* names[] = {"Makefile", "GNUmakefile", "makefile"};
         for (const char* nm : names) {
             std::ifstream f(root / nm);
@@ -96,9 +89,7 @@ std::string detectTestRunner(const fs::path& root, BuildSystemKind kind) {
         return {};
     }
 
-    if (kind == BuildSystemKind::Meson) {
-        return "MesonTest";
-    }
+    if (kind == BuildSystemKind::Meson) return "MesonTest";
 
     if (kind == BuildSystemKind::Npm) {
         std::ifstream f(root / "package.json");
@@ -106,9 +97,7 @@ std::string detectTestRunner(const fs::path& root, BuildSystemKind kind) {
         std::ostringstream ss;
         ss << f.rdbuf();
         const std::string txt = ss.str();
-        if (txt.find("\"test\"") != std::string::npos) {
-            return "NpmTest";
-        }
+        if (txt.find("\"test\"") != std::string::npos) return "NpmTest";
         return {};
     }
 
@@ -121,7 +110,6 @@ std::string detectTestRunner(const fs::path& root, BuildSystemKind kind) {
         return {};
     }
 
-    // Standalone — cek file test_*.py atau *_test.py di project_root.
     if (fs::is_directory(root, ec)) {
         for (auto it = fs::directory_iterator(root, ec);
              it != fs::directory_iterator(); it.increment(ec))
@@ -141,7 +129,6 @@ std::string detectTestRunner(const fs::path& root, BuildSystemKind kind) {
     return {};
 }
 
-// Deteksi bahasa dominan dari daftar file yang di-import (untuk display).
 std::string detectPrimaryLanguage(
     const std::vector<GeneratedFile>& files)
 {
@@ -169,7 +156,6 @@ std::string detectPrimaryLanguage(
 
 } // namespace
 
-// ---------------------------------------------------------------------------
 const char* buildSystemKindName(BuildSystemKind k) {
     switch (k) {
         case BuildSystemKind::CMake:      return "CMake";
@@ -182,7 +168,6 @@ const char* buildSystemKindName(BuildSystemKind k) {
     return "?";
 }
 
-// ---------------------------------------------------------------------------
 ProjectInfo ProjectDetector::detect(
     const std::vector<GeneratedFile>& files_written,
     const std::string& sandbox_root)
@@ -200,7 +185,6 @@ ProjectInfo ProjectDetector::detect(
     fs::path canonical_sandbox = fs::weakly_canonical(sandbox_root, ec);
     if (ec || canonical_sandbox.empty()) canonical_sandbox = sandbox_root;
 
-    // ---- Step 1: walk-up dari setiap file untuk cari project root. ----
     std::vector<std::string> candidate_roots;
 
     for (const auto& f : files_written) {
@@ -216,7 +200,6 @@ ProjectInfo ProjectDetector::detect(
         fs::path dir = file_abs.parent_path();
         if (dir.empty()) continue;
 
-        // Walk up sampai sandbox_root.
         for (fs::path cur = dir; ; cur = cur.parent_path()) {
             BuildSystemKind tmp_kind;
             std::string tmp_marker, tmp_lang;
@@ -229,7 +212,6 @@ ProjectInfo ProjectDetector::detect(
         }
     }
 
-    // Pilih project_root: mayoritas suara, tie-break ke path terpendek.
     if (candidate_roots.empty()) {
         info.project_root = canonical_sandbox.string();
     } else {
@@ -249,12 +231,11 @@ ProjectInfo ProjectDetector::detect(
         info.project_root = best;
     }
 
-    // ---- Step 2: pilih build system dari project_root. ----
     {
         BuildSystemKind kind;
         std::string marker, lang;
         if (probeDir(info.project_root, kind, marker, lang)) {
-            info.kind           = kind;
+            info.kind             = kind;
             info.primary_language = lang;
             info.markers_found.push_back(marker);
         } else {
@@ -263,7 +244,6 @@ ProjectInfo ProjectDetector::detect(
         }
     }
 
-    // ---- Step 3: cari test runner. ----
     info.test_runner = detectTestRunner(info.project_root, info.kind);
 
     std::fprintf(stderr,

@@ -1,97 +1,34 @@
-frans/
-├── CMakeLists.txt
-├── CMakePresets.json
-├── README.md
-├── .gitignore
-│
-├── cmake/
-│   ├── ProjectOptions.cmake
-│   ├── CompilerWarnings.cmake
-│   ├── Dependencies.cmake
-│   ├── FLTK.cmake
-│   ├── Platform.cmake
-│   ├── PlatformWindows.cmake
-│   ├── PlatformLinux.cmake
-│   ├── Sources.cmake
-│   ├── Tests.cmake
-│   └── Install.cmake
-│
-├── config/
-│   └── app.json
-│
-├── src/
-│   ├── main.cpp
-│   │
-│   ├── ui/
-│   │   ├── MainWindow.cpp
-│   │   ├── MainWindow.h
-│   │   ├── ManualImportDialog.cpp
-│   │   └── ManualImportDialog.h
-│   │
-│   ├── application/
-│   │   ├── import/
-│   │   │   ├── MultiFileParser.cpp
-│   │   │   └── MultiFileParser.h
-│   │   │
-│   │   ├── manual_import/
-│   │   │   ├── ManualImporter.cpp
-│   │   │   └── ManualImporter.h
-│   │   │
-│   │   ├── safety/
-│   │   │   ├── DangerCheckHandler.cpp
-│   │   │   └── DangerCheckHandler.h
-│   │   │
-│   │   └── build_runner/
-│   │       ├── BuildRunner.cpp
-│   │       ├── BuildRunner.h
-│   │       ├── ProjectDetector.cpp
-│   │       ├── ProjectDetector.h
-│   │       ├── BuildReport.h
-│   │       ├── ProjectInfo.h
-│   │       ├── IBuildSystem.h
-│   │       └── BuildSystems/
-│   │           ├── CMakeBuildSystem.cpp
-│   │           ├── CMakeBuildSystem.h
-│   │           ├── MakeBuildSystem.cpp
-│   │           ├── MakeBuildSystem.h
-│   │           ├── MesonBuildSystem.cpp
-│   │           ├── MesonBuildSystem.h
-│   │           ├── NpmBuildSystem.cpp
-│   │           ├── NpmBuildSystem.h
-│   │           ├── PoetryBuildSystem.cpp
-│   │           ├── PoetryBuildSystem.h
-│   │           ├── StandaloneBuildSystem.cpp
-│   │           └── StandaloneBuildSystem.h
-│   │
-│   ├── domain/
-│   │   ├── fs/
-│   │   │   └── IFileSystemPort.h
-│   │   └── import/
-│   │       ├── GeneratedFile.h
-│   │       └── ImportResult.h
-│   │
-│   ├── infrastructure/
-│   │   ├── fs/
-│   │   │   ├── SandboxedFileSystem.cpp
-│   │   │   └── SandboxedFileSystem.h
-│   │   └── system/
-│   │       ├── ProcessExecutor.cpp
-│   │       ├── ProcessExecutor.h
-│   │       ├── ProcessExecutor_posix.cpp
-│   │       ├── ProcessExecutor_win32.cpp
-│   │       ├── DiffEngine.cpp
-│   │       └── DiffEngine.h
-│   │
-│   └── config/
-│       ├── AppConfig.cpp
-│       └── AppConfig.h
-│
-└── tests/
-    ├── test_multifile_parser.cpp
-    ├── test_manual_importer.cpp
-    ├── test_sandbox.cpp
-    ├── test_danger_check.cpp
-    ├── test_project_detector.cpp
-    ├── test_build_runner.cpp
-    ├── test_process_executor.cpp
-    └── test_app_config.cpp
+# Frans — AI Code Importer & Build Runner
+
+Tool ringan (C++20 + FLTK) untuk:
+1. Paste output multi-file dari AI chat browser (DeepSeek / Gemini / Claude / ChatGPT).
+2. Preview status tiap file (New / Overwrite / Blocked).
+3. Tulis ke project root dengan safety layer (sandbox + danger check).
+4. Deteksi build system dari marker file (CMake / Make / Meson / npm / Poetry / Standalone).
+5. Build → Test → Run, dengan error file:line.
+
+## Build
+
+### Lubuntu
+    sudo apt install build-essential cmake libfltk1.3-dev
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+    cmake --build build -j
+
+### Windows (MSVC)
+    cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+    cmake --build build --config Release
+
+## Jalankan
+
+    ./build/bin/frans        # Linux
+    build\bin\Release\frans  # Windows
+
+## Format paste yang didukung
+
+    File: relative/path.py
+    [fenced code block]
+    <content>
+
+    File: another.py
+    [fenced code block]
+    <content>

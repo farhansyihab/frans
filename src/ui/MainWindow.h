@@ -1,75 +1,36 @@
-// ~/AgenAI/frans/src/ui/MainWindow.h
 #pragma once
 
-#include "application/Worker.h"
+#include "config/AppConfig.h"
 
 #include <FL/Fl.H>
 #include <FL/Fl_Window.H>
 
-#include <memory>
-#include <string>
-
-class Fl_Box;
-class Fl_Tabs;
-
-namespace frans::application {
-struct AppContext;
-}
+// Forward declaration di GLOBAL scope — kalau ditulis di dalam
+// namespace frans::ui akan diartikan sebagai frans::ui::Fl_Input.
+class Fl_Input;
 
 namespace frans::ui {
 
-class ChatView;
-class MaintenancePanel;
-class LlamaPanel;
-class AgentPanel;
-
-// Main window FLTK.
-//
-// Stage 7f+1 (layout):
-//   - Header compact.
-//   - LlamaPanel sticky di atas (selalu terlihat).
-//   - Fl_Tabs: [Agent] (default) | [Chat] | [System].
-//   - Status line di paling bawah (mirip status bar).
-//
-// Window size dihitung dari Fl::screen_work_area() - 2*margin supaya
-// "nyaris" fullscreen tapi tetap ada chrome OS (taskbar/panel).
+// Window utama: tombol buka Manual Import Dialog + info.
 class MainWindow {
 public:
-    explicit MainWindow(frans::application::AppContext* ctx);
+    explicit MainWindow(const frans::config::AppConfig& cfg);
     ~MainWindow();
 
     MainWindow(const MainWindow&)            = delete;
     MainWindow& operator=(const MainWindow&) = delete;
 
     Fl_Window* create();
-    void       startTimers();
 
 private:
-    // Timer callbacks.
-    static void onMemoryRefresh(void*);
-    static void onLlamaRefresh(void*);
-    static void onWorkerPoll(void*);
-    static void onWatchdog(void*);
-    static void onChatTick(void*);
-    static void onAgentTick(void*);
+    static void cbOpenImport(Fl_Widget*, void*);
+    static void cbQuit(Fl_Widget*, void*);
 
-    // Worker listener.
-    void onWorkerBusy(bool busy, const std::string& label);
-    void onWorkerDone(const frans::application::WorkerDone& done);
+    void doOpenImport();
 
-    frans::application::AppContext* ctx_;
-
-    std::unique_ptr<frans::application::Worker> worker_;
-    std::unique_ptr<MaintenancePanel>            maintenance_;
-    std::unique_ptr<LlamaPanel>                  llama_panel_;
-    std::unique_ptr<AgentPanel>                  agent_panel_;
-    std::unique_ptr<ChatView>                    chat_;
-
-    Fl_Window* win_         = nullptr;
-    Fl_Tabs*   tabs_        = nullptr;
-    Fl_Box*    status_line_ = nullptr;
-
-    std::string status_buf_;
+    const frans::config::AppConfig& cfg_;
+    Fl_Window* win_             = nullptr;
+    ::Fl_Input* root_input_     = nullptr;
 };
 
 } // namespace frans::ui

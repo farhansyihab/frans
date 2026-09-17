@@ -1,26 +1,18 @@
-# ~/AgenAI/frans/.gitignore
 build/
 logs/
 *.o
 *.a
 *.so
 *.d
+*.exe
 compile_commands.json
 
-# Jangan pernah commit secrets
+# secrets
 config/secrets.json
 *.key
 .env
 
-# Editor
+# editor
 .vscode/
 .idea/
 *.swp
-
-# ---------------------------------------------------------------------------
-# Stage 10 — grammar tree-sitter tidak di-commit ke repo frans.
-# Di-clone manual lewat instruksi di third_party/GRAMMAR_VERSIONS.md.
-# ---------------------------------------------------------------------------
-third_party/tree-sitter-cpp/
-third_party/tree-sitter-javascript/
-third_party/tree-sitter-typescript/
