@@ -52,7 +52,7 @@ bool isSkippedDir(const std::string& name) {
         || name == "dist"  || name == ".next" || name == "out"
         || name == "target"
         || name == "bin"   || name == "obj"
-        || name == "third_party";
+        || name == "third_party"
         || name == "logs";
 }
 

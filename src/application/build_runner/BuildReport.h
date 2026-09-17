@@ -6,14 +6,14 @@
 
 namespace frans::application {
 
-// Blueprint Stage 11d §13.2 — satu file yang terkait dengan error build.
+// Satu file yang terkait dengan error build/test.
 //
-// `path` selalu relatif terhadap sandbox root.
+// `path` selalu relatif terhadap project root.
 //
 // `role` nilainya:
 //   "PRIMARY_ERROR"  — file + line yang men-trigger error (dari error parser)
-//   "IMPORTS"        — file yang mengimpor primary_error (reverse dep, dari graph)
-//   "DEPENDENT"      — file yang direferensikan primary_error (forward dep, dari graph)
+//   "IMPORTS"        — file yang mengimpor primary_error (reverse dep)
+//   "DEPENDENT"      — file yang direferensikan primary_error (forward dep)
 struct RelatedFile {
     std::string path;
     int         line = 0;   // 1-based, 0 kalau tidak diketahui
@@ -21,35 +21,71 @@ struct RelatedFile {
     std::string note;
 };
 
-// Hasil satu build/compile/run (Stage 11d).
-//
-// `success=true` ⇔ exit_code == 0 && !timed_out.
-// Field `error_message` hanya terisi kalau success=false.
-//
-// REVISI (2026-01 follow-up):
-//   `syntax_only=true` untuk C++ yang tidak punya `int main` — kita cek
-//   sintaks saja (`g++ -fsyntax-only`), tidak compile+link.
-//   Ini memberi user feedback sintaks tanpa harus jadi program standalone.
+// Phase eksekusi. Urutannya: Build → Test → Run.
+// Test di-skip kalau tidak ada test runner terdeteksi.
+// Run di-skip kalau tidak ada entry point terdeteksi.
+enum class BuildPhase {
+    Build,
+    Test,
+    Run,
+};
+
+const char* buildPhaseName(BuildPhase p);
+
+// Hasil satu command dalam satu phase. Satu phase bisa terdiri dari
+// beberapa command (mis. CMake: `cmake -S . -B build` lalu `cmake --build build`).
+struct CommandResult {
+    std::string label;             // "configure", "compile", "test", "run"
+    std::string command;           // argv yang di-join, untuk display
+    bool        ran         = true;
+    bool        success     = false;
+    int         exit_code   = -1;
+    bool        timed_out   = false;
+    bool        cancelled   = false;
+    double      duration_sec = 0.0;
+    std::string stdout_tail;
+    std::string stderr_tail;
+};
+
+// Hasil satu phase (Build / Test / Run).
+struct PhaseResult {
+    BuildPhase  phase       = BuildPhase::Build;
+    bool        skipped     = true;   // true = tidak ada command untuk phase ini
+    bool        success     = false;
+    double      duration_sec = 0.0;
+    std::string error_message;        // pesan error utama (kalau success=false)
+    std::vector<RelatedFile> related_files;
+    std::vector<CommandResult> commands;
+
+    bool ran() const { return !skipped; }
+};
+
+// Hasil satu panggilan BuildRunner::runBuild().
 struct BuildReport {
-    bool                        success        = false;
-    int                         exit_code      = -1;
-    bool                        timed_out      = false;
+    // ---- Identifikasi project (dari ProjectDetector) ----
+    std::string project_root;
+    std::string sandbox_root;
+    std::string build_system;      // "CMake" | "Make" | "Meson" | "npm" | "Poetry" | "Standalone"
+    std::string test_runner;       // "CTest" | "Pytest" | dst. Kosong = tidak ada.
+    std::string primary_language;  // "C++" | "Python" | dst.
 
-    // Stage 11d follow-up — flag ini di-set oleh BuildRunner ketika argv
-    // mengandung `-fsyntax-only`. UI menampilkan catatan khusus supaya
-    // user paham program tidak dijalankan.
-    bool                        syntax_only    = false;
+    // ---- Hasil per phase ----
+    PhaseResult build;
+    PhaseResult test;
+    PhaseResult run;
 
-    std::string                 language;       // "Python" / "C++" / "TypeScript" / "JavaScript"
-    std::string                 command;        // command yang dijalankan
-    std::string                 entry_point;    // file yang di-compile/run
-    std::string                 error_message;  // pesan error utama (kalau success=false)
+    // ---- Ringkasan ----
+    bool        overall_success   = false;
+    double      total_duration_sec = 0.0;
+    BuildPhase  failed_phase      = BuildPhase::Build; // valid kalau !overall_success
 
-    std::vector<RelatedFile>    related_files;  // primary + enriched (via graph)
+    // Helper: phase mana yang dijalankan (tidak skipped).
+    bool has_any_phase_ran() const {
+        return build.ran() || test.ran() || run.ran();
+    }
 
-    double                      duration_sec   = 0.0;
-    std::string                 stdout_tail;
-    std::string                 stderr_tail;
+    // Backwards-compat accessor untuk UI lama.
+    bool is_success() const { return overall_success; }
 };
 
 } // namespace frans::application

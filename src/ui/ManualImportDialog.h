@@ -19,9 +19,6 @@
 // Xlib mendefinisikan `Status` sebagai macro. Kalau header ini include FL
 // penuh di atas, maka siapapun yang meng-include kita LEBIH DULU sebelum
 // AppContext.h akan membuat `struct Status` di ProjectGraphCache.h hancur.
-//
-// Semua widget disimpan sebagai pointer — forward declaration cukup.
-// Pola ini identik dengan AgentPanel.h.
 // -----------------------------------------------------------------------------
 class Fl_Window;
 class Fl_Input;
@@ -44,36 +41,17 @@ class SandboxedFileSystem;
 
 namespace frans::ui {
 
-// Blueprint Stage 11b — Manual Import Window (UI layer).
-// Blueprint Stage 11d — tambah tombol [Build/compile and Debug] + area
-// output build.
+// Blueprint Stage 11b + 11d-revisi.
 //
-// REVISI UX (2026-01 follow-up):
-//   - Tinggi window 780 -> 620 px supaya muat di layar VivoBook X505Z
-//     (1366x768) bersama title bar + taskbar.
-//   - Field "Default file (opt.)" DIHAPUS. Alasan: di praktik, paste
-//     selalu mengandung marker `File:` (multi-file) atau user memang
-//     perlu melihat error eksplisit bahwa format salah. Field ini
-//     cenderung bikin bingung karena multi-file mengabaikannya, dan
-//     single-file tanpa marker sangat jarang dipakai.
-//     Kalau user paste tanpa marker, dialog tampilkan pesan error
-//     yang mengarahkan user menambah baris `File: nama_file.py`.
+// ManualImportDialog sekarang mengintegrasikan BuildRunner yang mendeteksi
+// project root + build system dari marker file, BUKAN dari ekstensi file.
 //
-// State tombol Build:
-//   Disabled  — belum ada commit sukses, atau paste area baru saja diubah
-//   Enabled   — setelah commit sukses (files_written_ non-empty) DAN
-//               tidak sedang building
-//
-// Lifetime: ManualImportDialog::show() adalah entry point tunggal.
-// Dialog di-construct di heap, blocking sampai user close, lalu di-delete.
+// UI menampilkan:
+//   - Project root detected + build system + test runner (dari BuildReport)
+//   - Per-phase output: [BUILD] / [TEST] / [RUN]
+//   - Error + related files dari phase yang gagal
 class ManualImportDialog {
 public:
-    // Blocking. Return true kalau minimal satu file berhasil ditulis.
-    // `initial_root` biasanya di-pre-fill dari AgentPanel root input.
-    //
-    // `ctx` harus non-null. Kalau ctx->graph_cache != nullptr, dialog akan
-    // panggil invalidate() setelah commit berhasil DAN pass ke
-    // BuildRunner::runBuild() untuk enrichment.
     static bool show(frans::application::AppContext* ctx,
                      const std::string&               initial_root);
 
@@ -86,12 +64,12 @@ private:
     ~ManualImportDialog();
 
     void build();
-    void rebuildImporter();     // construct SandboxedFileSystem + ManualImporter
+    void rebuildImporter();
 
     void doBrowse();
     void doParse();
     void doWrite();
-    void doBuild();             // Stage 11d
+    void doBuild();
     void doClose();
 
     void refreshPreviewBrowser(const frans::application::ImportResult& r);
@@ -100,18 +78,14 @@ private:
     void setButtonsEnabled(bool parsing_enabled, bool writing_enabled);
     void updateBuildButtonState();
 
-    // Reset state build (files_written_, build report, output area) —
-    // dipanggil ketika paste berubah atau root berubah.
     void resetBuildState(const char* reason);
 
-    // Static FLTK callbacks.
     static void cbBrowse(Fl_Widget*, void*);
     static void cbParse(Fl_Widget*, void*);
     static void cbWrite(Fl_Widget*, void*);
     static void cbBuild(Fl_Widget*, void*);
     static void cbClose(Fl_Widget*, void*);
 
-    // Buffer modify callback — deteksi paste area berubah.
     static void onPasteModified(int pos, int nInserted, int nDeleted,
                                  int nRestyled, const char* deletedText,
                                  void* cbArg);
@@ -129,7 +103,6 @@ private:
     Fl_Box*           status_box_      = nullptr;
     Fl_Button*        write_btn_       = nullptr;
 
-    // Stage 11d — build widgets.
     Fl_Button*        build_btn_       = nullptr;
     Fl_Box*           build_label_     = nullptr;
     Fl_Text_Display*  build_output_    = nullptr;
@@ -142,16 +115,10 @@ private:
     std::unique_ptr<frans::application::ManualImporter>         importer_;
     std::unique_ptr<frans::application::BuildRunner>            build_runner_;
 
-    // Hasil preview terakhir — dipakai refreshPreviewBrowser() dan summary.
     frans::application::ImportResult last_preview_;
+    frans::application::BuildReport  last_build_report_;
 
-    // Stage 11d — file yang sudah sukses di-commit, siap di-build.
-    // Map supaya commit kedua bisa "menimpa" entri dengan path sama tanpa
-    // duplikat. Value-nya full GeneratedFile (path + content).
     std::map<std::string, frans::application::GeneratedFile> files_written_;
-
-    // Sandbox root saat files_written_ terakhir di-commit (canonical).
-    // Kalau user ganti root dan commit ulang, reset files_written_.
     std::string last_commit_root_;
 
     bool        wrote_anything_ = false;

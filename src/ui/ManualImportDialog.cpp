@@ -1,15 +1,12 @@
 // ~/AgenAI/frans/src/ui/ManualImportDialog.cpp
 //
 // PENTING — urutan include:
-//   1. Header sendiri (yang sekarang tidak lagi include FL — lihat
-//      ManualImportDialog.h untuk alasannya).
+//   1. Header sendiri.
 //   2. application/AppContext.h — menarik ProjectGraphCache.h yang
 //      mendefinisikan `struct Status`. HARUS di-parse SEBELUM X11
 //      mendefinisikan macro `Status` via <FL/x.H>.
 //   3. Header app/infra lain (pure C++, tidak ada X11).
-//   4. BARU FLTK headers — <FL/Fl_Text_Editor.H> menarik <FL/x.H> yang
-//      meng-include <X11/Xlib.h> → mendefinisikan macro `Status`. Setelah
-//      titik ini `struct Status` sudah tidak bisa dipakai di file ini.
+//   4. BARU FLTK headers.
 #include "ui/ManualImportDialog.h"
 
 #include "application/AppContext.h"
@@ -40,6 +37,7 @@
 namespace frans::ui {
 
 using frans::application::AppContext;
+using frans::application::BuildPhase;
 using frans::application::BuildReport;
 using frans::application::BuildRunner;
 using frans::application::DangerVerdict;
@@ -48,13 +46,13 @@ using frans::application::ImportFilePreview;
 using frans::application::ImportFileStatus;
 using frans::application::ImportResult;
 using frans::application::ManualImporter;
+using frans::application::PhaseResult;
 using frans::infrastructure::SandboxedFileSystem;
 
 namespace {
 
-// Layout — versi compact (2026-01 follow-up).
 constexpr int kW         = 720;
-constexpr int kH         = 620;
+constexpr int kH         = 660;
 constexpr int kPadX      = 15;
 constexpr int kInnerW    = kW - 2 * kPadX;
 
@@ -123,59 +121,50 @@ std::string inputValue(const Fl_Input* in) {
     return v ? std::string(v) : std::string{};
 }
 
-// Render BuildReport jadi text untuk area output.
-std::string formatBuildReport(const BuildReport& r) {
+// Render satu phase ke string.
+std::string formatPhase(const PhaseResult& pr) {
+    const char* name = frans::application::buildPhaseName(pr.phase);
+
     std::string s;
-    s.reserve(1024);
+    s += "─── [";
+    s += name;
+    s += "] ───\n";
 
-    s += "Status: ";
-    if (r.timed_out)      s += "FAILED (timeout)";
-    else if (r.success)   s += "SUCCESS";
-    else                  s += "FAILED";
-    s += "  (exit=" + std::to_string(r.exit_code) + ")\n";
-
-    // Stage 11d follow-up — tampilkan mode kalau syntax-only.
-    if (r.syntax_only) {
-        s += "Mode             : SYNTAX CHECK ONLY "
-             "(tidak ada `int main` — tidak di-link, tidak dieksekusi)\n";
+    if (pr.skipped) {
+        s += "  (skipped)\n\n";
+        return s;
     }
 
-    s += "Language detected: " + r.language + "\n";
-    if (!r.entry_point.empty()) {
-        s += "Entry point      : " + r.entry_point + "\n";
-    }
-    if (!r.command.empty()) {
-        s += "Command          : " + r.command + "\n";
-    }
+    s += "  Status: ";
+    s += (pr.success ? "SUCCESS" : "FAILED");
+    char dur[64];
+    std::snprintf(dur, sizeof(dur), "  (%.3fs)\n", pr.duration_sec);
+    s += dur;
 
-    if (!r.error_message.empty()) {
-        s += "\nError:\n";
-        std::string line;
-        for (char c : r.error_message) {
-            if (c == '\n') {
-                s += "  " + line + "\n";
-                line.clear();
+    for (const auto& cmd : pr.commands) {
+        s += "  > " + cmd.command + "\n";
+        if (!cmd.success) {
+            if (cmd.timed_out) {
+                s += "    [TIMEOUT]\n";
             } else {
-                line += c;
+                s += "    [exit " + std::to_string(cmd.exit_code) + "]\n";
             }
         }
-        if (!line.empty()) s += "  " + line + "\n";
     }
 
-    if (!r.related_files.empty()) {
-        s += "\nFiles related to error:\n";
-        for (const auto& rf : r.related_files) {
-            std::string marker;
-            if (rf.role == "PRIMARY_ERROR") marker = "    * ";
-            else                            marker = "    - ";
+    if (!pr.error_message.empty()) {
+        s += "  Error: " + pr.error_message + "\n";
+    }
 
+    if (!pr.related_files.empty()) {
+        s += "  Related files:\n";
+        for (const auto& rf : pr.related_files) {
+            std::string marker = (rf.role == "PRIMARY_ERROR") ? "    * " : "    - ";
             s += marker + rf.path;
             if (rf.line > 0) {
-                s += " (line " + std::to_string(rf.line) + ")";
+                s += ":" + std::to_string(rf.line);
             }
-            if (!rf.role.empty()) {
-                s += "  [" + rf.role + "]";
-            }
+            s += "  [" + rf.role + "]";
             if (!rf.note.empty()) {
                 s += "\n        " + rf.note;
             }
@@ -183,16 +172,64 @@ std::string formatBuildReport(const BuildReport& r) {
         }
     }
 
-    if (!r.stdout_tail.empty()) {
-        s += "\n--- stdout (tail) ---\n";
-        s += r.stdout_tail;
-        if (s.back() != '\n') s += '\n';
+    // Tampilkan stderr tail dari command terakhir yang gagal.
+    for (auto it = pr.commands.rbegin(); it != pr.commands.rend(); ++it) {
+        if (it->success) continue;
+        if (!it->stderr_tail.empty()) {
+            s += "  stderr tail:\n";
+            std::string line;
+            for (char c : it->stderr_tail) {
+                if (c == '\n') {
+                    s += "    " + line + "\n";
+                    line.clear();
+                } else {
+                    line += c;
+                }
+            }
+            if (!line.empty()) s += "    " + line + "\n";
+        }
+        break;
     }
-    if (!r.stderr_tail.empty() && !r.success) {
-        s += "\n--- stderr (tail) ---\n";
-        s += r.stderr_tail;
-        if (s.back() != '\n') s += '\n';
+
+    s += "\n";
+    return s;
+}
+
+std::string formatBuildReport(const BuildReport& r) {
+    std::string s;
+    s.reserve(2048);
+
+    // ---- Header: deteksi project ----
+    s += "=== Project Detection ===\n";
+    s += "Project root  : " + r.project_root + "\n";
+    if (r.project_root != r.sandbox_root) {
+        s += "Sandbox root  : " + r.sandbox_root + "\n";
     }
+    s += "Build system  : " + r.build_system + "\n";
+    s += "Test runner   : "
+       + (r.test_runner.empty() ? "(none detected)" : r.test_runner) + "\n";
+    s += "Language      : " + r.primary_language + "\n";
+    s += "\n";
+
+    // ---- Overall status ----
+    s += "=== Overall Result ===\n";
+    if (r.overall_success) {
+        s += "Status: SUCCESS";
+    } else {
+        s += "Status: FAILED";
+        s += "  (phase: ";
+        s += frans::application::buildPhaseName(r.failed_phase);
+        s += ")";
+    }
+    char dur[64];
+    std::snprintf(dur, sizeof(dur), "  (total %.3fs)\n\n",
+                  r.total_duration_sec);
+    s += dur;
+
+    // ---- Per-phase ----
+    s += formatPhase(r.build);
+    s += formatPhase(r.test);
+    s += formatPhase(r.run);
 
     return s;
 }
@@ -257,8 +294,9 @@ void ManualImportDialog::build() {
         root_input_ = new Fl_Input(kPadX + 100, y, kInnerW - 100 - 84, kBtnH, nullptr);
         root_input_->value(current_root_.c_str());
         root_input_->tooltip(
-            "Folder kerja. Sandbox akan dibuat di sini. "
-            "Path file di output AI di-resolve relatif ke folder ini.");
+            "Folder sandbox. File ditulis di sini. Project root aktual "
+            "(untuk build) dideteksi dengan walk-up dari file ke marker "
+            "seperti CMakeLists.txt / package.json.");
 
         browse_btn_ = new Fl_Button(kPadX + kInnerW - 80, y, 80, kBtnH, "Browse");
         browse_btn_->callback(cbBrowse, this);
@@ -306,7 +344,7 @@ void ManualImportDialog::build() {
     }
 
     {
-        const int browser_h = 80;
+        const int browser_h = 70;
         preview_browser_ = new Fl_Browser(kPadX, y, kInnerW, browser_h, nullptr);
         preview_browser_->textfont(FL_COURIER);
         preview_browser_->textsize(10);
@@ -325,13 +363,13 @@ void ManualImportDialog::build() {
     }
 
     {
-        build_btn_ = new Fl_Button(kPadX, y, 200, kBtnH,
-            "Build/compile and Debug");
+        build_btn_ = new Fl_Button(kPadX, y, 220, kBtnH,
+            "Build / Test / Run");
         build_btn_->callback(cbBuild, this);
         build_btn_->deactivate();
         build_btn_->tooltip(
-            "Compile/run kode yang baru diimpor di sandbox. "
-            "Aktif setelah [Write to Disk] sukses.");
+            "Deteksi project root + build system dari marker file, lalu "
+            "build → test → run. Aktif setelah [Write to Disk] sukses.");
         y += kBtnH + kRowGap;
     }
 
@@ -343,7 +381,7 @@ void ManualImportDialog::build() {
     }
 
     {
-        const int out_h = 130;
+        const int out_h = 160;
         build_output_ = new Fl_Text_Display(kPadX, y, kInnerW, out_h, nullptr);
         build_buf_ = new Fl_Text_Buffer();
         build_output_->buffer(build_buf_);
@@ -444,7 +482,6 @@ void ManualImportDialog::doParse() {
     setButtonsEnabled(/*parsing_enabled=*/false, /*writing_enabled=*/false);
     Fl::check();
 
-    // fallback_path selalu "" — paste wajib pakai marker `File:`.
     last_preview_ = importer_->preview(text, /*fallback_path=*/"");
 
     refreshPreviewBrowser(last_preview_);
@@ -455,10 +492,7 @@ void ManualImportDialog::doParse() {
         if (last_preview_.parse_error.find("fallback_path kosong")
             != std::string::npos) {
             msg += "   —   Paste wajib menyertakan baris \"File: <nama_file.ext>\" "
-                   "di atas setiap code block. Contoh:\n"
-                   "    File: main.py\n"
-                   "    (baris kosong opsional)\n"
-                   "    <code block berpagar tiga-backtick di sini>";
+                   "di atas setiap code block.";
         }
         setStatus(msg, FL_RED);
         setButtonsEnabled(true, false);
@@ -543,9 +577,8 @@ void ManualImportDialog::doWrite() {
     char buf[320];
     if (res.written_count > 0 && res.failed_count == 0) {
         std::snprintf(buf, sizeof(buf),
-            "Wrote %zu file(s), %zu blocked. "
-            "ProjectGraphCache invalidated — klik [Build/compile and Debug] "
-            "untuk compile/run.",
+            "Wrote %zu file(s), %zu blocked. Klik [Build / Test / Run] untuk "
+            "deteksi project root + build system.",
             res.written_count, res.blocked_count);
         setStatus(buf, FL_DARK_GREEN);
     } else if (res.failed_count > 0) {
@@ -583,6 +616,7 @@ void ManualImportDialog::doBuild() {
         files.push_back(gf);
     }
 
+    // Filter: hanya file yang masih ada di sandbox.
     {
         std::vector<GeneratedFile> existing;
         existing.reserve(files.size());
@@ -601,15 +635,14 @@ void ManualImportDialog::doBuild() {
     }
 
     if (files.empty()) {
-        fl_message("Tidak ada file yang tersedia di sandbox untuk di-build. "
-                   "Coba commit ulang.");
+        fl_message("Tidak ada file yang tersedia di sandbox untuk di-build.");
         return;
     }
 
     is_building_ = true;
     updateBuildButtonState();
 
-    setStatus("Building... (menunggu subprocess, max 30s)", FL_DARK_BLUE);
+    setStatus("Building... (deteksi project root + build system)", FL_DARK_BLUE);
     if (build_buf_) build_buf_->text("");
     Fl::check();
 
@@ -623,30 +656,36 @@ void ManualImportDialog::doBuild() {
     frans::application::ProjectGraphCache* gc =
         (ctx_ && ctx_->graph_cache) ? ctx_->graph_cache.get() : nullptr;
 
-    const BuildReport report = build_runner_->runBuild(
+    last_build_report_ = build_runner_->runBuild(
         files,
         fs_->root().string(),
         *fs_,
         gc,
-        /*timeout_sec=*/30,
+        /*build_timeout_sec=*/120,
+        /*test_timeout_sec=*/120,
+        /*run_timeout_sec=*/30,
         confirm_cb);
 
     is_building_ = false;
 
-    renderBuildReport(report);
+    renderBuildReport(last_build_report_);
 
-    if (report.success) {
-        char buf[200];
+    char buf[320];
+    if (last_build_report_.overall_success) {
         std::snprintf(buf, sizeof(buf),
-            "Build SUCCESS — %s, entry='%s'%s",
-            report.language.c_str(), report.entry_point.c_str(),
-            report.syntax_only ? " (syntax check only)" : "");
+            "SUCCESS — %s @ %s  (%s)",
+            last_build_report_.build_system.c_str(),
+            last_build_report_.project_root.c_str(),
+            last_build_report_.test_runner.empty()
+                ? "no test runner"
+                : last_build_report_.test_runner.c_str());
         setStatus(buf, FL_DARK_GREEN);
     } else {
-        char buf[200];
         std::snprintf(buf, sizeof(buf),
-            "Build FAILED — %s  (lihat area Build output di bawah)",
-            report.language.c_str());
+            "FAILED pada phase %s — %s @ %s  (lihat Build output)",
+            frans::application::buildPhaseName(last_build_report_.failed_phase),
+            last_build_report_.build_system.c_str(),
+            last_build_report_.project_root.c_str());
         setStatus(buf, FL_RED);
     }
 
@@ -714,7 +753,7 @@ void ManualImportDialog::updateBuildButtonState() {
         build_btn_->label("Building...");
         build_btn_->deactivate();
     } else {
-        build_btn_->label("Build/compile and Debug");
+        build_btn_->label("Build / Test / Run");
         if (can_build) build_btn_->activate();
         else           build_btn_->deactivate();
     }
@@ -732,6 +771,7 @@ void ManualImportDialog::resetBuildState(const char* reason) {
 
     files_written_.clear();
     last_commit_root_.clear();
+    last_build_report_ = BuildReport{};
     is_building_ = false;
 
     if (build_buf_) build_buf_->text("");
