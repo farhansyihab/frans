@@ -47,6 +47,9 @@ constexpr int kInnerW = kW - 2 * kPadX;
 constexpr int kBtnH   = 30;
 constexpr int kRowGap = 6;
 
+// Interval polling worker thread (detik).
+constexpr double kBuildPollInterval = 0.1;
+
 std::string escapeBrowserText(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -123,7 +126,8 @@ std::string formatPhase(const PhaseResult& pr) {
     for (const auto& cmd : pr.commands) {
         s += "  > " + cmd.command + "\n";
         if (!cmd.success) {
-            if (cmd.timed_out) s += "    [TIMEOUT]\n";
+            if (cmd.cancelled)  s += "    [CANCELLED by user]\n";
+            else if (cmd.timed_out) s += "    [TIMEOUT]\n";
             else s += "    [exit " + std::to_string(cmd.exit_code) + "]\n";
         }
     }
@@ -147,9 +151,6 @@ std::string formatPhase(const PhaseResult& pr) {
     //   - command pertama yang GAGAL (kalau ada), atau
     //   - command TERAKHIR untuk phase Run yang SUKSES
     //     (supaya output program kelihatan — mis. print() Python).
-    //
-    // Command yang sukses di phase Build/Test tidak dirender supaya
-    // tidak noise (compiler output, ctest progress, dsb).
     const CommandResult* show = nullptr;
     for (const auto& cmd : pr.commands) {
         if (!cmd.success) { show = &cmd; break; }
@@ -250,6 +251,14 @@ ManualImportDialog::ManualImportDialog(std::string initial_root)
 }
 
 ManualImportDialog::~ManualImportDialog() {
+    // Hentikan worker kalau masih jalan, sebelum fs_ dan build_runner_
+    // dihancurkan (worker pakai *fs_).
+    if (build_thread_.joinable()) {
+        cancel_requested_.store(true);
+        build_thread_.join();
+    }
+    Fl::remove_timeout(onBuildPoll, this);
+
     if (win_) {
         if (win_->shown()) win_->hide();
         delete win_;
@@ -347,9 +356,17 @@ void ManualImportDialog::build() {
     }
 
     {
-        build_btn_ = new Fl_Button(kPadX, y, 220, kBtnH, "Build / Test / Run");
+        build_btn_ = new Fl_Button(kPadX, y, 180, kBtnH, "Build / Test / Run");
         build_btn_->callback(cbBuild, this);
         build_btn_->deactivate();
+
+        cancel_btn_ = new Fl_Button(kPadX + 190, y, 90, kBtnH, "Cancel");
+        cancel_btn_->callback(cbCancel, this);
+        cancel_btn_->deactivate();
+        cancel_btn_->tooltip(
+            "Batalkan build/run yang sedang berjalan.\n"
+            "Subprocess di-SIGKILL dalam ≤200ms.");
+
         y += kBtnH + kRowGap;
     }
 
@@ -431,6 +448,12 @@ void ManualImportDialog::doBrowse() {
 void ManualImportDialog::doParse() {
     if (!root_input_ || !paste_buf_ || !preview_browser_) return;
 
+    if (is_building_) {
+        fl_message("Build sedang berjalan. Klik [Cancel] dulu atau tunggu "
+                   "selesai sebelum parse ulang.");
+        return;
+    }
+
     rebuildImporter();
 
     if (!importer_) {
@@ -485,6 +508,10 @@ void ManualImportDialog::doParse() {
 }
 
 void ManualImportDialog::doWrite() {
+    if (is_building_) {
+        fl_message("Build sedang berjalan. Tunggu atau Cancel dulu.");
+        return;
+    }
     if (!importer_ || !importer_->hasPreview()) {
         fl_message("Belum ada preview. Klik [Parse & Preview] dulu.");
         return;
@@ -580,53 +607,118 @@ void ManualImportDialog::doBuild() {
         return;
     }
 
-    is_building_ = true;
-    updateBuildButtonState();
+    // Reset state worker.
+    cancel_requested_.store(false);
+    build_finished_.store(false);
+    pending_report_ = BuildReport{};
+    is_building_    = true;
 
-    setStatus("Building... (deteksi project root + build system)", FL_DARK_BLUE);
+    updateBuildButtonState();
+    setStatus("Building... (klik [Cancel] untuk membatalkan)", FL_DARK_BLUE);
     if (build_buf_) build_buf_->text("");
-    Fl::check();
 
-    BuildRunner::ConfirmCallback confirm_cb =
-        [](const std::string& reason) -> bool {
-            const int ans = fl_choice(
-                "%s", "Batal", "Ya, jalankan", nullptr, reason.c_str());
-            return ans == 1;
-        };
+    // Snapshot untuk worker: files, root path, dan pointer fs_.
+    // Worker TIDAK boleh akses member UI (Fl_*) sama sekali.
+    const std::string root = fs_->root().string();
+    auto* fs_ptr = fs_.get();
 
-    last_build_report_ = build_runner_->runBuild(
-        files,
-        fs_->root().string(),
-        *fs_,
-        120, 120, 30,
-        confirm_cb);
+    if (build_thread_.joinable()) build_thread_.join();
 
-    is_building_ = false;
+    build_thread_ = std::thread([this,
+                                 files = std::move(files),
+                                 root,
+                                 fs_ptr]() mutable {
+        // Confirm callback untuk worker: auto-approve + log ke stderr.
+        // Tidak boleh akses FLTK dari worker.
+        BuildRunner::ConfirmCallback confirm_cb =
+            [](const std::string& reason) -> bool {
+                std::fprintf(stderr,
+                    "[frans][manual_import_dialog] auto-approve (worker): %s\n",
+                    reason.c_str());
+                std::fflush(stderr);
+                return true;
+            };
 
-    renderBuildReport(last_build_report_);
+        pending_report_ = build_runner_->runBuild(
+            files, root, *fs_ptr,
+            120, 120, 30,
+            confirm_cb,
+            &cancel_requested_);
 
-    char buf[320];
-    if (last_build_report_.overall_success) {
-        std::snprintf(buf, sizeof(buf), "SUCCESS — %s @ %s  (%s)",
-            last_build_report_.build_system.c_str(),
-            last_build_report_.project_root.c_str(),
-            last_build_report_.test_runner.empty()
-                ? "no test runner" : last_build_report_.test_runner.c_str());
-        setStatus(buf, FL_DARK_GREEN);
-    } else {
-        std::snprintf(buf, sizeof(buf),
-            "FAILED pada phase %s — %s @ %s",
-            frans::application::buildPhaseName(last_build_report_.failed_phase),
-            last_build_report_.build_system.c_str(),
-            last_build_report_.project_root.c_str());
-        setStatus(buf, FL_RED);
-    }
+        build_finished_.store(true);
+    });
 
-    updateBuildButtonState();
+    Fl::add_timeout(kBuildPollInterval, onBuildPoll, this);
+}
+
+void ManualImportDialog::doCancel() {
+    if (!is_building_) return;
+    cancel_requested_.store(true);
+    setStatus("Cancelling... (menunggu subprocess berhenti)", FL_DARK_RED);
+    std::fprintf(stderr,
+        "[frans][manual_import_dialog] Cancel diminta user\n");
+    std::fflush(stderr);
 }
 
 void ManualImportDialog::doClose() {
+    if (is_building_) {
+        cancel_requested_.store(true);
+        // Jangan tunggu di UI thread — biarkan destructor yang join.
+    }
     if (win_) win_->hide();
+}
+
+void ManualImportDialog::onBuildPoll(void* data) {
+    auto* self = static_cast<ManualImportDialog*>(data);
+    if (!self) return;
+
+    if (!self->build_finished_.load()) {
+        // Masih jalan — reschedule. UI tetap responsif.
+        Fl::repeat_timeout(kBuildPollInterval, onBuildPoll, self);
+        return;
+    }
+
+    // Worker selesai. Join (non-blocking, sudah selesai).
+    if (self->build_thread_.joinable()) self->build_thread_.join();
+
+    self->is_building_ = false;
+    self->cancel_requested_.store(false);
+
+    self->renderBuildReport(self->pending_report_);
+
+    const bool was_cancelled =
+        self->pending_report_.build.error_message.find("Dibatalkan")
+            != std::string::npos
+        || self->pending_report_.test.error_message.find("Dibatalkan")
+            != std::string::npos
+        || self->pending_report_.run.error_message.find("Dibatalkan")
+            != std::string::npos;
+
+    char buf[320];
+    if (was_cancelled) {
+        std::snprintf(buf, sizeof(buf),
+            "CANCELLED oleh user — %s @ %s",
+            self->pending_report_.build_system.c_str(),
+            self->pending_report_.project_root.c_str());
+        self->setStatus(buf, FL_DARK_RED);
+    } else if (self->pending_report_.overall_success) {
+        std::snprintf(buf, sizeof(buf), "SUCCESS — %s @ %s  (%s)",
+            self->pending_report_.build_system.c_str(),
+            self->pending_report_.project_root.c_str(),
+            self->pending_report_.test_runner.empty()
+                ? "no test runner" : self->pending_report_.test_runner.c_str());
+        self->setStatus(buf, FL_DARK_GREEN);
+    } else {
+        std::snprintf(buf, sizeof(buf),
+            "FAILED pada phase %s — %s @ %s",
+            frans::application::buildPhaseName(
+                self->pending_report_.failed_phase),
+            self->pending_report_.build_system.c_str(),
+            self->pending_report_.project_root.c_str());
+        self->setStatus(buf, FL_RED);
+    }
+
+    self->updateBuildButtonState();
 }
 
 void ManualImportDialog::refreshPreviewBrowser(const ImportResult& r) {
@@ -677,21 +769,53 @@ void ManualImportDialog::setButtonsEnabled(bool parsing_enabled,
 }
 
 void ManualImportDialog::updateBuildButtonState() {
-    if (!build_btn_) return;
-    const bool can_build = !files_written_.empty() && !is_building_;
-    if (is_building_) {
-        build_btn_->label("Building...");
-        build_btn_->deactivate();
-    } else {
-        build_btn_->label("Build / Test / Run");
-        if (can_build) build_btn_->activate();
-        else           build_btn_->deactivate();
+    if (build_btn_) {
+        if (is_building_) {
+            build_btn_->label("Building...");
+            build_btn_->deactivate();
+        } else {
+            build_btn_->label("Build / Test / Run");
+            if (!files_written_.empty()) build_btn_->activate();
+            else                         build_btn_->deactivate();
+        }
+        build_btn_->redraw();
     }
-    build_btn_->redraw();
+
+    if (cancel_btn_) {
+        if (is_building_) cancel_btn_->activate();
+        else              cancel_btn_->deactivate();
+        cancel_btn_->redraw();
+    }
+
+    // Parse & Browse tidak boleh diubah saat build (mencegah
+    // race dengan fs_ / files_written_).
+    if (parse_btn_) {
+        if (is_building_) parse_btn_->deactivate();
+        else              parse_btn_->activate();
+    }
+    if (browse_btn_) {
+        if (is_building_) browse_btn_->deactivate();
+        else              browse_btn_->activate();
+    }
+    if (root_input_) {
+        if (is_building_) root_input_->deactivate();
+        else              root_input_->activate();
+    }
+    if (write_btn_) {
+        if (is_building_) write_btn_->deactivate();
+    }
 }
 
 void ManualImportDialog::resetBuildState(const char* reason) {
-    if (files_written_.empty() && !is_building_) return;
+    if (is_building_) {
+        std::fprintf(stderr,
+            "[frans][manual_import_dialog] resetBuildState diabaikan "
+            "(build sedang jalan): %s\n", reason ? reason : "(no reason)");
+        std::fflush(stderr);
+        return;
+    }
+    if (files_written_.empty()) return;
+
     std::fprintf(stderr,
         "[frans][manual_import_dialog] resetBuildState: %s (files_written_=%zu)\n",
         reason ? reason : "(no reason)", files_written_.size());
@@ -699,8 +823,7 @@ void ManualImportDialog::resetBuildState(const char* reason) {
 
     files_written_.clear();
     last_commit_root_.clear();
-    last_build_report_ = BuildReport{};
-    is_building_ = false;
+    pending_report_ = BuildReport{};
 
     if (build_buf_) build_buf_->text("");
     updateBuildButtonState();
@@ -717,6 +840,9 @@ void ManualImportDialog::cbWrite(Fl_Widget*, void* data) {
 }
 void ManualImportDialog::cbBuild(Fl_Widget*, void* data) {
     static_cast<ManualImportDialog*>(data)->doBuild();
+}
+void ManualImportDialog::cbCancel(Fl_Widget*, void* data) {
+    static_cast<ManualImportDialog*>(data)->doCancel();
 }
 void ManualImportDialog::cbClose(Fl_Widget*, void* data) {
     static_cast<ManualImportDialog*>(data)->doClose();

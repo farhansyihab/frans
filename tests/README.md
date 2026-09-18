@@ -30,6 +30,10 @@ Manual Import di aplikasi utama. Untuk print isi scenario (paste-ready):
     ./build/bin/frans_scenarios --dump ai-browser-realistic
     ./build/bin/frans_scenarios --dump path-escape
     ./build/bin/frans_scenarios --dump danger-python
+    ./build/bin/frans_scenarios --dump cancel-sleep
+    ./build/bin/frans_scenarios --dump npm-basic
+    ./build/bin/frans_scenarios --dump npm-typescript
+    ./build/bin/frans_scenarios --dump standalone-js
 
 Lalu copy output-nya ke paste area di dialog Manual Import.
 
@@ -39,73 +43,71 @@ Lihat:
 
     ./build/bin/frans_scenarios --list
 
-### 01 python-standalone (#16)
+### 01 python-standalone (§9.2 #16)
 
 Input: skrip Python `hello.py`, tanpa marker build system apapun.
 
 Ekspektasi:
-- Parser: 1 file, no error.
-- Danger: Safe.
+- Parser: 1 file, no error. Danger: Safe.
 - Setelah commit → klik Build:
-  - Build system terdeteksi: `Standalone`.
-  - Language: `Python`.
+  - Build system: `Standalone`. Language: `Python`.
   - Build phase: skipped (tidak ada kompilasi).
   - Run phase: `python3 hello.py`.
+  - Build output menampilkan `stdout: Halo, Dunia!`
 
-### 02 cmake-multifile (regression)
+### 02 cmake-multifile (regression §9.1 #12)
 
 Input: `CMakeLists.txt` + `src/main.cpp` (multi-file, ada `enable_testing()`).
 
 Ekspektasi:
-- Parser: 2 file, no error.
-- Danger: Safe untuk keduanya.
-- Setelah commit → klik Build:
-  - Build system: `CMake`.
-  - Test runner: `CTest`.
-  - Build → Test sukses.
+- Parser: 2 file, no error. Danger: Safe.
+- Build system: `CMake`. Test runner: `CTest`.
+- Build → Test sukses.
 
-### 03 path-escape (#18)
+### 03 path-escape (§9.2 #18)
 
 Input: `../evil.py` (escape sandbox).
 
 Ekspektasi:
 - Parser: 1 file, no error (parser tidak tahu soal sandbox).
-- **ManualImporter::preview**: file muncul dengan status **BLOCKED**.
+- ManualImporter::preview: file **BLOCKED**.
 - Tidak ditulis ke disk.
-- Cek otomatis: `sandbox-path-safety` di `frans_scenarios` menguji
-  langsung `SandboxedFileSystem::isPathSafe("../evil.py") == false`.
+- Cek otomatis: `sandbox-path-safety`.
 
-### 04 danger-python (#19)
+### 04 danger-python (§9.2 #19)
 
 Input: `cleanup.py` dengan `os.system(...)` + `shutil.rmtree(...)`.
 
 Ekspektasi:
-- Parser: 1 file, no error.
-- Danger: **NeedsConfirm** (status preview: `[!] CONFIRM`).
-- File tetap ditulis (user-mediated), tapi saat Build muncul dialog
-  konfirmasi (kalau command-nya dianggap berbahaya).
+- Danger: **NeedsConfirm** (`[!] CONFIRM`).
+- File tetap ditulis (user-mediated).
+- Saat dijalankan, stderr berisi traceback, related_files menunjuk
+  frame user (`cleanup.py:9`), bukan stdlib.
 
-### 05 ai-browser-realistic (#17)
+### 05 ai-browser-realistic (§9.2 #17)
 
 Input: output multi-file realistis dengan prose sebelum & sesudah
 blok kode (seperti output DeepSeek/Gemini).
 
 Ekspektasi:
-- Parser tetap menemukan 2 file (`utils.py`, `app.py`).
-- Prose di luar blok `File: ...` diabaikan.
-- Danger: Safe untuk keduanya.
+- Parser: 2 file (`utils.py`, `app.py`). Prose diabaikan.
+- Danger: Safe.
 
-### sandbox-path-safety (#18, terpisah)
+### 06 cancel-sleep (§9.3 #23)
 
-Cek langsung `SandboxedFileSystem::isPathSafe()`:
-- Input aman (`hello.py`, `src/main.cpp`, `a/b/c/d.py`) → true.
-- Input escape (`../evil.py`, `../../etc/passwd`, `/etc/passwd`,
-  `src/../../evil.py`) → false.
+Input: script Python `sleeper.py` yang `time.sleep(60)`.
 
-## Catatan
+**Test manual via GUI:**
 
-Test framework minimal — tidak pakai GoogleTest/Catch2 (sesuai
-keputusan §11 Blueprint: personal use, hindari dependency ekstra).
+1. `mkdir -p /tmp/frans_cancel && rm -rf /tmp/frans_cancel/*`
+2. `./build/bin/frans`
+3. Buka Manual Import Dialog. Project root: `/tmp/frans_cancel`.
+4. Paste `frans_scenarios --dump cancel-sleep`.
+5. Klik **[Parse & Preview]** → `[+] NEW sleeper.py`.
+6. Klik **[Write to Disk]**.
+7. Klik **[Build / Test / Run]**.
+8. **Dalam 2 detik**, klik **[Cancel]**.
 
-Untuk regression test yang lebih luas (unit test C++), lihat
-Blueprint §9.4 #26 (`tests/*.cpp` + `cmake/Tests.cmake`).
+Ekspektasi:
+- Status bar: `Cancelling...` lalu `CANCELLED oleh user — Standalone @ ...`.
+- Build output area `[RUN]`:

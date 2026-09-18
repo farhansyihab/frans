@@ -236,11 +236,26 @@ ProjectInfo ProjectDetector::detect(
         std::string marker, lang;
         if (probeDir(info.project_root, kind, marker, lang)) {
             info.kind             = kind;
-            info.primary_language = lang;
+            info.primary_language = lang;   // hint dari marker
             info.markers_found.push_back(marker);
         } else {
             info.kind = BuildSystemKind::Standalone;
-            info.primary_language = detectPrimaryLanguage(files_written);
+            // fallback di bawah (detectPrimaryLanguage)
+        }
+
+        // Override language dari marker dengan deteksi aktual dari
+        // file yang di-import, KALAU ada file yang bisa dideteksi.
+        //
+        // Contoh kasus: project npm dengan tsconfig.json + src/*.ts.
+        // Marker package.json hardcode language="JavaScript", tapi
+        // file aktual jelas TypeScript. Override -> "TypeScript".
+        //
+        // Marker language tetap dipakai sebagai fallback kalau
+        // detectPrimaryLanguage() return "Unknown" (mis. hanya ada
+        // file .json / .txt / config).
+        const std::string detected = detectPrimaryLanguage(files_written);
+        if (detected != "Unknown") {
+            info.primary_language = detected;
         }
     }
 

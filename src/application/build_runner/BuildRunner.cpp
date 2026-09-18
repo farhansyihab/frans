@@ -1,6 +1,3 @@
-// Ganti seluruh isi BuildRunner.cpp dengan ini. Perubahan ada di bagian
-// "Inisialisasi label phase" — komentar jelas menandai.
-
 #include "application/build_runner/BuildRunner.h"
 
 #include "application/build_runner/BuildSystems/CMakeBuildSystem.h"
@@ -80,7 +77,8 @@ PhaseResult BuildRunner::runPhase(
     int timeout_sec,
     frans::domain::IFileSystemPort& /*fs*/,
     const ProjectInfo& info,
-    ConfirmCallback& confirm_cb)
+    ConfirmCallback& confirm_cb,
+    std::atomic<bool>* cancel_flag)
 {
     PhaseResult result;
     result.phase = phase;
@@ -97,6 +95,19 @@ PhaseResult BuildRunner::runPhase(
     const auto t0 = std::chrono::steady_clock::now();
 
     for (const auto& pc : commands) {
+        // Cek cancel sebelum command baru dimulai. Kalau user klik
+        // Cancel, jangan lanjut ke command berikutnya.
+        if (cancel_flag && cancel_flag->load()) {
+            result.success = false;
+            result.error_message = "Dibatalkan user sebelum command "
+                                 + pc.label;
+            std::fprintf(stderr,
+                "%s [%s] CANCELLED sebelum: %s\n",
+                kLogPrefix, buildPhaseName(phase), pc.label.c_str());
+            std::fflush(stderr);
+            break;
+        }
+
         CommandResult cr;
         cr.label   = pc.label;
         cr.command = formatArgv(pc.argv);
@@ -147,7 +158,7 @@ PhaseResult BuildRunner::runPhase(
         const auto cmd_t0 = std::chrono::steady_clock::now();
 
         const auto proc = frans::infrastructure::runCommand(
-            pc.argv, eff_timeout, "", cwd, nullptr);
+            pc.argv, eff_timeout, "", cwd, cancel_flag);
 
         const auto cmd_t1 = std::chrono::steady_clock::now();
         cr.duration_sec = std::chrono::duration<double>(cmd_t1 - cmd_t0).count();
@@ -162,6 +173,14 @@ PhaseResult BuildRunner::runPhase(
                         ? std::string("...(truncated)...\n")
                           + proc.stderr_text.substr(proc.stderr_text.size() - 4096)
                         : proc.stderr_text;
+
+        if (proc.cancelled_by_user) {
+            cr.success = false;
+            result.success = false;
+            result.error_message = "Dibatalkan user pada " + pc.label;
+            result.commands.push_back(std::move(cr));
+            break;
+        }
 
         if (proc.timed_out) {
             cr.success = false;
@@ -187,8 +206,19 @@ PhaseResult BuildRunner::runPhase(
     result.duration_sec = std::chrono::duration<double>(t1 - t0).count();
 
     if (!result.success) {
-        auto sys = makeBuildSystem(info.kind);
-        if (sys) sys->parseOutput(result, info);
+        // Skip parseOutput kalau phase gagal karena Cancel — subprocess
+        // di-SIGKILL, jadi tidak ada error compiler/python yang valid
+        // untuk di-parse. Kalau tidak di-skip, fallback parser akan
+        // menimpa error_message dengan baris terakhir stdout (mis.
+        // "Mulai tidur 60 detik..."), yang menyesatkan.
+        const bool was_cancelled = !result.commands.empty()
+                                && result.commands.back().cancelled;
+
+        if (!was_cancelled) {
+            auto sys = makeBuildSystem(info.kind);
+            if (sys) sys->parseOutput(result, info);
+        }
+
         if (result.error_message.empty()) {
             result.error_message = "Phase " + std::string(buildPhaseName(phase))
                                  + " gagal (exit code != 0).";
@@ -205,7 +235,8 @@ BuildReport BuildRunner::runBuild(
     int build_timeout_sec,
     int test_timeout_sec,
     int run_timeout_sec,
-    ConfirmCallback confirm_cb)
+    ConfirmCallback confirm_cb,
+    std::atomic<bool>* cancel_flag)
 {
     BuildReport report;
     report.sandbox_root = sandbox_root;
@@ -262,7 +293,7 @@ BuildReport BuildRunner::runBuild(
     const auto build_cmds = system->buildCommands(info, files_written, fs);
     report.build = runPhase(
         BuildPhase::Build, build_cmds, info.project_root,
-        build_timeout_sec, fs, info, confirm_cb);
+        build_timeout_sec, fs, info, confirm_cb, cancel_flag);
 
     if (!report.build.success) {
         report.overall_success = false;
@@ -274,7 +305,7 @@ BuildReport BuildRunner::runBuild(
         const auto test_cmds = system->testCommands(info, fs);
         report.test = runPhase(
             BuildPhase::Test, test_cmds, info.project_root,
-            test_timeout_sec, fs, info, confirm_cb);
+            test_timeout_sec, fs, info, confirm_cb, cancel_flag);
 
         if (!report.test.success && !report.test.skipped) {
             report.overall_success = false;
@@ -291,7 +322,7 @@ BuildReport BuildRunner::runBuild(
         const auto run_cmds = system->runCommands(info, files_written);
         report.run = runPhase(
             BuildPhase::Run, run_cmds, info.project_root,
-            run_timeout_sec, fs, info, confirm_cb);
+            run_timeout_sec, fs, info, confirm_cb, cancel_flag);
 
         if (!report.run.success && !report.run.skipped) {
             report.overall_success = false;

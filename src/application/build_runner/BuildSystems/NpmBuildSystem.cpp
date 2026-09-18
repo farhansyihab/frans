@@ -2,6 +2,7 @@
 
 #include <regex>
 #include <string>
+#include <vector>
 
 namespace frans::application {
 
@@ -11,27 +12,65 @@ int parseIntSafe(const std::string& s, int def = 0) {
 }
 } // namespace
 
+std::string NpmBuildSystem::relProjectToSandbox(const ProjectInfo& info) {
+    // Return path relatif project_root terhadap sandbox_root.
+    //   ""      -> project_root == sandbox_root
+    //   "sub"   -> project_root = sandbox_root/sub
+    //   {}      -> di luar sandbox (tidak valid untuk akses fs)
+    if (info.sandbox_root.empty()) return {};
+    if (info.project_root == info.sandbox_root) return {};
+
+    std::string prefix = info.sandbox_root;
+    if (prefix.back() != '/') prefix += '/';
+
+    if (info.project_root.size() <= prefix.size()) return {};
+    if (info.project_root.rfind(prefix, 0) != 0) return {};
+
+    return info.project_root.substr(prefix.size());
+}
+
+bool NpmBuildSystem::packageJsonHasField(const std::string& json,
+                                         const std::string& field) {
+    const std::string needle = "\"" + field + "\"";
+    return json.find(needle) != std::string::npos;
+}
+
 std::vector<PhaseCommand> NpmBuildSystem::buildCommands(
     const ProjectInfo& info, const std::vector<GeneratedFile>&,
     frans::domain::IFileSystemPort& fs) const
 {
-    std::string txt = fs.readFile("package.json");
+    const std::string rel = relProjectToSandbox(info);
+    const bool at_root    = rel.empty();
 
-    if (txt.empty() && info.project_root != info.sandbox_root
-        && !info.sandbox_root.empty())
-    {
-        std::string prefix = info.sandbox_root;
-        if (prefix.back() != '/') prefix += '/';
-        if (info.project_root.size() > prefix.size()
-            && info.project_root.rfind(prefix, 0) == 0)
-        {
-            const std::string sub = info.project_root.substr(prefix.size());
-            txt = fs.readFile(sub + "/package.json");
-        }
+    const std::string pkg_path = at_root ? "package.json"
+                                         : (rel + "/package.json");
+    const std::string nm_path  = at_root ? "node_modules"
+                                         : (rel + "/node_modules");
+
+    const std::string txt = fs.readFile(pkg_path);
+    if (txt.empty()) return {};
+
+    std::vector<PhaseCommand> out;
+
+    // Kalau node_modules/ belum ada, jalankan `npm install` dulu.
+    // Ini penting untuk TypeScript (tsc dari devDependencies) dan
+    // untuk package yang butuh dependency runtime.
+    //
+    // cwd = project_root saat dijalankan (dari BuildRunner::runPhase),
+    // jadi cukup "npm install" tanpa argumen path.
+    if (!fs.exists(nm_path)) {
+        out.push_back({
+            "npm-install",
+            {"npm", "install", "--no-audit", "--no-fund"}
+        });
     }
 
-    if (txt.find("\"build\"") == std::string::npos) return {};
-    return {{ "npm-build", {"npm", "run", "build"} }};
+    // Baru jalankan `npm run build` kalau script "build" ada.
+    if (packageJsonHasField(txt, "build")) {
+        out.push_back({ "npm-build", {"npm", "run", "build"} });
+    }
+
+    return out;
 }
 
 std::vector<PhaseCommand> NpmBuildSystem::testCommands(
@@ -52,8 +91,12 @@ void NpmBuildSystem::parseOutput(
 {
     if (result.success) return;
 
+    // TypeScript: path(line,col): error TSxxxx: message
     static const std::regex reTs(
         R"re(([^(]+)\((\d+),(\d+)\):\s+(error|warning)\s+TS\d+:\s+([^\n]+))re");
+
+    // npm ERR! untuk error non-TS (mis. install failure).
+    static const std::regex reNpmErr(R"re(npm ERR!\s+([^\n]+))re");
 
     for (const auto& cmd : result.commands) {
         const std::string& src = !cmd.stdout_tail.empty()
@@ -71,6 +114,14 @@ void NpmBuildSystem::parseOutput(
             rf.note = m[5].str();
             result.related_files.push_back(std::move(rf));
             result.error_message = m[5].str();
+            return;
+        }
+
+        // Kalau tidak ada TS error, coba npm ERR! sebagai fallback
+        // (biasanya dari npm install yang gagal).
+        std::smatch m;
+        if (std::regex_search(src, m, reNpmErr)) {
+            result.error_message = "npm: " + m[1].str();
             return;
         }
     }

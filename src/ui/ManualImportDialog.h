@@ -4,9 +4,11 @@
 #include "application/import/MultiFileParser.h"
 #include "domain/import/ImportResult.h"
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 class Fl_Window;
@@ -33,6 +35,16 @@ namespace frans::ui {
 // Dialog Manual Import + Build/Debug.
 //
 // Standalone — tidak butuh AppContext.
+//
+// Threading model:
+//   - Semua UI (Fl_*) hanya diakses dari UI thread.
+//   - Build dijalankan di worker thread (build_thread_) supaya UI
+//     tetap responsif dan Cancel button bisa diklik.
+//   - Worker menulis hasil ke pending_report_ (read-only bagi UI
+//     sampai build_finished_ == true).
+//   - UI polling via Fl::add_timeout(0.1s) sampai build_finished_.
+//   - Cancel: set cancel_requested_ = true; worker membaca flag ini
+//     lewat ProcessExecutor::runCommand(cancel_flag).
 class ManualImportDialog {
 public:
     static bool show(const std::string& initial_root);
@@ -51,6 +63,7 @@ private:
     void doParse();
     void doWrite();
     void doBuild();
+    void doCancel();
     void doClose();
 
     void refreshPreviewBrowser(const frans::domain::ImportResult& r);
@@ -64,7 +77,10 @@ private:
     static void cbParse(Fl_Widget*, void*);
     static void cbWrite(Fl_Widget*, void*);
     static void cbBuild(Fl_Widget*, void*);
+    static void cbCancel(Fl_Widget*, void*);
     static void cbClose(Fl_Widget*, void*);
+
+    static void onBuildPoll(void* data);
 
     static void onPasteModified(int pos, int nInserted, int nDeleted,
                                  int nRestyled, const char* deletedText,
@@ -81,6 +97,7 @@ private:
     Fl_Button*        write_btn_       = nullptr;
 
     Fl_Button*        build_btn_       = nullptr;
+    Fl_Button*        cancel_btn_      = nullptr;
     Fl_Box*           build_label_     = nullptr;
     Fl_Text_Display*  build_output_    = nullptr;
     Fl_Text_Buffer*   build_buf_       = nullptr;
@@ -92,13 +109,20 @@ private:
     std::unique_ptr<frans::application::BuildRunner>            build_runner_;
 
     frans::domain::ImportResult      last_preview_;
-    frans::application::BuildReport  last_build_report_;
+
+    // Hasil build dari worker. Hanya valid setelah build_finished_ == true.
+    frans::application::BuildReport  pending_report_;
 
     std::map<std::string, frans::domain::GeneratedFile> files_written_;
     std::string last_commit_root_;
 
+    // State worker thread.
+    std::thread         build_thread_;
+    std::atomic<bool>   build_finished_{false};
+    std::atomic<bool>   cancel_requested_{false};
+    bool                is_building_    = false;
+
     bool        wrote_anything_ = false;
-    bool        is_building_    = false;
     std::string current_root_;
 };
 

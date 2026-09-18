@@ -8,14 +8,21 @@
 //   frans_scenarios --list       -> daftar nama + deskripsi
 //   frans_scenarios --dump NAME  -> print isi scenario (paste ke GUI)
 //
-// Scenario yang di-cover (sesuai Blueprint §9.2 Prioritas Tinggi):
-//   01 python-standalone        -> test #16
-//   02 cmake-multifile          -> regression
-//   03 path-escape              -> test #18 (parser)
-//   04 danger-python            -> test #19
-//   05 ai-browser-realistic     -> test #17
-//   sandbox-path-safety         -> test #18 (sandbox, terpisah)
-//   traceback-frame-picking     -> regression (anomali 1)
+// Scenario yang di-cover (sesuai Blueprint §9.2 + §9.3):
+//   §9.2:
+//     01 python-standalone        -> #16
+//     02 cmake-multifile          -> regression
+//     03 path-escape              -> #18 (parser)
+//     04 danger-python            -> #19
+//     05 ai-browser-realistic     -> #17
+//     06 cancel-sleep             -> #23 (manual via GUI)
+//   §9.3:
+//     07 npm-basic                -> #22
+//     08 npm-typescript           -> #22
+//     09 standalone-js            -> #22
+//   plus:
+//     sandbox-path-safety         -> #18 (sandbox)
+//     traceback-frame-picking     -> regression (anomali 1)
 
 #include "application/import/MultiFileParser.h"
 #include "application/safety/DangerCheckHandler.h"
@@ -226,6 +233,139 @@ Semoga membantu! Kalau ada error, kabari saya.
 )RAW";
         s.file_expects.push_back({"utils.py", DangerExpect::Safe});
         s.file_expects.push_back({"app.py",   DangerExpect::Safe});
+        v.push_back(std::move(s));
+    }
+
+    // ---- 06: Cancel test (§9.3 #23) — manual via GUI ----
+    {
+        Scenario s;
+        s.name = "cancel-sleep";
+        s.description = "Script Python sleep 60 detik. Untuk test Cancel "
+                        "button: paste, Write, Build, klik Cancel dalam "
+                        "2 detik, verify status CANCELLED.";
+        s.expected_file_count = 1;
+        s.raw_input = R"RAW(File: sleeper.py
+###F###python
+import time
+
+def main():
+    print("Mulai tidur 60 detik...", flush=True)
+    time.sleep(60)
+    print("Selesai tidur", flush=True)
+
+if __name__ == "__main__":
+    main()
+###F###
+)RAW";
+        s.file_expects.push_back({"sleeper.py", DangerExpect::Safe});
+        v.push_back(std::move(s));
+    }
+
+    // ---- 07: npm basic (§9.3 #22) ----
+    {
+        Scenario s;
+        s.name = "npm-basic";
+        s.description = "Project npm sederhana: package.json + src/index.js. "
+                        "Uji: npm install -> npm run build -> npm test.";
+        s.expected_file_count = 2;
+        s.raw_input = R"RAW(File: package.json
+###F###json
+{
+  "name": "demo-npm-basic",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node --check src/index.js",
+    "test": "node --check src/index.js"
+  }
+}
+###F###
+
+File: src/index.js
+###F###javascript
+function greet(name) {
+  return "Halo, " + name + "!";
+}
+
+console.log(greet("npm"));
+###F###
+)RAW";
+        s.file_expects.push_back({"package.json",   DangerExpect::Safe});
+        s.file_expects.push_back({"src/index.js",   DangerExpect::Safe});
+        v.push_back(std::move(s));
+    }
+
+    // ---- 08: npm TypeScript (§9.3 #22) ----
+    {
+        Scenario s;
+        s.name = "npm-typescript";
+        s.description = "Project npm dengan TypeScript. Uji: npm install "
+                        "(tarik tsc) -> tsc --noEmit via npm run build.";
+        s.expected_file_count = 3;
+        s.raw_input = R"RAW(File: package.json
+###F###json
+{
+  "name": "demo-npm-typescript",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}
+###F###
+
+File: tsconfig.json
+###F###json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"]
+}
+###F###
+
+File: src/index.ts
+###F###typescript
+function greet(name: string): string {
+  return "Halo, " + name + "!";
+}
+
+const msg: string = greet("TypeScript");
+console.log(msg);
+###F###
+)RAW";
+        s.file_expects.push_back({"package.json",  DangerExpect::Safe});
+        s.file_expects.push_back({"tsconfig.json", DangerExpect::Safe});
+        s.file_expects.push_back({"src/index.ts",  DangerExpect::Safe});
+        v.push_back(std::move(s));
+    }
+
+    // ---- 09: Standalone JavaScript (§9.3 #22) ----
+    {
+        Scenario s;
+        s.name = "standalone-js";
+        s.description = "JS tanpa package.json. Uji: node --check "
+                        "(build) + node hello.js (run).";
+        s.expected_file_count = 1;
+        s.raw_input = R"RAW(File: hello.js
+###F###javascript
+function greet(name) {
+  return "Halo, " + name + "!";
+}
+
+console.log(greet("Dunia"));
+###F###
+)RAW";
+        s.file_expects.push_back({"hello.js", DangerExpect::Safe});
         v.push_back(std::move(s));
     }
 
@@ -444,8 +584,6 @@ bool runTracebackPickingTest() {
         }
     }
 
-    // error_message seharusnya tetap baris terakhir (exception type),
-    // bukan frame stdlib.
     if (pr.error_message.find("FileNotFoundError") == std::string::npos) {
         std::printf("  [FAIL] error_message tidak mengandung "
                     "'FileNotFoundError': '%s'\n",
@@ -505,11 +643,11 @@ int main(int argc, char** argv) {
         else                ++fail;
     }
 
-    if (runSandboxTest())         ++pass;
-    else                          ++fail;
+    if (runSandboxTest())          ++pass;
+    else                            ++fail;
 
     if (runTracebackPickingTest()) ++pass;
-    else                           ++fail;
+    else                            ++fail;
 
     std::printf("\n=== Summary: %d passed, %d failed, %d total ===\n",
                 pass, fail, pass + fail);
