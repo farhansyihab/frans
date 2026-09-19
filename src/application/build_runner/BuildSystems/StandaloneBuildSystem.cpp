@@ -10,6 +10,16 @@ namespace frans::application {
 
 namespace {
 
+// Python executable name:
+//   - Windows: "python" (python3 biasanya tidak ada; kalau ada,
+//     itu stub Microsoft Store yang error 9009)
+//   - POSIX  : "python3" (python bisa jadi Python 2 di beberapa distro)
+#ifdef _WIN32
+constexpr const char* kPythonExe = "python";
+#else
+constexpr const char* kPythonExe = "python3";
+#endif
+
 bool hasSuffix(const std::string& s, const char* suf) {
     const std::size_t n = std::char_traits<char>::length(suf);
     return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
@@ -143,7 +153,7 @@ std::vector<PhaseCommand> StandaloneBuildSystem::testCommands(
     if (info.test_runner != "Pytest") return {};
     if (info.primary_language != "Python") return {};
     return {{ "pytest",
-              {"python3", "-m", "pytest", "-q", "--no-header"} }};
+              {kPythonExe, "-m", "pytest", "-q", "--no-header"} }};
 }
 
 std::vector<PhaseCommand> StandaloneBuildSystem::runCommands(
@@ -152,7 +162,7 @@ std::vector<PhaseCommand> StandaloneBuildSystem::runCommands(
     if (info.primary_language == "Python") {
         const std::string entry = findPythonEntry(files);
         if (entry.empty()) return {};
-        return {{ "run", {"python3", entry} }};
+        return {{ "run", {kPythonExe, entry} }};
     }
     if (info.primary_language == "C++") {
         for (const auto& f : files) {
@@ -216,14 +226,6 @@ void StandaloneBuildSystem::parseOutput(
             }
 
             if (!frames.empty()) {
-                // Prioritas: frame PERTAMA yang path-nya di dalam
-                // project_root. Ini menghindari frame stdlib seperti
-                // /usr/lib/python3.12/shutil.py yang biasanya muncul
-                // di akhir traceback (frame paling dalam).
-                //
-                // Fallback: frame PERTAMA (entry point user). Bukan
-                // frame terakhir — entry point lebih relevan untuk
-                // user yang debugging.
                 std::size_t chosen = 0;
                 for (std::size_t i = 0; i < frames.size(); ++i) {
                     if (isInsideProject(frames[i].first,

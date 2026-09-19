@@ -1,5 +1,14 @@
-// Implementasi Windows pakai CreateProcess + pipe.
-// Catatan: belum diuji di Windows asli; perlu verifikasi saat test.
+// Implementasi Windows pakai CreateProcess + pipe + Job Object.
+//
+// Job Object dipakai untuk memastikan Cancel & Timeout benar-benar
+// membunuh SELURUH process tree (cmd.exe + child-nya seperti ping.exe,
+// node.exe, npm.cmd, dst). Tanpa ini, TerminateProcess hanya bunuh
+// proses langsung, sementara child tetap jalan sampai selesai.
+//
+// Referensi: 
+//   https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects
+//   JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+
 #include "infrastructure/system/ProcessExecutor.h"
 
 #include <windows.h>
@@ -46,6 +55,14 @@ std::wstring utf8ToWide(const std::string& s) {
     ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
         static_cast<int>(s.size()), out.data(), n);
     return out;
+}
+
+// Kill seluruh job — semua proses yang di-assign ke job ini (termasuk
+// child dari cmd.exe) akan dibunuh.
+void killJob(HANDLE job) {
+    if (job && job != INVALID_HANDLE_VALUE) {
+        ::TerminateJobObject(job, 1);
+    }
 }
 
 } // namespace
@@ -96,6 +113,32 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
     ::SetHandleInformation(err_r, HANDLE_FLAG_INHERIT, 0);
     if (in_w) ::SetHandleInformation(in_w, HANDLE_FLAG_INHERIT, 0);
 
+    // ---- Job Object ----
+    // KILL_ON_JOB_CLOSE: saat handle job ditutup, semua proses di
+    // dalamnya dibunuh. Kita juga panggil TerminateJobObject() eksplisit
+    // untuk timeout/cancel — lebih cepat dari menunggu CloseHandle.
+    HANDLE job = ::CreateJobObjectW(nullptr, nullptr);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jinfo = {};
+        jinfo.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!::SetInformationJobObject(job,
+                JobObjectExtendedLimitInformation,
+                &jinfo, sizeof(jinfo))) {
+            std::fprintf(stderr,
+                "[frans] SetInformationJobObject gagal (err=%lu)\n",
+                ::GetLastError());
+            std::fflush(stderr);
+            ::CloseHandle(job);
+            job = nullptr;
+        }
+    } else {
+        std::fprintf(stderr,
+            "[frans] CreateJobObject gagal (err=%lu) — timeout/cancel "
+            "hanya akan bunuh proses langsung\n", ::GetLastError());
+        std::fflush(stderr);
+    }
+
     STARTUPINFOW si{};
     si.cb         = sizeof(si);
     si.dwFlags    = STARTF_USESTDHANDLES;
@@ -112,9 +155,17 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
     std::wstring cwdw = working_dir.empty() ? std::wstring{}
                                              : utf8ToWide(working_dir);
 
+    // CREATE_SUSPENDED: bikin proses dulu tanpa jalan, assign ke job,
+    // baru ResumeThread. Ini mencegah race di mana child sempat spawn
+    // subprocess sebelum di-assign ke job.
+    //
+    // CREATE_NO_WINDOW: jangan tampilkan console window untuk cmd.exe
+    // saat frans.exe dijalankan sebagai GUI subsystem.
+    const DWORD creation_flags = CREATE_SUSPENDED | CREATE_NO_WINDOW;
+
     const BOOL ok = ::CreateProcessW(
         nullptr, cmd_buf.data(),
-        nullptr, nullptr, TRUE, 0,
+        nullptr, nullptr, TRUE, creation_flags,
         nullptr,
         cwdw.empty() ? nullptr : cwdw.c_str(),
         &si, &pi);
@@ -126,8 +177,28 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
     if (!ok) {
         ::CloseHandle(out_r); ::CloseHandle(err_r);
         if (in_w) ::CloseHandle(in_w);
-        result.stderr_text = "CreateProcess gagal";
+        if (job)  ::CloseHandle(job);
+        result.stderr_text = "CreateProcess gagal (err="
+                           + std::to_string(::GetLastError()) + ")";
         return result;
+    }
+
+    // Assign ke job SEBELUM proses jalan.
+    if (job) {
+        if (!::AssignProcessToJobObject(job, pi.hProcess)) {
+            std::fprintf(stderr,
+                "[frans] AssignProcessToJobObject gagal (err=%lu) — "
+                "timeout/cancel hanya akan bunuh proses langsung\n",
+                ::GetLastError());
+            std::fflush(stderr);
+        }
+    }
+
+    // Resume proses yang tadinya di-suspend.
+    if (::ResumeThread(pi.hThread) == static_cast<DWORD>(-1)) {
+        std::fprintf(stderr,
+            "[frans] ResumeThread gagal (err=%lu)\n", ::GetLastError());
+        std::fflush(stderr);
     }
 
     // Kirim stdin kalau ada.
@@ -136,9 +207,10 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
         ::WriteFile(in_w, stdin_data.data(),
                     static_cast<DWORD>(stdin_data.size()), &written, nullptr);
         ::CloseHandle(in_w);
+        in_w = nullptr;
     }
 
-    // Baca stdout + stderr.
+    // Baca stdout + stderr paralel.
     auto readPipe = [](HANDLE h, std::string& out) {
         char buf[4096];
         DWORD r = 0;
@@ -165,13 +237,16 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
             std::chrono::steady_clock::now() - start).count();
         if (static_cast<DWORD>(elapsed) >= timeout_ms) {
             result.timed_out = true;
-            ::TerminateProcess(pi.hProcess, 1);
+            // Kill seluruh job (cmd + ping child).
+            if (job) killJob(job);
+            else     ::TerminateProcess(pi.hProcess, 1);
             killed = true;
             break;
         }
         if (cancel_flag && cancel_flag->load()) {
             result.cancelled_by_user = true;
-            ::TerminateProcess(pi.hProcess, 1);
+            if (job) killJob(job);
+            else     ::TerminateProcess(pi.hProcess, 1);
             killed = true;
             break;
         }
@@ -192,6 +267,7 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
 
     ::CloseHandle(pi.hProcess);
     ::CloseHandle(pi.hThread);
+    if (job) ::CloseHandle(job);
 
     std::fprintf(stderr, "[frans] runCommand DONE: %s -> exit=%d\n",
         cmd_str.c_str(), result.exit_code);

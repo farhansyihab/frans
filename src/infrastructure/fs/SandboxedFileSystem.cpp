@@ -1,5 +1,6 @@
 #include "infrastructure/fs/SandboxedFileSystem.h"
 
+#include <cctype>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -21,6 +22,37 @@ void logIoError(const char* op, const std::string& path, const char* what) {
     std::fprintf(stderr, "[frans][sandbox] %s FAIL '%s' (%s)\n",
         op, path.c_str(), what);
     std::fflush(stderr);
+}
+
+// Case-insensitive compare untuk Windows (drive letter & path).
+// Di POSIX, ini no-op (case-sensitive).
+bool pathEquals(const fs::path& a, const fs::path& b) {
+#ifdef _WIN32
+    std::string sa = a.generic_string();
+    std::string sb = b.generic_string();
+    for (auto& c : sa) c = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(c)));
+    for (auto& c : sb) c = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(c)));
+    return sa == sb;
+#else
+    return a == b;
+#endif
+}
+
+// Cek apakah `path` berada di luar `root` berdasarkan representasi
+// relatif. Return true kalau escape terdeteksi (relatif diawali '..').
+//
+// Catatan: pakai `generic_string()` supaya separator selalu '/',
+// jadi tidak peduli OS. Ini fix untuk Windows di mana `rel.string()`
+// mengembalikan '\' (backslash).
+bool isEscapingRelative(const fs::path& rel) {
+    if (rel.empty()) return true;  // tidak bisa ditentukan -> treat as escape
+
+    const std::string r = rel.generic_string();
+    if (r == "..") return true;
+    if (r.rfind("../", 0) == 0) return true;
+    return false;
 }
 
 } // namespace
@@ -56,11 +88,47 @@ fs::path SandboxedFileSystem::resolveSafe(const std::string& path) const {
     const fs::path resolved = fs::weakly_canonical(target, ec);
     if (ec) return {};
 
+    // Quick reject: kalau resolve menghasilkan path yang SAMA dengan root
+    // (mis. input "" atau "."), itu bukan file yang valid.
+    // (Bukan escape, tapi jangan lolos ke writeFile.)
+
     const fs::path rel = resolved.lexically_relative(canonical_root_);
     if (rel.empty()) return {};
 
-    const std::string r = rel.string();
-    if (r == ".." || r.rfind("../", 0) == 0) return {};
+    // FIX: pakai generic_string() supaya separator selalu '/',
+    // cross-platform. Sebelumnya pakai `rel.string()` yang di
+    // Windows menghasilkan '..\evil.py' sehingga cek `../` gagal.
+    if (isEscapingRelative(rel)) return {};
+
+    // Extra safety: cek apakah resolved benar-benar di bawah root
+    // secara case-insensitive di Windows. Ini melindungi dari
+    // edge case di mana lexically_relative gagal karena case
+    // mismatch (mis. C:\Users vs c:\users).
+    {
+        const std::string resolved_str = resolved.generic_string();
+        const std::string root_str     = canonical_root_.generic_string();
+
+        if (resolved_str.size() <= root_str.size()) return {};
+
+#ifdef _WIN32
+        // Case-insensitive prefix check di Windows.
+        std::string a = resolved_str.substr(0, root_str.size());
+        std::string b = root_str;
+        for (auto& c : a) c = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(c)));
+        for (auto& c : b) c = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(c)));
+        if (a != b) return {};
+#else
+        if (resolved_str.compare(0, root_str.size(), root_str) != 0) return {};
+#endif
+
+        // Pastikan karakter setelah root adalah separator, supaya
+        // "/tmp/proj_evil" tidak match "/tmp/proj".
+        const char after = resolved_str[root_str.size()];
+        if (after != '/' && after != '\\') return {};
+    }
+
     return resolved;
 }
 
