@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Frans
+GenericName=AI Code Importer
+Comment=Import kode multi-file dari AI chat browser, lalu build / test / run
+Exec="@FRANS_INSTALL_EXEC@"
+Icon=frans
+Terminal=false
+Categories=Development;IDE;
+Keywords=ai;code;import;build;cmake;npm;
+StartupNotify=true
+StartupWMClass=frans
