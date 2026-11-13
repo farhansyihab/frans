@@ -24,6 +24,8 @@
 //     sandbox-path-safety         -> #18 (sandbox)
 //     traceback-frame-picking     -> regression (anomali 1)
 //     prompt-generator            -> #42 (Fase A)
+//     prompt-format-rules         -> verifikasi aturan format output
+
 #include "application/import/MultiFileParser.h"
 #include "application/safety/DangerCheckHandler.h"
 #include "application/build_runner/BuildReport.h"
@@ -31,6 +33,7 @@
 #include "application/build_runner/BuildSystems/StandaloneBuildSystem.h"
 #include "application/prompt/PromptGenerator.h"
 #include "infrastructure/fs/SandboxedFileSystem.h"
+
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -63,6 +66,7 @@ const std::string kFencePlaceholder   = "###F###";
 std::string expandFences(const std::string& raw) {
     std::string result;
     result.reserve(raw.size() + 32);
+
     std::size_t pos = 0;
     while (pos < raw.size()) {
         const std::size_t hit = raw.find(kFencePlaceholder, pos);
@@ -111,10 +115,13 @@ std::vector<Scenario> buildScenarios() {
 ###F###python
 #!/usr/bin/env python3
 """Contoh skrip Python standalone."""
+
 def greet(name: str) -> str:
     return f"Halo, {name}!"
+
 def main() -> None:
     print(greet("Dunia"))
+
 if __name__ == "__main__":
     main()
 ###F###
@@ -139,9 +146,11 @@ add_executable(demo src/main.cpp)
 enable_testing()
 add_test(NAME demo_run COMMAND demo)
 ###F###
+
 File: src/main.cpp
 ###F###cpp
 #include <iostream>
+
 int main() {
     std::cout << "Halo dari demo\n";
     return 0;
@@ -179,9 +188,11 @@ print("coba keluar sandbox")
 ###F###python
 import os
 import shutil
+
 def wipe(path):
     os.system("rm -rf " + path)
     shutil.rmtree(path)
+
 if __name__ == "__main__":
     wipe("/tmp/scratch")
 ###F###
@@ -198,23 +209,30 @@ if __name__ == "__main__":
         s.expected_file_count = 2;
         s.raw_input = R"RAW(Berikut adalah implementasi yang kamu minta.
 Saya buat dua file: satu module utility, satu entry point.
+
 File: utils.py
 ###F###python
 """Utility sederhana."""
+
 def tambah(a, b):
     return a + b
+
 def kurang(a, b):
     return a - b
 ###F###
+
 File: app.py
 ###F###python
 from utils import tambah, kurang
+
 def main():
     print(tambah(2, 3))
     print(kurang(10, 4))
+
 if __name__ == "__main__":
     main()
 ###F###
+
 Semoga membantu! Kalau ada error, kabari saya.
 )RAW";
         s.file_expects.push_back({"utils.py", DangerExpect::Safe});
@@ -233,10 +251,12 @@ Semoga membantu! Kalau ada error, kabari saya.
         s.raw_input = R"RAW(File: sleeper.py
 ###F###python
 import time
+
 def main():
     print("Mulai tidur 60 detik...", flush=True)
     time.sleep(60)
     print("Selesai tidur", flush=True)
+
 if __name__ == "__main__":
     main()
 ###F###
@@ -264,11 +284,13 @@ if __name__ == "__main__":
   }
 }
 ###F###
+
 File: src/index.js
 ###F###javascript
 function greet(name) {
-    return "Halo, " + name + "!";
+  return "Halo, " + name + "!";
 }
+
 console.log(greet("npm"));
 ###F###
 )RAW";
@@ -299,6 +321,7 @@ console.log(greet("npm"));
   }
 }
 ###F###
+
 File: tsconfig.json
 ###F###json
 {
@@ -313,11 +336,13 @@ File: tsconfig.json
   "include": ["src/**/*.ts"]
 }
 ###F###
+
 File: src/index.ts
 ###F###typescript
 function greet(name: string): string {
-    return "Halo, " + name + "!";
+  return "Halo, " + name + "!";
 }
+
 const msg: string = greet("TypeScript");
 console.log(msg);
 ###F###
@@ -338,8 +363,9 @@ console.log(msg);
         s.raw_input = R"RAW(File: hello.js
 ###F###javascript
 function greet(name) {
-    return "Halo, " + name + "!";
+  return "Halo, " + name + "!";
 }
+
 console.log(greet("Dunia"));
 ###F###
 )RAW";
@@ -373,7 +399,7 @@ std::string languageFromPath(const std::string& path) {
     const std::string ext = path.substr(dot + 1);
     if (ext == "py")  return "python";
     if (ext == "cpp" || ext == "cc" || ext == "cxx"
-        || ext == "hpp" || ext == "hxx" || ext == "hh" || ext == "h") return "cpp";
+     || ext == "hpp" || ext == "hxx" || ext == "hh" || ext == "h") return "cpp";
     if (ext == "ts"  || ext == "tsx") return "typescript";
     if (ext == "js" || ext == "jsx" || ext == "mjs" || ext == "cjs") return "javascript";
     if (ext == "vue") return "vue";
@@ -416,10 +442,12 @@ bool runScenario(const Scenario& s) {
         const auto& f = parse.files[i];
         const std::string lang = languageFromPath(f.relative_path);
         const auto dc = danger.checkCode(f.content, lang);
+
         std::printf("    file[%zu] %-24s lang=%-10s danger=%s\n",
                     i, f.relative_path.c_str(),
                     lang.empty() ? "?" : lang.c_str(),
                     dangerName(dc.verdict));
+
         if (i < s.file_expects.size()) {
             const auto& exp = s.file_expects[i];
             if (!exp.relative_path.empty()
@@ -448,12 +476,14 @@ bool runSandboxTest() {
 
     namespace fs = std::filesystem;
     std::error_code ec;
+
     fs::path tmp = fs::temp_directory_path(ec);
     if (ec) {
         std::printf("  [SKIP] temp_directory_path gagal: %s\n",
                     ec.message().c_str());
         return true;
     }
+
     tmp /= "frans_test_sandbox_v8";
     fs::remove_all(tmp, ec);
     fs::create_directories(tmp, ec);
@@ -573,7 +603,6 @@ bool runPromptGeneratorTest() {
                 "dikenal, blok tanpa penutup, tail 8 KB.\n");
 
     int fails = 0;
-
     auto check = [&](const char* name, const std::string& actual,
                      const std::string& expected_substr, bool should_contain) {
         const bool has = actual.find(expected_substr) != std::string::npos;
@@ -746,6 +775,56 @@ bool runPromptGeneratorTest() {
     return fails == 0;
 }
 
+// ---- Test aturan format output (sinkronisasi dengan format user) ----
+bool runPromptFormatRulesTest() {
+    std::printf("\n=== prompt-format-rules ===\n");
+    std::printf("  Verifikasi default template mengandung semua aturan format "
+                "output yang disinkronkan.\n");
+
+    const std::string& d = defaultPromptTemplate();
+    int fails = 0;
+
+    auto check = [&](const char* name, const std::string& needle) {
+        const bool has = d.find(needle) != std::string::npos;
+        if (!has) ++fails;
+        std::printf("  %s %-50s contains '%s'\n",
+                    has ? "[ok]  " : "[FAIL]",
+                    name,
+                    needle.c_str());
+    };
+
+    // Aturan 2: Format multi-file dengan "File: <path>"
+    check("rule-2: File: <path>",          "File: <path>");
+    check("rule-2: fenced code block",     "fenced code block");
+
+    // Aturan 3: Path relatif
+    check("rule-3: Path relatif",          "Path relatif");
+
+    // Aturan 4: Baris "File: " di awal baris
+    check("rule-4: awal baris",            "awal baris");
+    check("rule-4: tidak ada indentasi",   "tidak ada indentasi");
+
+    // Aturan 5: Tutup fenced code block sebelum File: berikutnya
+    check("rule-5: SEBELUM memulai File:", "SEBELUM memulai File:");
+
+    // Aturan 6: Hindari literal triple-backtick
+    check("rule-6: tiga backtick",         "tiga backtick");
+    check("rule-6: merusak parser",        "merusak parser");
+
+    // Aturan 7: Jangan sertakan file tidak berubah
+    check("rule-7: tidak berubah",         "tidak berubah");
+
+    // Aturan 8: Jangan sertakan file binary
+    check("rule-8: file binary",           "file binary");
+
+    // Aturan 9: Full file content, not diff
+    check("rule-9: Full file content",     "Full file content");
+    check("rule-9: bukan patch",           "bukan patch");
+
+    std::printf("  => %s\n", fails == 0 ? "PASS" : "FAIL");
+    return fails == 0;
+}
+
 void listScenarios(const std::vector<Scenario>& scenarios) {
     std::printf("Scenario tersedia:\n");
     for (const auto& s : scenarios) {
@@ -757,6 +836,8 @@ void listScenarios(const std::vector<Scenario>& scenarios) {
                 "traceback-frame-picking");
     std::printf("  %-24s Cek PromptGenerator::renderPrompt (Fase A #42)\n",
                 "prompt-generator");
+    std::printf("  %-24s Verifikasi aturan format output\n",
+                "prompt-format-rules");
 }
 
 void dumpScenario(const Scenario& s) {
@@ -774,6 +855,7 @@ int main(int argc, char** argv) {
         listScenarios(scenarios);
         return 0;
     }
+
     if (argc >= 3 && std::strcmp(argv[1], "--dump") == 0) {
         for (const auto& s : scenarios) {
             if (s.name == argv[2]) {
@@ -792,12 +874,18 @@ int main(int argc, char** argv) {
         if (runScenario(s)) ++pass;
         else                ++fail;
     }
+
     if (runSandboxTest())          ++pass;
     else                            ++fail;
+
     if (runTracebackPickingTest()) ++pass;
     else                            ++fail;
+
     if (runPromptGeneratorTest())  ++pass;
     else                            ++fail;
+
+    if (runPromptFormatRulesTest()) ++pass;
+    else                             ++fail;
 
     std::printf("\n=== Summary: %d passed, %d failed, %d total ===\n",
                 pass, fail, pass + fail);

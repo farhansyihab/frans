@@ -23,6 +23,8 @@ set(FRANS_SOURCES
     # Application -- build_runner
     src/application/build_runner/BuildRunner.cpp
     src/application/build_runner/ProjectDetector.cpp
+    # Fase A #44: ringkasan error untuk SessionState (murni, tanpa FLTK)
+    src/application/build_runner/BuildErrorSummary.cpp
     src/application/build_runner/BuildSystems/CMakeBuildSystem.cpp
     src/application/build_runner/BuildSystems/MakeBuildSystem.cpp
     src/application/build_runner/BuildSystems/MesonBuildSystem.cpp
@@ -48,16 +50,20 @@ else()
 endif()
 
 add_executable(frans ${FRANS_SOURCES})
+
 target_include_directories(frans PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
 target_link_libraries(frans PRIVATE
     FLTK::FLTK
     Threads::Threads
     ${FRANS_PLATFORM_LIBS}
     frans_warnings
 )
+
 if(FRANS_PLATFORM_DEFS)
     target_compile_definitions(frans PRIVATE ${FRANS_PLATFORM_DEFS})
 endif()
+
 if(WIN32)
     set_target_properties(frans PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
