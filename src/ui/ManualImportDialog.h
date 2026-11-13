@@ -1,9 +1,10 @@
+// src/ui/ManualImportDialog.h
 #pragma once
 
 #include "application/build_runner/BuildReport.h"
 #include "application/import/MultiFileParser.h"
 #include "domain/import/ImportResult.h"
-
+#include "ui/SessionState.h"
 #include <atomic>
 #include <map>
 #include <memory>
@@ -45,20 +46,29 @@ namespace frans::ui {
 //   - UI polling via Fl::add_timeout(0.1s) sampai build_finished_.
 //   - Cancel: set cancel_requested_ = true; worker membaca flag ini
 //     lewat ProcessExecutor::runCommand(cancel_flag).
+//
+// SessionState (Fase A #44):
+//   - Pointer opsional ke SessionState (dimiliki MainWindow).
+//   - Setelah build GAGAL, dialog menulis ringkasan error ke
+//     session->last_build_error.
+//   - Setelah build SUKSES, last_build_error dikosongkan.
+//   - Pointer null -> perilaku lama tidak berubah.
 class ManualImportDialog {
 public:
-    static bool show(const std::string& initial_root);
+    // `session` boleh nullptr (backwards compatible).
+    static bool show(const std::string& initial_root,
+                     SessionState* session = nullptr);
 
     ManualImportDialog(const ManualImportDialog&)            = delete;
     ManualImportDialog& operator=(const ManualImportDialog&) = delete;
 
 private:
-    explicit ManualImportDialog(std::string initial_root);
+    explicit ManualImportDialog(std::string initial_root,
+                                SessionState* session = nullptr);
     ~ManualImportDialog();
 
     void build();
     void rebuildImporter();
-
     void doBrowse();
     void doParse();
     void doWrite();
@@ -73,18 +83,20 @@ private:
     void updateBuildButtonState();
     void resetBuildState(const char* reason);
 
+    // Tulis ringkasan error build ke SessionState (Fase A #44).
+    void publishLastErrorToSession();
+    void clearLastErrorInSession();
+
     static void cbBrowse(Fl_Widget*, void*);
     static void cbParse(Fl_Widget*, void*);
     static void cbWrite(Fl_Widget*, void*);
     static void cbBuild(Fl_Widget*, void*);
     static void cbCancel(Fl_Widget*, void*);
     static void cbClose(Fl_Widget*, void*);
-
     static void onBuildPoll(void* data);
-
     static void onPasteModified(int pos, int nInserted, int nDeleted,
-                                 int nRestyled, const char* deletedText,
-                                 void* cbArg);
+                                int nRestyled, const char* deletedText,
+                                void* cbArg);
 
     Fl_Window*        win_             = nullptr;
     Fl_Input*         root_input_      = nullptr;
@@ -95,13 +107,11 @@ private:
     Fl_Browser*       preview_browser_ = nullptr;
     Fl_Box*           status_box_      = nullptr;
     Fl_Button*        write_btn_       = nullptr;
-
     Fl_Button*        build_btn_       = nullptr;
     Fl_Button*        cancel_btn_      = nullptr;
     Fl_Box*           build_label_     = nullptr;
     Fl_Text_Display*  build_output_    = nullptr;
     Fl_Text_Buffer*   build_buf_       = nullptr;
-
     Fl_Button*        close_btn_       = nullptr;
 
     std::unique_ptr<frans::infrastructure::SandboxedFileSystem> fs_;
@@ -109,10 +119,7 @@ private:
     std::unique_ptr<frans::application::BuildRunner>            build_runner_;
 
     frans::domain::ImportResult      last_preview_;
-
-    // Hasil build dari worker. Hanya valid setelah build_finished_ == true.
     frans::application::BuildReport  pending_report_;
-
     std::map<std::string, frans::domain::GeneratedFile> files_written_;
     std::string last_commit_root_;
 
@@ -121,9 +128,11 @@ private:
     std::atomic<bool>   build_finished_{false};
     std::atomic<bool>   cancel_requested_{false};
     bool                is_building_    = false;
+    bool                wrote_anything_ = false;
+    std::string         current_root_;
 
-    bool        wrote_anything_ = false;
-    std::string current_root_;
+    // Fase A #44: pointer ke SessionState (boleh nullptr).
+    SessionState*       session_        = nullptr;
 };
 
 } // namespace frans::ui

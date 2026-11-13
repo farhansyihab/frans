@@ -1,8 +1,8 @@
+// src/ui/MainWindow.h
 #pragma once
 
 #include "config/AppConfig.h"
 #include "ui/SessionState.h"
-
 #include <FL/Fl.H>
 #include <FL/Fl_Window.H>
 #include <FL/fl_ask.H>
@@ -26,10 +26,12 @@ public:
 
 private:
     static void cbOpenImport(Fl_Widget*, void*);
+    static void cbPrompt(Fl_Widget*, void*);
     static void cbQuit(Fl_Widget*, void*);
     static void cbPlaceholder(Fl_Widget*, void*);
 
     void doOpenImport();
+    void doPrompt();
 
     const frans::config::AppConfig& cfg_;
     SessionState                    session_;
