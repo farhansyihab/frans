@@ -1,8 +1,9 @@
 // src/application/ingest/FileCollector.cpp
 //
-// Fase B #46 -- implementasi FileCollector.
+// Fase B #46-47 -- implementasi FileCollector dengan filter lengkap.
 #include "application/ingest/FileCollector.h"
 #include "infrastructure/system/ProcessExecutor.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -12,9 +13,11 @@
 #include <system_error>
 
 namespace frans::application {
+
 namespace fs = std::filesystem;
 
 namespace {
+
 constexpr const char* kLogPrefix = "[frans][file_collector]";
 
 // Direktori yang selalu di-skip saat walker fallback.
@@ -22,7 +25,8 @@ constexpr const char* kLogPrefix = "[frans][file_collector]";
 const std::vector<std::string>& defaultExcludeDirs() {
     static const std::vector<std::string> v = {
         ".git", "build", "node_modules", "__pycache__",
-        ".venv", "venv", "dist", ".idea", ".vscode", "target"
+        ".venv", "venv", "dist", ".idea", ".vscode", "target",
+        ".next", ".nuxt", ".cache", ".pytest_cache", ".mypy_cache"
     };
     return v;
 }
@@ -31,12 +35,21 @@ const std::vector<std::string>& defaultExcludeDirs() {
 // Glob sederhana: hanya '*' dan '?' yang didukung.
 const std::vector<std::string>& secretPatterns() {
     static const std::vector<std::string> v = {
+        // Environment & config
         ".env", ".env.*",
-        "*.pem", "*.key", "*.p12", "*.pfx",
-        "id_rsa", "id_ed25519",
-        "*.keystore",
-        "credentials.json",
-        "secrets.*"
+        "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore",
+        "id_rsa", "id_ed25519", "id_dsa", "id_ecdsa",
+        "*.pub",  // public keys bisa juga sensitif
+        "credentials.json", "service-account*.json",
+        "secrets.*", "*.secret", "*.secrets",
+        // Database
+        "*.sql", "*.dump",  // bisa berisi data sensitif
+        // Cloud & API
+        "aws_credentials", "gcp-*.json", "azure-*.json",
+        "*.crt", "*.csr",
+        // Misc
+        ".htpasswd", ".netrc", "_netrc",
+        "wp-config.php", "configuration.php"
     };
     return v;
 }
@@ -47,6 +60,7 @@ const std::vector<std::string>& secretPatterns() {
 bool matchGlob(const std::string& pattern, const std::string& name) {
     std::size_t pi = 0, ni = 0;
     std::size_t star_p = std::string::npos, star_n = 0;
+    
     while (ni < name.size()) {
         if (pi < pattern.size()
             && (pattern[pi] == '?' || pattern[pi] == name[ni]))
@@ -62,6 +76,7 @@ bool matchGlob(const std::string& pattern, const std::string& name) {
             return false;
         }
     }
+    
     while (pi < pattern.size() && pattern[pi] == '*') ++pi;
     return pi == pattern.size();
 }
@@ -125,12 +140,14 @@ bool isExcludedPathImpl(const std::string& rel_path,
 }
 
 // Deteksi binary: cek NUL byte di 8 KB pertama.
-bool isBinaryContent(const std::string& path) {
+bool isBinaryContentImpl(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
+    
     char buf[8192];
     f.read(buf, sizeof(buf));
     const std::size_t got = static_cast<std::size_t>(f.gcount());
+    
     for (std::size_t i = 0; i < got; ++i) {
         if (buf[i] == '\0') return true;
     }
@@ -143,11 +160,13 @@ std::string resolveOutputDir(const std::string& output_dir,
                              const std::string& project_root)
 {
     if (output_dir.empty()) return {};
+    
     std::error_code ec;
     fs::path p(output_dir);
     if (p.is_relative()) p = fs::path(project_root) / p;
     p = fs::weakly_canonical(p, ec);
     if (ec || p.empty()) return {};
+    
     return p.string();
 }
 
@@ -156,8 +175,10 @@ std::string resolveOutputDir(const std::string& output_dir,
 // "/tmp/proj_evil/x" tidak match "/tmp/proj".
 bool isInsideDir(const std::string& file_abs, const std::string& dir_abs) {
     if (dir_abs.empty() || file_abs.empty()) return false;
+    
     std::string prefix = dir_abs;
     if (prefix.back() != '/') prefix += '/';
+    
     return file_abs.size() > prefix.size()
         && file_abs.compare(0, prefix.size(), prefix) == 0;
 }
@@ -173,8 +194,10 @@ std::vector<std::string> runGitLsFiles(const std::string& root,
         "git", "-C", root, "ls-files", "-z",
         "--cached", "--others", "--exclude-standard"
     };
+    
     auto result = frans::infrastructure::runCommand(
         argv, 30, "", root, cancel);
+    
     if (result.exit_code != 0) {
         std::fprintf(stderr,
             "%s git ls-files failed (exit=%d): %s",
@@ -182,6 +205,7 @@ std::vector<std::string> runGitLsFiles(const std::string& root,
         std::fflush(stderr);
         return out;
     }
+    
     const std::string& s = result.stdout_text;
     std::size_t start = 0;
     while (start < s.size()) {
@@ -192,6 +216,7 @@ std::vector<std::string> runGitLsFiles(const std::string& root,
         }
         start = (nl == std::string::npos) ? s.size() : nl + 1;
     }
+    
     return out;
 }
 
@@ -200,8 +225,10 @@ bool isInsideGitRepo(const std::string& root, std::atomic<bool>* cancel) {
     std::vector<std::string> argv = {
         "git", "-C", root, "rev-parse", "--is-inside-work-tree"
     };
+    
     auto result = frans::infrastructure::runCommand(
         argv, 10, "", root, cancel);
+    
     return result.exit_code == 0;
 }
 
@@ -213,16 +240,17 @@ std::vector<std::string> walkFilesystem(const std::string& root,
                                         std::atomic<bool>* cancel)
 {
     std::vector<std::string> out;
+    
     std::error_code ec;
     fs::path root_p = fs::weakly_canonical(root, ec);
     if (ec || root_p.empty()) return out;
-
+    
     const std::string out_dir_abs = resolveOutputDir(opt.output_dir, root);
-
+    
     auto iter_opts = fs::directory_options::skip_permission_denied;
     fs::recursive_directory_iterator it(root_p, iter_opts, ec);
     if (ec) return out;
-
+    
     const fs::recursive_directory_iterator end_it;
     for (; it != end_it; it.increment(ec)) {
         if (ec) {
@@ -232,16 +260,18 @@ std::vector<std::string> walkFilesystem(const std::string& root,
             ec.clear();
             continue;
         }
+        
         if (cancel && cancel->load()) break;
-
+        
         const auto& entry = *it;
         const std::string base = entry.path().filename().string();
-
+        
         // Skip directory yang masuk exclude list (jangan recurse).
         bool skip_dir = false;
         for (const auto& d : defaultExcludeDirs()) {
             if (base == d) { skip_dir = true; break; }
         }
+        
         if (!skip_dir) {
             for (const auto& ex : opt.extra_excludes) {
                 if (ex.find('*') == std::string::npos
@@ -252,35 +282,39 @@ std::vector<std::string> walkFilesystem(const std::string& root,
                 }
             }
         }
+        
         if (skip_dir && entry.is_directory()) {
             it.disable_recursion_pending();
             continue;
         }
-
+        
         // Skip symlink (file maupun directory).
         if (entry.is_symlink()) {
             if (entry.is_directory()) it.disable_recursion_pending();
             continue;
         }
+        
         if (!entry.is_regular_file()) continue;
-
+        
         // Output dir exclusion.
         if (!out_dir_abs.empty()
             && isInsideDir(entry.path().string(), out_dir_abs))
         {
             continue;
         }
-
+        
         std::error_code ec2;
         const fs::path rel_fs = fs::relative(entry.path(), root_p, ec2);
         if (ec2 || rel_fs.empty()) continue;
+        
         const std::string rel = normalizePath(rel_fs.string());
         if (rel.empty() || rel == ".") continue;
-
+        
         if (isExcludedPathImpl(rel, opt.extra_excludes)) continue;
-
+        
         out.push_back(rel);
     }
+    
     return out;
 }
 
@@ -299,6 +333,10 @@ bool isExcludedPath(const std::string& rel_path,
     return isExcludedPathImpl(rel_path, extra_excludes);
 }
 
+bool isBinaryContent(const std::string& file_path) {
+    return isBinaryContentImpl(file_path);
+}
+
 // ---------------------------------------------------------------------------
 // Entry point.
 // ---------------------------------------------------------------------------
@@ -307,10 +345,12 @@ CollectResult collectFiles(const std::string& project_root,
                            std::atomic<bool>* cancel)
 {
     CollectResult r;
+    
     if (project_root.empty()) {
         r.error = "project_root kosong";
         return r;
     }
+    
     {
         std::error_code ec;
         if (!fs::is_directory(project_root, ec) || ec) {
@@ -318,7 +358,7 @@ CollectResult collectFiles(const std::string& project_root,
             return r;
         }
     }
-
+    
     // ---- Kumpulkan daftar path relatif ----
     std::vector<std::string> paths = runGitLsFiles(project_root, cancel);
     if (!paths.empty()) {
@@ -333,20 +373,22 @@ CollectResult collectFiles(const std::string& project_root,
             r.used_git = true;   // repo git, tapi memang kosong
         }
     }
-
+    
     const std::string out_dir_abs = resolveOutputDir(opt.output_dir,
-                                                     project_root);
-
+                                                      project_root);
+    
     // ---- Filter + klasifikasi tiap file ----
     r.files.reserve(paths.size());
+    
     for (const auto& rel : paths) {
         if (cancel && cancel->load()) {
             r.error = "dibatalkan";
             r.ok = false;
             return r;
         }
+        
         if (rel.empty()) continue;
-
+        
         // Output dir exclusion (berlaku juga untuk jalur git).
         if (!out_dir_abs.empty()) {
             std::error_code ec;
@@ -354,21 +396,21 @@ CollectResult collectFiles(const std::string& project_root,
             abs_p = fs::weakly_canonical(abs_p, ec);
             if (!ec && isInsideDir(abs_p.string(), out_dir_abs)) continue;
         }
-
+        
         CollectedFile cf;
         cf.relative_path = rel;
-
+        
         // Cek fisik: ada, bukan symlink, regular file.
         std::error_code ec;
         fs::path full = fs::path(project_root) / rel;
         if (!fs::exists(full, ec) || ec) continue;
         if (fs::is_symlink(full, ec)) continue;
         if (!fs::is_regular_file(full, ec)) continue;
-
+        
         cf.size_bytes = static_cast<std::size_t>(fs::file_size(full, ec));
         if (ec) cf.size_bytes = 0;
-
-        // Secret check (basename).
+        
+        // Filter 1: Secret check (basename).
         if (opt.exclude_secrets) {
             const std::string base = basenameOf(rel);
             if (isSecretBasenameImpl(base)) {
@@ -378,43 +420,51 @@ CollectResult collectFiles(const std::string& project_root,
                 continue;
             }
         }
-
+        
         // Extra excludes (sudah dicek di walker, tapi untuk jalur git
         // perlu dicek lagi di sini).
         if (isExcludedPathImpl(rel, opt.extra_excludes)) continue;
-
-        // Ukuran.
+        
+        // Filter 2: Ukuran.
         if (cf.size_bytes > opt.max_file_bytes) {
             cf.skipped = true;
             cf.skip_reason = "too_large";
             r.files.push_back(std::move(cf));
             continue;
         }
-
-        // Binary detection.
-        if (isBinaryContent(full.string())) {
+        
+        // Filter 3: Binary detection.
+        if (isBinaryContentImpl(full.string())) {
             cf.is_text = false;
             cf.skipped = true;
             cf.skip_reason = "binary";
             r.files.push_back(std::move(cf));
             continue;
         }
-
+        
         r.files.push_back(std::move(cf));
     }
-
+    
     // Urutkan leksikografis supaya output deterministik.
     std::sort(r.files.begin(), r.files.end(),
         [](const CollectedFile& a, const CollectedFile& b) {
             return a.relative_path < b.relative_path;
         });
-
+    
     r.ok = true;
+    
+    // Log summary
+    std::size_t skipped_count = 0;
+    for (const auto& f : r.files) {
+        if (f.skipped) ++skipped_count;
+    }
+    
     std::fprintf(stderr,
-        "%s collected %zu file(s) from %s (git=%d)",
+        "%s collected %zu file(s) from %s (git=%d, skipped=%zu)\n",
         kLogPrefix, r.files.size(), project_root.c_str(),
-        r.used_git ? 1 : 0);
+        r.used_git ? 1 : 0, skipped_count);
     std::fflush(stderr);
+    
     return r;
 }
 

@@ -1,14 +1,21 @@
 // src/application/ingest/FileCollector.h
 //
-// Fase B #46 -- kumpulkan file repo untuk Ingest & Context Pack.
+// Fase B #46-47 -- kumpulkan file repo untuk Ingest & Context Pack.
 //
 // Jalur utama: `git ls-files -z --cached --others --exclude-standard`
 //   (honor .gitignore penuh, termasuk untracked file).
 // Fallback: std::filesystem walker dengan exclude bawaan kalau bukan
 //   git repo atau git tidak tersedia.
 //
+// Filter (Fase B #47):
+//   1. Secret: file dengan basename yang cocok pola rahasia (.env, *.pem, dll)
+//   2. Binary: file yang mengandung NUL byte di 8 KB pertama
+//   3. Ukuran: file yang melebihi max_file_bytes
+//   4. Self-exclude: file di dalam output_dir (untuk menghindari ingest output Frans)
+//
 // Murni pembacaan disk; tidak menulis apapun.
 #pragma once
+
 #include <atomic>
 #include <cstddef>
 #include <string>
@@ -26,11 +33,11 @@ struct CollectedFile {
     std::size_t size_bytes = 0;
     bool        is_text    = true;   // false = binary / bukan UTF-8
     bool        skipped    = false;
-    std::string skip_reason;
+    std::string skip_reason;         // "secret" | "binary" | "too_large"
 };
 
 struct CollectOptions {
-    std::size_t max_file_bytes = 256 * 1024;   // 256 KB
+    std::size_t max_file_bytes = 256 * 1024;   // 256 KB default
     bool        exclude_secrets = true;
     std::vector<std::string> extra_excludes;   // nama dir / glob basename
     std::string output_dir;                    // di-exclude jika di dalam repo
@@ -64,5 +71,8 @@ bool isSecretBasename(const std::string& basename);
 // path-nya masuk daftar exclude bawaan atau `extra_excludes`?
 bool isExcludedPath(const std::string& rel_path,
                     const std::vector<std::string>& extra_excludes);
+
+// Apakah konten file bersifat binary (mengandung NUL byte)?
+bool isBinaryContent(const std::string& file_path);
 
 } // namespace frans::application
