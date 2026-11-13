@@ -24,8 +24,9 @@ src/application/build_runner/BuildSystems/MesonBuildSystem.cpp
 src/application/build_runner/BuildSystems/NpmBuildSystem.cpp
 src/application/build_runner/BuildSystems/PoetryBuildSystem.cpp
 src/application/build_runner/BuildSystems/StandaloneBuildSystem.cpp
-# Application -- ingest (Fase B #46)
+# Application -- ingest (Fase B #46, #48)
 src/application/ingest/FileCollector.cpp
+src/application/ingest/MarkdownRenderer.cpp
 # Infrastructure
 src/infrastructure/fs/SandboxedFileSystem.cpp
 src/infrastructure/system/DiffEngine.cpp

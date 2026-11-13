@@ -6,7 +6,7 @@ enable_testing()
 # frans_scenarios
 # Runner test scenario untuk Manual Import + Danger Check + Sandbox
 # + error parser (traceback frame picking) + PromptGenerator (#42)
-# + FileCollector (#46).
+# + FileCollector (#46) + MarkdownRenderer (#48).
 #
 #   frans_scenarios                -> jalankan semua scenario
 #   frans_scenarios --list         -> daftar nama scenario
@@ -21,6 +21,8 @@ src/application/build_runner/BuildSystems/StandaloneBuildSystem.cpp
 src/application/prompt/PromptGenerator.cpp
 # Fase B #46: FileCollector + ProcessExecutor (untuk git ls-files fallback)
 src/application/ingest/FileCollector.cpp
+# Fase B #48: MarkdownRenderer (murni, tanpa I/O)
+src/application/ingest/MarkdownRenderer.cpp
 )
 if(WIN32)
 list(APPEND FRANS_SCENARIO_SOURCES
