@@ -16,3 +16,5 @@ config/secrets.json
 .vscode/
 .idea/
 *.swp
+
+third_party/
