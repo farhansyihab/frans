@@ -1,11 +1,27 @@
 {
-  "window": {
-    "width": 0,
-    "height": 0,
-    "margin_px": 24,
-    "title": "Frans"
-  },
+  "window_width": 0,
+  "window_height": 0,
+  "window_margin_px": 24,
+  "window_title": "Frans",
   "build_timeout_sec": 120,
   "test_timeout_sec": 120,
-  "run_timeout_sec": 30
+  "run_timeout_sec": 30,
+
+  "ingest_output_dir": "~/frans-out",
+  "ingest_max_file_kb": 256,
+  "ingest_max_total_mb": 5,
+
+  "prompt_template_path": "config/prompt_template.txt",
+  "selector_prompt_path": "config/gemini_selector_prompt.txt",
+  "context_output_name": "SourceCode.md",
+  "context_max_kb": 300,
+  "context_max_files": 40,
+  "context_always_include": "BluePrint.md",
+
+  "gemini_model": "gemini-2.5-flash",
+  "gemini_endpoint": "https://generativelanguage.googleapis.com/v1beta",
+  "gemini_timeout_sec": 90,
+  "gemini_full_mode_max_tokens": 150000,
+  "gemini_index_head_lines": 40,
+  "gemini_api_key_file": ""
 }

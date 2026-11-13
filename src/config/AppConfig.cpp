@@ -69,12 +69,36 @@ AppConfig AppConfig::loadFromFile(const std::string& path) {
 
         if (value_raw.size() >= 2 && value_raw.front() == '"' && value_raw.back() == '"') {
             const std::string v = value_raw.substr(1, value_raw.size() - 2);
-            if (key == "window_title")   cfg.window_title = v;
+			if (key == "window_title")           cfg.window_title = v;
+			else if (key == "default_project_root") cfg.default_project_root = v;
+			else if (key == "ingest_output_dir")    cfg.ingest_output_dir = v;
+			else if (key == "prompt_template_path") cfg.prompt_template_path = v;
+			else if (key == "selector_prompt_path") cfg.selector_prompt_path = v;
+			else if (key == "context_output_name")  cfg.context_output_name = v;
+			else if (key == "context_always_include") cfg.context_always_include = v;
+			else if (key == "gemini_model")         cfg.gemini_model = v;
+			else if (key == "gemini_endpoint")      cfg.gemini_endpoint = v;
+			else if (key == "gemini_api_key_file")  cfg.gemini_api_key_file = v;            
             if (key == "default_project_root") cfg.default_project_root = v;
         } else {
             int iv = 0;
             if (parseInt(value_raw, iv)) {
-                if (key == "width")              cfg.window_width = iv;
+				if (key == "width")                       cfg.window_width = iv;
+				else if (key == "height")                 cfg.window_height = iv;
+				else if (key == "margin_px")              cfg.window_margin_px = iv;
+				else if (key == "window_width")           cfg.window_width = iv;
+				else if (key == "window_height")          cfg.window_height = iv;
+				else if (key == "window_margin_px")       cfg.window_margin_px = iv;
+				else if (key == "build_timeout_sec")      cfg.build_timeout_sec = iv;
+				else if (key == "test_timeout_sec")       cfg.test_timeout_sec = iv;
+				else if (key == "run_timeout_sec")        cfg.run_timeout_sec = iv;
+				else if (key == "ingest_max_file_kb")     cfg.ingest_max_file_kb = iv;
+				else if (key == "ingest_max_total_mb")    cfg.ingest_max_total_mb = iv;
+				else if (key == "context_max_kb")         cfg.context_max_kb = iv;
+				else if (key == "context_max_files")      cfg.context_max_files = iv;
+				else if (key == "gemini_timeout_sec")     cfg.gemini_timeout_sec = iv;
+				else if (key == "gemini_full_mode_max_tokens") cfg.gemini_full_mode_max_tokens = iv;
+else if (key == "gemini_index_head_lines") cfg.gemini_index_head_lines = iv;                
                 if (key == "height")             cfg.window_height = iv;
                 if (key == "margin_px")          cfg.window_margin_px = iv;
                 if (key == "build_timeout_sec")  cfg.build_timeout_sec = iv;
