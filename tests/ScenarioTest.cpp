@@ -1,14 +1,15 @@
 // tests/ScenarioTest.cpp
 //
 // Runner test scenario untuk Manual Import + Danger Check + Sandbox
-// + error parser (traceback frame picking) + PromptGenerator (Fase A #42).
+// + error parser (traceback frame picking) + PromptGenerator (Fase A #42)
+// + FileCollector (Fase B #46).
 //
 // Mode:
 //   frans_scenarios              -> jalankan semua scenario, print PASS/FAIL
 //   frans_scenarios --list       -> daftar nama + deskripsi
 //   frans_scenarios --dump NAME  -> print isi scenario (paste ke GUI)
 //
-// Scenario yang di-cover (sesuai Blueprint §9.2 + §9.3):
+// Scenario yang di-cover (sesuai Blueprint §9.2 + §9.3 + Fase B #46):
 //   §9.2:
 //     01 python-standalone        -> #16
 //     02 cmake-multifile          -> regression
@@ -25,18 +26,21 @@
 //     traceback-frame-picking     -> regression (anomali 1)
 //     prompt-generator            -> #42 (Fase A)
 //     prompt-format-rules         -> verifikasi aturan format output
-
+//     file-collector-basic        -> #46 (Fase B)
 #include "application/import/MultiFileParser.h"
 #include "application/safety/DangerCheckHandler.h"
 #include "application/build_runner/BuildReport.h"
 #include "application/build_runner/ProjectInfo.h"
 #include "application/build_runner/BuildSystems/StandaloneBuildSystem.h"
 #include "application/prompt/PromptGenerator.h"
+#include "application/ingest/FileCollector.h"
 #include "infrastructure/fs/SandboxedFileSystem.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -56,17 +60,22 @@ using frans::application::StandaloneBuildSystem;
 using frans::application::PromptInput;
 using frans::application::renderPrompt;
 using frans::application::defaultPromptTemplate;
+using frans::application::CollectedFile;
+using frans::application::CollectOptions;
+using frans::application::CollectResult;
+using frans::application::collectFiles;
+using frans::application::isSecretBasename;
+using frans::application::isExcludedPath;
 using frans::domain::GeneratedFile;
 
 // Hindari literal triple-backtick di source (bisa mengganggu tooling).
 // Placeholder "###F###" di-expand menjadi tiga backtick oleh expandFences().
-const std::string kFence              = "`" "`" "`";
-const std::string kFencePlaceholder   = "###F###";
+const std::string kFence            = "`" "`" "`";
+const std::string kFencePlaceholder = "###F###";
 
 std::string expandFences(const std::string& raw) {
     std::string result;
     result.reserve(raw.size() + 32);
-
     std::size_t pos = 0;
     while (pos < raw.size()) {
         const std::size_t hit = raw.find(kFencePlaceholder, pos);
@@ -158,7 +167,7 @@ int main() {
 ###F###
 )RAW";
         s.file_expects.push_back({"CMakeLists.txt", DangerExpect::Safe});
-        s.file_expects.push_back({"src/main.cpp",    DangerExpect::Safe});
+        s.file_expects.push_back({"src/main.cpp",   DangerExpect::Safe});
         v.push_back(std::move(s));
     }
 
@@ -290,12 +299,11 @@ File: src/index.js
 function greet(name) {
   return "Halo, " + name + "!";
 }
-
 console.log(greet("npm"));
 ###F###
 )RAW";
-        s.file_expects.push_back({"package.json",   DangerExpect::Safe});
-        s.file_expects.push_back({"src/index.js",   DangerExpect::Safe});
+        s.file_expects.push_back({"package.json", DangerExpect::Safe});
+        s.file_expects.push_back({"src/index.js", DangerExpect::Safe});
         v.push_back(std::move(s));
     }
 
@@ -342,7 +350,6 @@ File: src/index.ts
 function greet(name: string): string {
   return "Halo, " + name + "!";
 }
-
 const msg: string = greet("TypeScript");
 console.log(msg);
 ###F###
@@ -365,7 +372,6 @@ console.log(msg);
 function greet(name) {
   return "Halo, " + name + "!";
 }
-
 console.log(greet("Dunia"));
 ###F###
 )RAW";
@@ -399,7 +405,7 @@ std::string languageFromPath(const std::string& path) {
     const std::string ext = path.substr(dot + 1);
     if (ext == "py")  return "python";
     if (ext == "cpp" || ext == "cc" || ext == "cxx"
-     || ext == "hpp" || ext == "hxx" || ext == "hh" || ext == "h") return "cpp";
+        || ext == "hpp" || ext == "hxx" || ext == "hh" || ext == "h") return "cpp";
     if (ext == "ts"  || ext == "tsx") return "typescript";
     if (ext == "js" || ext == "jsx" || ext == "mjs" || ext == "cjs") return "javascript";
     if (ext == "vue") return "vue";
@@ -442,7 +448,6 @@ bool runScenario(const Scenario& s) {
         const auto& f = parse.files[i];
         const std::string lang = languageFromPath(f.relative_path);
         const auto dc = danger.checkCode(f.content, lang);
-
         std::printf("    file[%zu] %-24s lang=%-10s danger=%s\n",
                     i, f.relative_path.c_str(),
                     lang.empty() ? "?" : lang.c_str(),
@@ -476,14 +481,12 @@ bool runSandboxTest() {
 
     namespace fs = std::filesystem;
     std::error_code ec;
-
     fs::path tmp = fs::temp_directory_path(ec);
     if (ec) {
         std::printf("  [SKIP] temp_directory_path gagal: %s\n",
                     ec.message().c_str());
         return true;
     }
-
     tmp /= "frans_test_sandbox_v8";
     fs::remove_all(tmp, ec);
     fs::create_directories(tmp, ec);
@@ -564,6 +567,7 @@ bool runTracebackPickingTest() {
     sys.parseOutput(pr, info);
 
     bool ok = true;
+
     if (pr.related_files.empty()) {
         std::printf("  [FAIL] related_files kosong\n");
         ok = false;
@@ -603,6 +607,7 @@ bool runPromptGeneratorTest() {
                 "dikenal, blok tanpa penutup, tail 8 KB.\n");
 
     int fails = 0;
+
     auto check = [&](const char* name, const std::string& actual,
                      const std::string& expected_substr, bool should_contain) {
         const bool has = actual.find(expected_substr) != std::string::npos;
@@ -629,13 +634,12 @@ bool runPromptGeneratorTest() {
         in.error_output      = "Traceback...";
         in.context_file_name = "SourceCode.md";
         in.new_files_hint    = "src/new.py";
-
         const std::string out = renderPrompt(in);
-        check("all-blocks: request",     out, "REQ=buat fungsi foo",  true);
-        check("all-blocks: ctx name",    out, "CTX=SourceCode.md",    true);
-        check("all-blocks: error on",    out, "ERR=Traceback...",     true);
-        check("all-blocks: context on",  out, "HAS_CTX",              true);
-        check("all-blocks: newfiles on", out, "NEW=src/new.py",       true);
+        check("all-blocks: request",     out, "REQ=buat fungsi foo", true);
+        check("all-blocks: ctx name",    out, "CTX=SourceCode.md",   true);
+        check("all-blocks: error on",    out, "ERR=Traceback...",    true);
+        check("all-blocks: context on",  out, "HAS_CTX",             true);
+        check("all-blocks: newfiles on", out, "NEW=src/new.py",      true);
     }
 
     // ---- Test 2: tanpa error_output -> blok ERROR tidak dirender ----
@@ -644,11 +648,10 @@ bool runPromptGeneratorTest() {
         in.tmpl = "REQ={{REQUEST}} {{#ERROR}}ERR={{ERROR_OUTPUT}}{{/ERROR}} END";
         in.request      = "foo";
         in.error_output = "";
-
         const std::string out = renderPrompt(in);
-        check("no-error: request",  out, "REQ=foo", true);
-        check("no-error: no ERR",   out, "ERR=",    false);
-        check("no-error: END",      out, "END",     true);
+        check("no-error: request", out, "REQ=foo", true);
+        check("no-error: no ERR",  out, "ERR=",    false);
+        check("no-error: END",     out, "END",     true);
     }
 
     // ---- Test 3: tanpa context_file_name -> blok CONTEXT tidak dirender ----
@@ -656,7 +659,6 @@ bool runPromptGeneratorTest() {
         PromptInput in;
         in.tmpl = "{{#CONTEXT}}HAS_CTX{{/CONTEXT}} DONE";
         in.context_file_name = "";
-
         const std::string out = renderPrompt(in);
         check("no-ctx: no HAS_CTX", out, "HAS_CTX", false);
         check("no-ctx: DONE",       out, "DONE",    true);
@@ -667,7 +669,6 @@ bool runPromptGeneratorTest() {
         PromptInput in;
         in.tmpl = "{{#NEWFILES}}NEW={{NEW_FILES_HINT}}{{/NEWFILES}} OK";
         in.new_files_hint = "";
-
         const std::string out = renderPrompt(in);
         check("no-newfiles: no NEW", out, "NEW=", false);
         check("no-newfiles: OK",     out, "OK",   true);
@@ -679,11 +680,10 @@ bool runPromptGeneratorTest() {
         in.tmpl = "A={{REQUEST}} B={{UNKNOWN}} C={{CONTEXT_FILE_NAME}}";
         in.request           = "req";
         in.context_file_name = "ctx";
-
         const std::string out = renderPrompt(in);
-        check("unknown-ph: A=req",  out, "A=req",           true);
-        check("unknown-ph: B kept", out, "B={{UNKNOWN}}",   true);
-        check("unknown-ph: C=ctx",  out, "C=ctx",           true);
+        check("unknown-ph: A=req",  out, "A=req",         true);
+        check("unknown-ph: B kept", out, "B={{UNKNOWN}}", true);
+        check("unknown-ph: C=ctx",  out, "C=ctx",         true);
     }
 
     // ---- Test 6: template kosong -> pakai default ----
@@ -692,7 +692,6 @@ bool runPromptGeneratorTest() {
         in.tmpl              = "";
         in.request           = "test request";
         in.context_file_name = "SourceCode.md";
-
         const std::string out = renderPrompt(in);
         check("empty-tmpl: has default marker",
               out, "Full file content, not diff", true);
@@ -709,10 +708,9 @@ bool runPromptGeneratorTest() {
         PromptInput in;
         in.tmpl         = "BEFORE {{#ERROR}}no-closer END";
         in.error_output = "err";
-
         const std::string out = renderPrompt(in);
-        check("no-closer: BEFORE",    out, "BEFORE",       true);
-        check("no-closer: tag kept",  out, "{{#ERROR}}",   true);
+        check("no-closer: BEFORE",    out, "BEFORE",        true);
+        check("no-closer: tag kept",  out, "{{#ERROR}}",    true);
         check("no-closer: rest kept", out, "no-closer END", true);
     }
 
@@ -722,7 +720,6 @@ bool runPromptGeneratorTest() {
         in.tmpl = "{{ERROR_OUTPUT}}";
         std::string big(20 * 1024, 'x');
         in.error_output = big;
-
         const std::string out = renderPrompt(in);
         const bool truncated = out.size() < big.size();
         // Harus ada prefix "truncated" karena dipotong.
@@ -740,8 +737,8 @@ bool runPromptGeneratorTest() {
     // ---- Test 9: default template valid ----
     {
         const std::string& d = defaultPromptTemplate();
-        const bool not_empty = !d.empty();
-        const bool has_request = d.find("{{REQUEST}}") != std::string::npos;
+        const bool not_empty     = !d.empty();
+        const bool has_request   = d.find("{{REQUEST}}") != std::string::npos;
         const bool has_ctx_block = d.find("{{#CONTEXT}}") != std::string::npos;
         const bool ok = not_empty && has_request && has_ctx_block;
         if (!ok) ++fails;
@@ -756,7 +753,6 @@ bool runPromptGeneratorTest() {
         PromptInput in;
         in.tmpl              = "{{#CONTEXT}}CTX={{CONTEXT_FILE_NAME}}{{/CONTEXT}}";
         in.context_file_name = "SourceCode.md";
-
         const std::string out = renderPrompt(in);
         check("inner-ph: substituted", out, "CTX=SourceCode.md", true);
     }
@@ -766,7 +762,6 @@ bool runPromptGeneratorTest() {
         PromptInput in;
         in.tmpl    = "BEFORE {{REQUEST}} DAN {{";
         in.request = "req";
-
         const std::string out = renderPrompt(in);
         check("unclosed-open: BEFORE", out, "BEFORE req DAN {{", true);
     }
@@ -796,33 +791,226 @@ bool runPromptFormatRulesTest() {
     // Aturan 2: Format multi-file dengan "File: <path>"
     check("rule-2: File: <path>",          "File: <path>");
     check("rule-2: fenced code block",     "fenced code block");
-
     // Aturan 3: Path relatif
     check("rule-3: Path relatif",          "Path relatif");
-
     // Aturan 4: Baris "File: " di awal baris
     check("rule-4: awal baris",            "awal baris");
     check("rule-4: tidak ada indentasi",   "tidak ada indentasi");
-
     // Aturan 5: Tutup fenced code block sebelum File: berikutnya
     check("rule-5: SEBELUM memulai File:", "SEBELUM memulai File:");
-
     // Aturan 6: Hindari literal triple-backtick
     check("rule-6: tiga backtick",         "tiga backtick");
     check("rule-6: merusak parser",        "merusak parser");
-
     // Aturan 7: Jangan sertakan file tidak berubah
     check("rule-7: tidak berubah",         "tidak berubah");
-
     // Aturan 8: Jangan sertakan file binary
     check("rule-8: file binary",           "file binary");
-
     // Aturan 9: Full file content, not diff
     check("rule-9: Full file content",     "Full file content");
     check("rule-9: bukan patch",           "bukan patch");
 
     std::printf("  => %s\n", fails == 0 ? "PASS" : "FAIL");
     return fails == 0;
+}
+
+// ---- Test FileCollector (Fase B #46) ----
+//
+// Buat temp dir berisi campuran file:
+//   - file teks biasa       -> harus muncul, tidak di-skip
+//   - file secret (.env,    -> harus muncul, skipped="secret"
+//     credentials.json)
+//   - file di node_modules/ -> harus TIDAK muncul (exclude)
+//   - file terlalu besar    -> harus muncul, skipped="too_large"
+//   - file binary (NUL)     -> harus muncul, skipped="binary"
+//   - file di output_dir/   -> harus TIDAK muncul (self-exclude)
+//
+// Test ini memakai fallback walker (temp dir bukan git repo).
+// Bila temp dir kebetulan terdeteksi sebagai git repo (edge case),
+// test di-SKIP.
+bool runFileCollectorTest() {
+    std::printf("\n=== file-collector-basic ===\n");
+    std::printf("  Cek FileCollector::collectFiles — secret, exclude, "
+                "binary, size, output-dir.\n");
+
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path tmp = fs::temp_directory_path(ec);
+    if (ec) {
+        std::printf("  [SKIP] temp_directory_path gagal: %s\n",
+                    ec.message().c_str());
+        return true;
+    }
+    tmp /= "frans_test_collector_v1";
+    fs::remove_all(tmp, ec);
+    fs::create_directories(tmp, ec);
+    if (ec) {
+        std::printf("  [SKIP] create_directories gagal: %s\n",
+                    ec.message().c_str());
+        return true;
+    }
+
+    auto write = [&](const std::string& rel, const std::string& content) {
+        fs::path p = tmp / rel;
+        std::error_code ec2;
+        fs::create_directories(p.parent_path(), ec2);
+        std::ofstream f(p, std::ios::binary);
+        f.write(content.data(), static_cast<std::streamsize>(content.size()));
+    };
+
+    // File teks biasa.
+    write("hello.py",     "print('hi')\n");
+    write("src/main.cpp", "#include <iostream>\nint main(){}\n");
+    write("a/b/c.txt",    "hello\n");
+
+    // Secret.
+    write(".env",                    "SECRET=xxx\n");
+    write("config/credentials.json", "{}\n");
+    write("secrets.prod.yaml",       "api_key: xxx\n");
+
+    // Excluded by default walker.
+    write("node_modules/x.js", "module.exports={};\n");
+    write("build/out.o",       "binary-object\n");
+
+    // Too large (> 256 KB).
+    {
+        std::ofstream f(tmp / "big.bin", std::ios::binary);
+        std::string big(300 * 1024, 'x');
+        f.write(big.data(), static_cast<std::streamsize>(big.size()));
+    }
+
+    // Binary (NUL di 8 KB pertama).
+    {
+        std::ofstream f(tmp / "data.bin", std::ios::binary);
+        const char payload[] = {'a', 'b', 'c', '\0', 'd', 'e', 'f'};
+        f.write(payload, sizeof(payload));
+    }
+
+    // Output dir (Frans self-exclude).
+    const fs::path out_dir = tmp / "out";
+    fs::create_directories(out_dir, ec);
+    write("out/SourceCode.md", "# harus di-exclude\n");
+
+    CollectOptions opt;
+    opt.max_file_bytes  = 256 * 1024;
+    opt.exclude_secrets = true;
+    opt.output_dir      = out_dir.string();
+
+    CollectResult result = collectFiles(tmp.string(), opt, nullptr);
+
+    // Kalau temp dir kebetulan git repo (edge case), SKIP.
+    if (result.used_git) {
+        std::printf("  [SKIP] temp dir terdeteksi sebagai git repo — "
+                    "test ini dirancang untuk fallback walker.\n");
+        fs::remove_all(tmp, ec);
+        return true;
+    }
+
+    bool ok = result.ok;
+    if (!ok) {
+        std::printf("  [FAIL] collectFiles gagal: %s\n", result.error.c_str());
+    }
+
+    auto findFile = [&](const std::string& rel) -> const CollectedFile* {
+        for (const auto& f : result.files) {
+            if (f.relative_path == rel) return &f;
+        }
+        return nullptr;
+    };
+
+    auto checkExist = [&](const char* rel, bool should_exist) {
+        const CollectedFile* f = findFile(rel);
+        const bool found = (f != nullptr);
+        const bool pass = (found == should_exist);
+        if (!pass) ok = false;
+        std::printf("  %s exist %-32s found=%d expected=%d\n",
+                    pass ? "[ok]  " : "[FAIL]",
+                    rel, found ? 1 : 0, should_exist ? 1 : 0);
+    };
+
+    auto checkSkip = [&](const char* rel, const char* expected_reason) {
+        const CollectedFile* f = findFile(rel);
+        if (!f) {
+            ok = false;
+            std::printf("  [FAIL] skip  %-32s NOT FOUND\n", rel);
+            return;
+        }
+        const bool pass = f->skipped && f->skip_reason == expected_reason;
+        if (!pass) ok = false;
+        std::printf("  %s skip   %-32s reason='%s' expected='%s'\n",
+                    pass ? "[ok]  " : "[FAIL]",
+                    rel,
+                    f->skip_reason.c_str(),
+                    expected_reason);
+    };
+
+    // ---- Ekspektasi ----
+    checkExist("hello.py",     true);
+    checkExist("src/main.cpp", true);
+    checkExist("a/b/c.txt",    true);
+
+    checkSkip (".env",                   "secret");
+    checkSkip ("config/credentials.json", "secret");
+    checkSkip ("secrets.prod.yaml",      "secret");
+
+    checkExist("node_modules/x.js", false);   // excluded
+    checkExist("build/out.o",       false);   // excluded
+
+    checkSkip ("big.bin",  "too_large");
+    checkSkip ("data.bin", "binary");
+
+    checkExist("out/SourceCode.md", false);   // output dir
+
+    // ---- Helper tests (murni, tanpa I/O) ----
+    auto helperCheck = [&](const char* label, bool cond) {
+        if (!cond) ok = false;
+        std::printf("  %s helper %-40s\n",
+                    cond ? "[ok]  " : "[FAIL]", label);
+    };
+
+    helperCheck("isSecretBasename('.env')",
+                isSecretBasename(".env"));
+    helperCheck("isSecretBasename('id_rsa')",
+                isSecretBasename("id_rsa"));
+    helperCheck("isSecretBasename('foo.pem')",
+                isSecretBasename("foo.pem"));
+    helperCheck("isSecretBasename('secrets.prod.yaml')",
+                isSecretBasename("secrets.prod.yaml"));
+    helperCheck("!isSecretBasename('main.cpp')",
+                !isSecretBasename("main.cpp"));
+    helperCheck("!isSecretBasename('.envrc')",
+                !isSecretBasename(".envrc"));
+
+    helperCheck("isExcludedPath('node_modules/x.js', {})",
+                isExcludedPath("node_modules/x.js", {}));
+    helperCheck("isExcludedPath('build/out.o', {})",
+                isExcludedPath("build/out.o", {}));
+    helperCheck("isExcludedPath('a/__pycache__/x.pyc', {})",
+                isExcludedPath("a/__pycache__/x.pyc", {}));
+    helperCheck("!isExcludedPath('src/main.cpp', {})",
+                !isExcludedPath("src/main.cpp", {}));
+    helperCheck("isExcludedPath('foo.log', {'*.log'})",
+                isExcludedPath("foo.log", {"*.log"}));
+    helperCheck("!isExcludedPath('foo.txt', {'*.log'})",
+                !isExcludedPath("foo.txt", {"*.log"}));
+
+    // Urutan leksikografis.
+    if (result.files.size() >= 2) {
+        bool sorted = true;
+        for (std::size_t i = 1; i < result.files.size(); ++i) {
+            if (result.files[i - 1].relative_path
+                > result.files[i].relative_path)
+            {
+                sorted = false;
+                break;
+            }
+        }
+        helperCheck("files terurut leksikografis", sorted);
+    }
+
+    fs::remove_all(tmp, ec);
+
+    std::printf("  => %s\n", ok ? "PASS" : "FAIL");
+    return ok;
 }
 
 void listScenarios(const std::vector<Scenario>& scenarios) {
@@ -838,6 +1026,8 @@ void listScenarios(const std::vector<Scenario>& scenarios) {
                 "prompt-generator");
     std::printf("  %-24s Verifikasi aturan format output\n",
                 "prompt-format-rules");
+    std::printf("  %-24s Cek FileCollector (Fase B #46)\n",
+                "file-collector-basic");
 }
 
 void dumpScenario(const Scenario& s) {
@@ -855,7 +1045,6 @@ int main(int argc, char** argv) {
         listScenarios(scenarios);
         return 0;
     }
-
     if (argc >= 3 && std::strcmp(argv[1], "--dump") == 0) {
         for (const auto& s : scenarios) {
             if (s.name == argv[2]) {
@@ -869,23 +1058,20 @@ int main(int argc, char** argv) {
 
     int pass = 0;
     int fail = 0;
-
     for (const auto& s : scenarios) {
         if (runScenario(s)) ++pass;
         else                ++fail;
     }
-
-    if (runSandboxTest())          ++pass;
+    if (runSandboxTest())           ++pass;
     else                            ++fail;
-
-    if (runTracebackPickingTest()) ++pass;
+    if (runTracebackPickingTest())  ++pass;
     else                            ++fail;
-
-    if (runPromptGeneratorTest())  ++pass;
+    if (runPromptGeneratorTest())   ++pass;
     else                            ++fail;
-
     if (runPromptFormatRulesTest()) ++pass;
-    else                             ++fail;
+    else                            ++fail;
+    if (runFileCollectorTest())     ++pass;
+    else                            ++fail;
 
     std::printf("\n=== Summary: %d passed, %d failed, %d total ===\n",
                 pass, fail, pass + fail);
