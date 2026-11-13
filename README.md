@@ -6,17 +6,37 @@ Tool ringan (C++20 + FLTK) untuk:
 3. Tulis ke project root dengan safety layer (sandbox + danger check).
 4. Deteksi build system dari marker file (CMake / Make / Meson / npm / Poetry / Standalone).
 5. Build → Test → Run, dengan error file:line.
+6. **Context Pack via Gemini (Fase C)**: Pilih file relevan secara otomatis via Gemini API sebelum generate prompt, lalu bangun `SourceCode.md` sebagai acuan utama.
+
+### Prasyarat Tambahan (Fase C)
+Download library `nlohmann/json` (header-only) ke direktori `third_party`:
+```bash
+cd /home/farhan/Proyek/AgenAI/proyek/frans
+curl -L -o third_party/nlohmann/json.hpp \
+  https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
+```
 
 ## Build
 
 ### Lubuntu
+```bash
     sudo apt install build-essential cmake libfltk1.3-dev
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
     cmake --build build -j
+```
 
 ### Windows (MSVC)
     cmake -S . -B build -G "Visual Studio 17 2022" -A x64
     cmake --build build --config Release
+    
+### Cara Test
+Jalankan test otomatis untuk memastikan semua skenario (termasuk Fase C & Fase A) berjalan dengan benar:
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFRANS_BUILD_TESTS=ON
+cmake --build build -j
+./build/bin/frans_scenarios
+./build/bin/frans_session_tests
+```    
 
 ## Jalankan
 
