@@ -1,7 +1,7 @@
 // tests/ScenarioTest.cpp
 //
 // Runner test scenario untuk Manual Import + Danger Check + Sandbox
-// + error parser (traceback frame picking).
+// + error parser (traceback frame picking) + PromptGenerator (Fase A #42).
 //
 // Mode:
 //   frans_scenarios              -> jalankan semua scenario, print PASS/FAIL
@@ -23,14 +23,14 @@
 //   plus:
 //     sandbox-path-safety         -> #18 (sandbox)
 //     traceback-frame-picking     -> regression (anomali 1)
-
+//     prompt-generator            -> #42 (Fase A)
 #include "application/import/MultiFileParser.h"
 #include "application/safety/DangerCheckHandler.h"
 #include "application/build_runner/BuildReport.h"
 #include "application/build_runner/ProjectInfo.h"
 #include "application/build_runner/BuildSystems/StandaloneBuildSystem.h"
+#include "application/prompt/PromptGenerator.h"
 #include "infrastructure/fs/SandboxedFileSystem.h"
-
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -50,6 +50,9 @@ using frans::application::DangerVerdict;
 using frans::application::PhaseResult;
 using frans::application::ProjectInfo;
 using frans::application::StandaloneBuildSystem;
+using frans::application::PromptInput;
+using frans::application::renderPrompt;
+using frans::application::defaultPromptTemplate;
 using frans::domain::GeneratedFile;
 
 // Hindari literal triple-backtick di source (bisa mengganggu tooling).
@@ -108,13 +111,10 @@ std::vector<Scenario> buildScenarios() {
 ###F###python
 #!/usr/bin/env python3
 """Contoh skrip Python standalone."""
-
 def greet(name: str) -> str:
     return f"Halo, {name}!"
-
 def main() -> None:
     print(greet("Dunia"))
-
 if __name__ == "__main__":
     main()
 ###F###
@@ -133,20 +133,15 @@ if __name__ == "__main__":
 ###F###cmake
 cmake_minimum_required(VERSION 3.16)
 project(demo LANGUAGES CXX)
-
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
 add_executable(demo src/main.cpp)
-
 enable_testing()
 add_test(NAME demo_run COMMAND demo)
 ###F###
-
 File: src/main.cpp
 ###F###cpp
 #include <iostream>
-
 int main() {
     std::cout << "Halo dari demo\n";
     return 0;
@@ -184,11 +179,9 @@ print("coba keluar sandbox")
 ###F###python
 import os
 import shutil
-
 def wipe(path):
     os.system("rm -rf " + path)
     shutil.rmtree(path)
-
 if __name__ == "__main__":
     wipe("/tmp/scratch")
 ###F###
@@ -205,30 +198,23 @@ if __name__ == "__main__":
         s.expected_file_count = 2;
         s.raw_input = R"RAW(Berikut adalah implementasi yang kamu minta.
 Saya buat dua file: satu module utility, satu entry point.
-
 File: utils.py
 ###F###python
 """Utility sederhana."""
-
 def tambah(a, b):
     return a + b
-
 def kurang(a, b):
     return a - b
 ###F###
-
 File: app.py
 ###F###python
 from utils import tambah, kurang
-
 def main():
     print(tambah(2, 3))
     print(kurang(10, 4))
-
 if __name__ == "__main__":
     main()
 ###F###
-
 Semoga membantu! Kalau ada error, kabari saya.
 )RAW";
         s.file_expects.push_back({"utils.py", DangerExpect::Safe});
@@ -247,12 +233,10 @@ Semoga membantu! Kalau ada error, kabari saya.
         s.raw_input = R"RAW(File: sleeper.py
 ###F###python
 import time
-
 def main():
     print("Mulai tidur 60 detik...", flush=True)
     time.sleep(60)
     print("Selesai tidur", flush=True)
-
 if __name__ == "__main__":
     main()
 ###F###
@@ -280,13 +264,11 @@ if __name__ == "__main__":
   }
 }
 ###F###
-
 File: src/index.js
 ###F###javascript
 function greet(name) {
-  return "Halo, " + name + "!";
+    return "Halo, " + name + "!";
 }
-
 console.log(greet("npm"));
 ###F###
 )RAW";
@@ -317,7 +299,6 @@ console.log(greet("npm"));
   }
 }
 ###F###
-
 File: tsconfig.json
 ###F###json
 {
@@ -332,13 +313,11 @@ File: tsconfig.json
   "include": ["src/**/*.ts"]
 }
 ###F###
-
 File: src/index.ts
 ###F###typescript
 function greet(name: string): string {
-  return "Halo, " + name + "!";
+    return "Halo, " + name + "!";
 }
-
 const msg: string = greet("TypeScript");
 console.log(msg);
 ###F###
@@ -359,9 +338,8 @@ console.log(msg);
         s.raw_input = R"RAW(File: hello.js
 ###F###javascript
 function greet(name) {
-  return "Halo, " + name + "!";
+    return "Halo, " + name + "!";
 }
-
 console.log(greet("Dunia"));
 ###F###
 )RAW";
@@ -395,15 +373,15 @@ std::string languageFromPath(const std::string& path) {
     const std::string ext = path.substr(dot + 1);
     if (ext == "py")  return "python";
     if (ext == "cpp" || ext == "cc" || ext == "cxx"
-     || ext == "hpp" || ext == "hxx" || ext == "hh" || ext == "h") return "cpp";
+        || ext == "hpp" || ext == "hxx" || ext == "hh" || ext == "h") return "cpp";
     if (ext == "ts"  || ext == "tsx") return "typescript";
-    if (ext == "js"  || ext == "jsx" || ext == "mjs" || ext == "cjs") return "javascript";
+    if (ext == "js" || ext == "jsx" || ext == "mjs" || ext == "cjs") return "javascript";
     if (ext == "vue") return "vue";
     return {};
 }
 
 bool runScenario(const Scenario& s) {
-    std::printf("\n=== %s ===\n  %s\n",
+    std::printf("\n=== %s ===\n%s\n",
                 s.name.c_str(), s.description.c_str());
 
     const std::string input = expandFences(s.raw_input);
@@ -434,17 +412,14 @@ bool runScenario(const Scenario& s) {
     }
 
     DangerCheckHandler danger;
-
     for (std::size_t i = 0; i < parse.files.size(); ++i) {
         const auto& f = parse.files[i];
         const std::string lang = languageFromPath(f.relative_path);
         const auto dc = danger.checkCode(f.content, lang);
-
         std::printf("    file[%zu] %-24s lang=%-10s danger=%s\n",
                     i, f.relative_path.c_str(),
                     lang.empty() ? "?" : lang.c_str(),
                     dangerName(dc.verdict));
-
         if (i < s.file_expects.size()) {
             const auto& exp = s.file_expects[i];
             if (!exp.relative_path.empty()
@@ -466,7 +441,6 @@ bool runScenario(const Scenario& s) {
 }
 
 // ---- Test sandbox (path containment) — terpisah dari scenario ----
-
 bool runSandboxTest() {
     std::printf("\n=== sandbox-path-safety ===\n");
     std::printf("  Cek SandboxedFileSystem::isPathSafe() — path escape "
@@ -474,7 +448,6 @@ bool runSandboxTest() {
 
     namespace fs = std::filesystem;
     std::error_code ec;
-
     fs::path tmp = fs::temp_directory_path(ec);
     if (ec) {
         std::printf("  [SKIP] temp_directory_path gagal: %s\n",
@@ -482,7 +455,6 @@ bool runSandboxTest() {
         return true;
     }
     tmp /= "frans_test_sandbox_v8";
-
     fs::remove_all(tmp, ec);
     fs::create_directories(tmp, ec);
     if (ec) {
@@ -508,7 +480,6 @@ bool runSandboxTest() {
     check("hello.py",          true);
     check("src/main.cpp",      true);
     check("a/b/c/d.py",        true);
-
     check("../evil.py",        false);
     check("../../etc/passwd",  false);
     check("/etc/passwd",       false);
@@ -522,7 +493,6 @@ bool runSandboxTest() {
 }
 
 // ---- Test parseOutput: traceback frame picking (anomali 1) ----
-
 bool runTracebackPickingTest() {
     std::printf("\n=== traceback-frame-picking ===\n");
     std::printf("  Cek StandaloneBuildSystem::parseOutput memilih frame "
@@ -564,14 +534,12 @@ bool runTracebackPickingTest() {
     sys.parseOutput(pr, info);
 
     bool ok = true;
-
     if (pr.related_files.empty()) {
         std::printf("  [FAIL] related_files kosong\n");
         ok = false;
     } else {
         const auto& rf = pr.related_files.front();
         std::printf("  frame dipilih: %s:%d\n", rf.path.c_str(), rf.line);
-
         if (rf.path != "cleanup.py") {
             std::printf("  [FAIL] expected path 'cleanup.py', got '%s'\n",
                         rf.path.c_str());
@@ -597,6 +565,187 @@ bool runTracebackPickingTest() {
     return ok;
 }
 
+// ---- Test PromptGenerator (Fase A #42) ----
+bool runPromptGeneratorTest() {
+    std::printf("\n=== prompt-generator ===\n");
+    std::printf("  Cek PromptGenerator::renderPrompt — placeholder, "
+                "blok kondisional, template kosong, placeholder tak "
+                "dikenal, blok tanpa penutup, tail 8 KB.\n");
+
+    int fails = 0;
+
+    auto check = [&](const char* name, const std::string& actual,
+                     const std::string& expected_substr, bool should_contain) {
+        const bool has = actual.find(expected_substr) != std::string::npos;
+        const bool pass = (has == should_contain);
+        if (!pass) ++fails;
+        std::printf("  %s %-40s %s '%s'\n",
+                    pass ? "[ok]  " : "[FAIL]",
+                    name,
+                    should_contain ? "contains" : "NOT contains",
+                    expected_substr.c_str());
+        if (!pass) {
+            std::printf("        actual: '%s'\n", actual.c_str());
+        }
+    };
+
+    // ---- Test 1: semua blok aktif ----
+    {
+        PromptInput in;
+        in.tmpl = "REQ={{REQUEST}} CTX={{CONTEXT_FILE_NAME}} "
+                  "{{#ERROR}}ERR={{ERROR_OUTPUT}}{{/ERROR}} "
+                  "{{#CONTEXT}}HAS_CTX{{/CONTEXT}} "
+                  "{{#NEWFILES}}NEW={{NEW_FILES_HINT}}{{/NEWFILES}}";
+        in.request           = "buat fungsi foo";
+        in.error_output      = "Traceback...";
+        in.context_file_name = "SourceCode.md";
+        in.new_files_hint    = "src/new.py";
+
+        const std::string out = renderPrompt(in);
+        check("all-blocks: request",     out, "REQ=buat fungsi foo",  true);
+        check("all-blocks: ctx name",    out, "CTX=SourceCode.md",    true);
+        check("all-blocks: error on",    out, "ERR=Traceback...",     true);
+        check("all-blocks: context on",  out, "HAS_CTX",              true);
+        check("all-blocks: newfiles on", out, "NEW=src/new.py",       true);
+    }
+
+    // ---- Test 2: tanpa error_output -> blok ERROR tidak dirender ----
+    {
+        PromptInput in;
+        in.tmpl = "REQ={{REQUEST}} {{#ERROR}}ERR={{ERROR_OUTPUT}}{{/ERROR}} END";
+        in.request      = "foo";
+        in.error_output = "";
+
+        const std::string out = renderPrompt(in);
+        check("no-error: request",  out, "REQ=foo", true);
+        check("no-error: no ERR",   out, "ERR=",    false);
+        check("no-error: END",      out, "END",     true);
+    }
+
+    // ---- Test 3: tanpa context_file_name -> blok CONTEXT tidak dirender ----
+    {
+        PromptInput in;
+        in.tmpl = "{{#CONTEXT}}HAS_CTX{{/CONTEXT}} DONE";
+        in.context_file_name = "";
+
+        const std::string out = renderPrompt(in);
+        check("no-ctx: no HAS_CTX", out, "HAS_CTX", false);
+        check("no-ctx: DONE",       out, "DONE",    true);
+    }
+
+    // ---- Test 4: tanpa new_files_hint -> blok NEWFILES tidak dirender ----
+    {
+        PromptInput in;
+        in.tmpl = "{{#NEWFILES}}NEW={{NEW_FILES_HINT}}{{/NEWFILES}} OK";
+        in.new_files_hint = "";
+
+        const std::string out = renderPrompt(in);
+        check("no-newfiles: no NEW", out, "NEW=", false);
+        check("no-newfiles: OK",     out, "OK",   true);
+    }
+
+    // ---- Test 5: placeholder tak dikenal -> dibiarkan apa adanya ----
+    {
+        PromptInput in;
+        in.tmpl = "A={{REQUEST}} B={{UNKNOWN}} C={{CONTEXT_FILE_NAME}}";
+        in.request           = "req";
+        in.context_file_name = "ctx";
+
+        const std::string out = renderPrompt(in);
+        check("unknown-ph: A=req",  out, "A=req",           true);
+        check("unknown-ph: B kept", out, "B={{UNKNOWN}}",   true);
+        check("unknown-ph: C=ctx",  out, "C=ctx",           true);
+    }
+
+    // ---- Test 6: template kosong -> pakai default ----
+    {
+        PromptInput in;
+        in.tmpl              = "";
+        in.request           = "test request";
+        in.context_file_name = "SourceCode.md";
+
+        const std::string out = renderPrompt(in);
+        check("empty-tmpl: has default marker",
+              out, "Full file content, not diff", true);
+        check("empty-tmpl: has request",
+              out, "test request", true);
+        check("empty-tmpl: has context block",
+              out, "SourceCode.md", true);
+        check("empty-tmpl: no error block (error_output kosong)",
+              out, "--- error output ---", false);
+    }
+
+    // ---- Test 7: blok tanpa penutup -> dirender apa adanya ----
+    {
+        PromptInput in;
+        in.tmpl         = "BEFORE {{#ERROR}}no-closer END";
+        in.error_output = "err";
+
+        const std::string out = renderPrompt(in);
+        check("no-closer: BEFORE",    out, "BEFORE",       true);
+        check("no-closer: tag kept",  out, "{{#ERROR}}",   true);
+        check("no-closer: rest kept", out, "no-closer END", true);
+    }
+
+    // ---- Test 8: error_output di-tail +/- 8 KB ----
+    {
+        PromptInput in;
+        in.tmpl = "{{ERROR_OUTPUT}}";
+        std::string big(20 * 1024, 'x');
+        in.error_output = big;
+
+        const std::string out = renderPrompt(in);
+        const bool truncated = out.size() < big.size();
+        // Harus ada prefix "truncated" karena dipotong.
+        const bool has_prefix = out.find("truncated") != std::string::npos;
+        const bool pass = truncated && has_prefix;
+        if (!pass) ++fails;
+        std::printf("  %s %-40s truncated=%s has_prefix=%s (out=%zu, in=%zu)\n",
+                    pass ? "[ok]  " : "[FAIL]",
+                    "error-tail-8kb",
+                    truncated  ? "true" : "false",
+                    has_prefix ? "true" : "false",
+                    out.size(), big.size());
+    }
+
+    // ---- Test 9: default template valid ----
+    {
+        const std::string& d = defaultPromptTemplate();
+        const bool not_empty = !d.empty();
+        const bool has_request = d.find("{{REQUEST}}") != std::string::npos;
+        const bool has_ctx_block = d.find("{{#CONTEXT}}") != std::string::npos;
+        const bool ok = not_empty && has_request && has_ctx_block;
+        if (!ok) ++fails;
+        std::printf("  %s %-40s not_empty=%d has_REQUEST=%d has_CTX=%d\n",
+                    ok ? "[ok]  " : "[FAIL]",
+                    "default-template-valid",
+                    (int)not_empty, (int)has_request, (int)has_ctx_block);
+    }
+
+    // ---- Test 10: placeholder di dalam blok kondisional ikut di-substitute ----
+    {
+        PromptInput in;
+        in.tmpl              = "{{#CONTEXT}}CTX={{CONTEXT_FILE_NAME}}{{/CONTEXT}}";
+        in.context_file_name = "SourceCode.md";
+
+        const std::string out = renderPrompt(in);
+        check("inner-ph: substituted", out, "CTX=SourceCode.md", true);
+    }
+
+    // ---- Test 11: "{{" tanpa "}}" di akhir template ----
+    {
+        PromptInput in;
+        in.tmpl    = "BEFORE {{REQUEST}} DAN {{";
+        in.request = "req";
+
+        const std::string out = renderPrompt(in);
+        check("unclosed-open: BEFORE", out, "BEFORE req DAN {{", true);
+    }
+
+    std::printf("  => %s\n", fails == 0 ? "PASS" : "FAIL");
+    return fails == 0;
+}
+
 void listScenarios(const std::vector<Scenario>& scenarios) {
     std::printf("Scenario tersedia:\n");
     for (const auto& s : scenarios) {
@@ -606,6 +755,8 @@ void listScenarios(const std::vector<Scenario>& scenarios) {
                 "sandbox-path-safety");
     std::printf("  %-24s Cek parseOutput pilih frame Python user\n",
                 "traceback-frame-picking");
+    std::printf("  %-24s Cek PromptGenerator::renderPrompt (Fase A #42)\n",
+                "prompt-generator");
 }
 
 void dumpScenario(const Scenario& s) {
@@ -623,7 +774,6 @@ int main(int argc, char** argv) {
         listScenarios(scenarios);
         return 0;
     }
-
     if (argc >= 3 && std::strcmp(argv[1], "--dump") == 0) {
         for (const auto& s : scenarios) {
             if (s.name == argv[2]) {
@@ -642,11 +792,11 @@ int main(int argc, char** argv) {
         if (runScenario(s)) ++pass;
         else                ++fail;
     }
-
     if (runSandboxTest())          ++pass;
     else                            ++fail;
-
     if (runTracebackPickingTest()) ++pass;
+    else                            ++fail;
+    if (runPromptGeneratorTest())  ++pass;
     else                            ++fail;
 
     std::printf("\n=== Summary: %d passed, %d failed, %d total ===\n",

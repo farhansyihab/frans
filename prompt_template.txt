@@ -1,0 +1,12 @@
+Anda adalah seorang {role} yang profesional dan analitis.
+
+[KONTEKS]
+{context}
+
+[TUGAS]
+{task}
+
+[KENDALA / INSTRUKSI TAMBAHAN]
+{constraints}
+
+Silakan berikan respons Anda secara terstruktur, jelas, dan sesuai dengan konteks yang diberikan.
