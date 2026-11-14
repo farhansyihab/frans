@@ -1,9 +1,6 @@
 # SourceCode.md: frans
-Dibuat oleh Frans | 2026-11-15 05:33 | 16 file disertakan | 32.1 KB
-Permintaan: - baca `BluePrint-v9-Addendum.md` dan `frans-ingest.md`
-- `SourceCode.txt` adalah code yang paling terakhir, paling update
-- PERHATIKAN root app adalah `/home/farhan/Proyek/AgenAI/proyek/frans/`
-- bua
+Dibuat oleh Frans | 2026-11-15 06:25 | 16 file disertakan | 37.5 KB
+Permintaan: fix error yang terjadi ketika compile "Fase D: Git" bagian no 67 "GitFacade::parseStatusPorcelain` + `suggestCommitMessage` + test"
 Tanda "*" pada struktur di bawah = isi file disertakan setelah bagian ini.
 
 Directory structure:
@@ -80,6 +77,9 @@ Directory structure:
     │   │   │   ├── ContextSelector.h
     │   │   │   ├── SourceCodeBuilder.cpp
     │   │   │   └── SourceCodeBuilder.h
+    │   │   ├── git/
+    │   │   │   ├── GitFacade.cpp *
+    │   │   │   └── GitFacade.h *
     │   │   ├── import/
     │   │   │   ├── MultiFileParser.cpp
     │   │   │   └── MultiFileParser.h
@@ -122,9 +122,9 @@ Directory structure:
     │   │       ├── DiffEngine.cpp
     │   │       ├── DiffEngine.h
     │   │       ├── ProcessExecutor.cpp
-    │   │       ├── ProcessExecutor.h *
-    │   │       ├── ProcessExecutor_posix.cpp *
-    │   │       ├── ProcessExecutor_win32.cpp *
+    │   │       ├── ProcessExecutor.h
+    │   │       ├── ProcessExecutor_posix.cpp
+    │   │       ├── ProcessExecutor_win32.cpp
     │   │       └── SystemMaintenanceFacade.h
     │   ├── ingest/
     │   │   ├── IngestDialog.cpp
@@ -142,6 +142,7 @@ Directory structure:
     │       ├── PromptDialog.cpp
     │       ├── PromptDialog.h
     │       └── SessionState.h
+    ├── test_env_extra.cpp
     ├── tests/
     │   ├── ApiKeyProviderTest.cpp
     │   ├── GeminiSchemaTest.cpp
@@ -154,6 +155,8 @@ Directory structure:
     │   │   └── gemini_client_tests.cpp
     │   ├── context/
     │   │   └── source_code_builder_tests.cpp
+    │   ├── git/
+    │   │   └── GitFacadeTest.cpp *
     │   └── manual/
     │       ├── fixtures-generated/
     │       │   ├── 01-cmake-fail.md
@@ -494,673 +497,879 @@ add_compile_definitions(FRANS_VERSION="${PROJECT_VERSION}")
 FILE: cmake/Sources.cmake
 ================================================
 include_guard(GLOBAL)
+
 set(FRANS_SOURCES
-src/main.cpp
-# UI
-src/ui/MainWindow.cpp
-src/ui/ManualImportDialog.cpp
-src/ui/PromptDialog.cpp
-src/ui/IngestDialog.cpp
-# Application -- import
-src/application/import/MultiFileParser.cpp
-# Application -- manual_import
-src/application/manual_import/ManualImporter.cpp
-# Application -- safety
-src/application/safety/DangerCheckHandler.cpp
-# Application -- prompt (Fase A #41)
-src/application/prompt/PromptGenerator.cpp
-# Application -- ai (Fase C #54, #56, #57, #58)
-src/application/ai/ApiKeyProvider.cpp
-src/application/ai/GeminiClient.cpp
-src/application/ai/GeminiSchema.cpp
-# Application -- context (Fase C #59, #60)
-src/application/context/ContextSelector.cpp
-src/application/context/SourceCodeBuilder.cpp
-# Application -- build_runner
-src/application/build_runner/BuildRunner.cpp
-src/application/build_runner/ProjectDetector.cpp
-# Fase A #44: ringkasan error untuk SessionState (murni, tanpa FLTK)
-src/application/build_runner/BuildErrorSummary.cpp
-src/application/build_runner/BuildSystems/CMakeBuildSystem.cpp
-src/application/build_runner/BuildSystems/MakeBuildSystem.cpp
-src/application/build_runner/BuildSystems/MesonBuildSystem.cpp
-src/application/build_runner/BuildSystems/NpmBuildSystem.cpp
-src/application/build_runner/BuildSystems/PoetryBuildSystem.cpp
-src/application/build_runner/BuildSystems/StandaloneBuildSystem.cpp
-# Application -- ingest (Fase B #46, #48, #50)
-src/application/ingest/FileCollector.cpp
-src/application/ingest/MarkdownRenderer.cpp
-src/application/ingest/RepoIngester.cpp
-# Infrastructure
-src/infrastructure/fs/SandboxedFileSystem.cpp
-src/infrastructure/system/DiffEngine.cpp
-# Infrastructure -- http (Fase C #55)
-src/infrastructure/http/CurlTransport.cpp
-# Config
-src/config/AppConfig.cpp
-src/config/AppPaths.cpp
+    src/main.cpp
+
+    # UI
+    src/ui/MainWindow.cpp
+    src/ui/ManualImportDialog.cpp
+    src/ui/PromptDialog.cpp
+    src/ui/IngestDialog.cpp
+
+    # Application -- import
+    src/application/import/MultiFileParser.cpp
+
+    # Application -- manual_import
+    src/application/manual_import/ManualImporter.cpp
+
+    # Application -- safety
+    src/application/safety/DangerCheckHandler.cpp
+
+    # Application -- prompt (Fase A #41)
+    src/application/prompt/PromptGenerator.cpp
+
+    # Application -- ai (Fase C #54, #56, #57, #58)
+    src/application/ai/ApiKeyProvider.cpp
+    src/application/ai/GeminiClient.cpp
+    src/application/ai/GeminiSchema.cpp
+
+    # Application -- context (Fase C #59, #60)
+    src/application/context/ContextSelector.cpp
+    src/application/context/SourceCodeBuilder.cpp
+
+    # Application -- build_runner
+    src/application/build_runner/BuildRunner.cpp
+    src/application/build_runner/ProjectDetector.cpp
+
+    # Fase A #44: ringkasan error untuk SessionState (murni, tanpa FLTK)
+    src/application/build_runner/BuildErrorSummary.cpp
+    src/application/build_runner/BuildSystems/CMakeBuildSystem.cpp
+    src/application/build_runner/BuildSystems/MakeBuildSystem.cpp
+    src/application/build_runner/BuildSystems/MesonBuildSystem.cpp
+    src/application/build_runner/BuildSystems/NpmBuildSystem.cpp
+    src/application/build_runner/BuildSystems/PoetryBuildSystem.cpp
+    src/application/build_runner/BuildSystems/StandaloneBuildSystem.cpp
+
+    # Application -- ingest (Fase B #46, #48, #50)
+    src/application/ingest/FileCollector.cpp
+    src/application/ingest/MarkdownRenderer.cpp
+    src/application/ingest/RepoIngester.cpp
+
+    # Application -- git (Fase D #67)
+    src/application/git/GitFacade.cpp
+
+    # Infrastructure
+    src/infrastructure/fs/SandboxedFileSystem.cpp
+    src/infrastructure/system/DiffEngine.cpp
+
+    # Infrastructure -- http (Fase C #55)
+    src/infrastructure/http/CurlTransport.cpp
+
+    # Config
+    src/config/AppConfig.cpp
+    src/config/AppPaths.cpp
 )
+
 if(WIN32)
-list(APPEND FRANS_SOURCES
-src/infrastructure/system/ProcessExecutor_win32.cpp
-)
+    list(APPEND FRANS_SOURCES
+        src/infrastructure/system/ProcessExecutor_win32.cpp
+    )
 else()
-list(APPEND FRANS_SOURCES
-src/infrastructure/system/ProcessExecutor_posix.cpp
-)
+    list(APPEND FRANS_SOURCES
+        src/infrastructure/system/ProcessExecutor_posix.cpp
+    )
 endif()
+
 add_executable(frans ${FRANS_SOURCES})
+
 target_include_directories(frans PRIVATE
-${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+
 target_link_libraries(frans PRIVATE
-FLTK::FLTK
-Threads::Threads
-nlohmann_json::nlohmann_json
-${FRANS_PLATFORM_LIBS}
-frans_warnings
+    FLTK::FLTK
+    Threads::Threads
+    nlohmann_json::nlohmann_json
+    ${FRANS_PLATFORM_LIBS}
+    frans_warnings
 )
+
 if(FRANS_PLATFORM_DEFS)
-target_compile_definitions(frans PRIVATE ${FRANS_PLATFORM_DEFS})
+    target_compile_definitions(frans PRIVATE ${FRANS_PLATFORM_DEFS})
 endif()
+
 if(WIN32)
-set_target_properties(frans PROPERTIES WIN32_EXECUTABLE TRUE)
+    set_target_properties(frans PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 ================================================
 FILE: cmake/Tests.cmake
 ================================================
 include_guard(GLOBAL)
+
 option(FRANS_BUILD_TESTS "Build tests" OFF)
+
 if(FRANS_BUILD_TESTS)
-enable_testing()
-# ------------------------------------------------------------------
-# frans_scenarios
-# Runner test scenario untuk Manual Import + Danger Check + Sandbox
-# + error parser (traceback frame picking) + PromptGenerator (#42)
-# + FileCollector (#46) + MarkdownRenderer (#48).
-#
-# frans_scenarios                -> jalankan semua scenario
-# frans_scenarios --list         -> daftar nama scenario
-# frans_scenarios --dump NAME    -> print scenario (paste ke GUI)
-# ------------------------------------------------------------------
-set(FRANS_SCENARIO_SOURCES
-tests/ScenarioTest.cpp
-src/application/import/MultiFileParser.cpp
-src/application/safety/DangerCheckHandler.cpp
-src/infrastructure/fs/SandboxedFileSystem.cpp
-src/application/build_runner/BuildSystems/StandaloneBuildSystem.cpp
-src/application/prompt/PromptGenerator.cpp
-# Fase B #46: FileCollector + ProcessExecutor (untuk git ls-files fallback)
-src/application/ingest/FileCollector.cpp
-# Fase B #48: MarkdownRenderer (murni, tanpa I/O)
-src/application/ingest/MarkdownRenderer.cpp
-)
-if(WIN32)
-list(APPEND FRANS_SCENARIO_SOURCES
-src/infrastructure/system/ProcessExecutor_win32.cpp)
-else()
-list(APPEND FRANS_SCENARIO_SOURCES
-src/infrastructure/system/ProcessExecutor_posix.cpp)
-endif()
-add_executable(frans_scenarios ${FRANS_SCENARIO_SOURCES})
-target_include_directories(frans_scenarios PRIVATE
-${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-target_link_libraries(frans_scenarios PRIVATE
-Threads::Threads
-${FRANS_PLATFORM_LIBS}
-frans_warnings
-)
-if(FRANS_PLATFORM_DEFS)
-target_compile_definitions(frans_scenarios PRIVATE ${FRANS_PLATFORM_DEFS})
-endif()
-add_test(NAME scenario_tests COMMAND frans_scenarios)
-# ------------------------------------------------------------------
-# frans_session_tests  (Fase A #44 + #45)
-# Test ringan, TANPA FLTK dan TANPA ProsesExecutor:
-# - summarizeBuildError()  : isi ringkasan error per phase
-# - wasCancelledByUser()   : deteksi cancel
-# - SessionState           : aturan publish / clear / skip-cancel
-# - integrasi ke PromptGenerator (blok ERROR)
-#
-# Hanya 3 file .cpp -> compile cepat di mesin lama.
-# ------------------------------------------------------------------
-add_executable(frans_session_tests
-tests/SessionStateTest.cpp
-src/application/build_runner/BuildErrorSummary.cpp
-src/application/prompt/PromptGenerator.cpp
-)
-target_include_directories(frans_session_tests PRIVATE
-${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-target_link_libraries(frans_session_tests PRIVATE
-frans_warnings
-)
-add_test(NAME session_state_tests COMMAND frans_session_tests)
-# ------------------------------------------------------------------
-# frans_apikey_tests  (Fase C #54)
-# ApiKeyProvider: env -> file kunci -> default ~/.gemini/api_key,
-# trim/BOM/CRLF, izin file longgar, masking 4 karakter terakhir,
-# dan pastikan diagnostik tidak membocorkan key.
-#
-# Test memakai HOME palsu di direktori temp; file kunci asli pengguna
-# tidak disentuh. Tanpa FLTK, tanpa jaringan, tanpa subprocess.
-# ------------------------------------------------------------------
-add_executable(frans_apikey_tests
-tests/ApiKeyProviderTest.cpp
-src/application/ai/ApiKeyProvider.cpp
-)
-target_include_directories(frans_apikey_tests PRIVATE
-${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-target_link_libraries(frans_apikey_tests PRIVATE
-frans_warnings
-)
-add_test(NAME apikey_provider_tests COMMAND frans_apikey_tests)
-# ------------------------------------------------------------------
-# frans_gemini_schema_tests  (Fase C #57)
-# GeminiSchema: verifikasi struktur JSON schema untuk response Gemini
-# dan file prompt gemini_selector_prompt.txt ada serta valid.
-#
-# Tanpa FLTK, tanpa jaringan, tanpa subprocess.
-# ------------------------------------------------------------------
-add_executable(frans_gemini_schema_tests
-tests/GeminiSchemaTest.cpp
-src/application/ai/GeminiSchema.cpp
-)
-target_include_directories(frans_gemini_schema_tests PRIVATE
-${CMAKE_CURRENT_SOURCE_DIR}/src
-${CMAKE_CURRENT_SOURCE_DIR}/third_party
-)
-target_link_libraries(frans_gemini_schema_tests PRIVATE
-frans_warnings
-)
-# Copy config files ke build directory agar test bisa akses
-add_custom_command(TARGET frans_gemini_schema_tests POST_BUILD
-COMMAND ${CMAKE_COMMAND} -E copy_directory
-${CMAKE_CURRENT_SOURCE_DIR}/config
-${CMAKE_CURRENT_BINARY_DIR}/config
-COMMENT "Copying config files for gemini schema tests"
-)
-add_test(NAME gemini_schema_tests COMMAND frans_gemini_schema_tests)
-# ------------------------------------------------------------------
-# frans_context_tests  (Fase C #60)
-# SourceCodeBuilder:
-#   - fnv1a_64_hex         : panjang, lowercase, konsistensi, vektor known
-#   - buildManifestJson    : struktur JSON, escape karakter, files kosong
-#   - buildSourceCode      : happy path, unselected excluded, content
-#                            identik dengan disk, empty selection,
-#                            error input kosong, cancel flag
-#
-# Tanpa FLTK, tanpa jaringan, tanpa subprocess, tanpa git.
-# Memakai temp directory sebagai fixture (RAII, auto-cleanup).
-# ------------------------------------------------------------------
-set(FRANS_CONTEXT_TEST_SOURCES
-tests/context/source_code_builder_tests.cpp
-src/application/context/SourceCodeBuilder.cpp
-src/application/context/ContextSelector.cpp
-src/application/ingest/MarkdownRenderer.cpp
-src/application/ingest/FileCollector.cpp
-src/application/ai/GeminiClient.cpp
-src/application/ai/ApiKeyProvider.cpp
-src/application/ai/GeminiSchema.cpp
-src/infrastructure/fs/SandboxedFileSystem.cpp
-src/infrastructure/http/CurlTransport.cpp
-)
-if(WIN32)
-list(APPEND FRANS_CONTEXT_TEST_SOURCES
-src/infrastructure/system/ProcessExecutor_win32.cpp)
-else()
-list(APPEND FRANS_CONTEXT_TEST_SOURCES
-src/infrastructure/system/ProcessExecutor_posix.cpp)
-endif()
-add_executable(frans_context_tests ${FRANS_CONTEXT_TEST_SOURCES})
-target_include_directories(frans_context_tests PRIVATE
-${CMAKE_CURRENT_SOURCE_DIR}/src
-${CMAKE_CURRENT_SOURCE_DIR}/third_party
-)
-target_link_libraries(frans_context_tests PRIVATE
-Threads::Threads
-${FRANS_PLATFORM_LIBS}
-frans_warnings
-)
-if(FRANS_PLATFORM_DEFS)
-target_compile_definitions(frans_context_tests PRIVATE ${FRANS_PLATFORM_DEFS})
-endif()
-add_test(NAME source_code_builder_tests COMMAND frans_context_tests)
+    enable_testing()
+
+    #------------------------------------------------------------------
+    # frans_scenarios
+    # Runner test scenario untuk Manual Import + Danger Check + Sandbox
+    # + error parser (traceback frame picking) + PromptGenerator (#42)
+    # + FileCollector (#46) + MarkdownRenderer (#48).
+    #
+    # frans_scenarios                -> jalankan semua scenario
+    # frans_scenarios --list         -> daftar nama scenario
+    # frans_scenarios --dump NAME    -> print scenario (paste ke GUI)
+    #------------------------------------------------------------------
+    set(FRANS_SCENARIO_SOURCES
+        tests/ScenarioTest.cpp
+        src/application/import/MultiFileParser.cpp
+        src/application/safety/DangerCheckHandler.cpp
+        src/infrastructure/fs/SandboxedFileSystem.cpp
+        src/application/build_runner/BuildSystems/StandaloneBuildSystem.cpp
+        src/application/prompt/PromptGenerator.cpp
+
+        # Fase B #46: FileCollector + ProcessExecutor (untuk git ls-files fallback)
+        src/application/ingest/FileCollector.cpp
+
+        # Fase B #48: MarkdownRenderer (murni, tanpa I/O)
+        src/application/ingest/MarkdownRenderer.cpp
+    )
+
+    if(WIN32)
+        list(APPEND FRANS_SCENARIO_SOURCES
+            src/infrastructure/system/ProcessExecutor_win32.cpp)
+    else()
+        list(APPEND FRANS_SCENARIO_SOURCES
+            src/infrastructure/system/ProcessExecutor_posix.cpp)
+    endif()
+
+    add_executable(frans_scenarios ${FRANS_SCENARIO_SOURCES})
+
+    target_include_directories(frans_scenarios PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_link_libraries(frans_scenarios PRIVATE
+        Threads::Threads
+        ${FRANS_PLATFORM_LIBS}
+        frans_warnings
+    )
+
+    if(FRANS_PLATFORM_DEFS)
+        target_compile_definitions(frans_scenarios PRIVATE ${FRANS_PLATFORM_DEFS})
+    endif()
+
+    add_test(NAME scenario_tests COMMAND frans_scenarios)
+
+    #------------------------------------------------------------------
+    # frans_session_tests  (Fase A #44 + #45)
+    # Test ringan, TANPA FLTK dan TANPA ProsesExecutor:
+    # - summarizeBuildError()  : isi ringkasan error per phase
+    # - wasCancelledByUser()   : deteksi cancel
+    # - SessionState           : aturan publish / clear / skip-cancel
+    # - integrasi ke PromptGenerator (blok ERROR)
+    #
+    # Hanya 3 file .cpp -> compile cepat di mesin lama.
+    #------------------------------------------------------------------
+    add_executable(frans_session_tests
+        tests/SessionStateTest.cpp
+        src/application/build_runner/BuildErrorSummary.cpp
+        src/application/prompt/PromptGenerator.cpp
+    )
+
+    target_include_directories(frans_session_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_link_libraries(frans_session_tests PRIVATE
+        frans_warnings
+    )
+
+    add_test(NAME session_state_tests COMMAND frans_session_tests)
+
+    #------------------------------------------------------------------
+    # frans_apikey_tests  (Fase C #54)
+    # ApiKeyProvider: env -> file kunci -> default ~/.gemini/api_key,
+    # trim/BOM/CRLF, izin file longgar, masking 4 karakter terakhir,
+    # dan pastikan diagnostik tidak membocorkan key.
+    #
+    # Test memakai HOME palsu di direktori temp; file kunci asli pengguna
+    # tidak disentuh. Tanpa FLTK, tanpa jaringan, tanpa subprocess.
+    #------------------------------------------------------------------
+    add_executable(frans_apikey_tests
+        tests/ApiKeyProviderTest.cpp
+        src/application/ai/ApiKeyProvider.cpp
+    )
+
+    target_include_directories(frans_apikey_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_link_libraries(frans_apikey_tests PRIVATE
+        frans_warnings
+    )
+
+    add_test(NAME apikey_provider_tests COMMAND frans_apikey_tests)
+
+    #------------------------------------------------------------------
+    # frans_gemini_schema_tests  (Fase C #57)
+    # GeminiSchema: verifikasi struktur JSON schema untuk response Gemini
+    # dan file prompt gemini_selector_prompt.txt ada serta valid.
+    #
+    # Tanpa FLTK, tanpa jaringan, tanpa subprocess.
+    #------------------------------------------------------------------
+    add_executable(frans_gemini_schema_tests
+        tests/GeminiSchemaTest.cpp
+        src/application/ai/GeminiSchema.cpp
+    )
+
+    target_include_directories(frans_gemini_schema_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    )
+
+    target_link_libraries(frans_gemini_schema_tests PRIVATE
+        frans_warnings
+    )
+
+    # Copy config files ke build directory agar test bisa akses
+    add_custom_command(TARGET frans_gemini_schema_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/config
+            ${CMAKE_CURRENT_BINARY_DIR}/config
+        COMMENT "Copying config files for gemini schema tests"
+    )
+
+    add_test(NAME gemini_schema_tests COMMAND frans_gemini_schema_tests)
+
+    #------------------------------------------------------------------
+    # frans_context_tests  (Fase C #60)
+    # SourceCodeBuilder:
+    # - fnv1a_64_hex         : panjang, lowercase, konsistensi, vektor known
+    # - buildManifestJson    : struktur JSON, escape karakter, files kosong
+    # - buildSourceCode      : happy path, unselected excluded, content
+    #                          identik dengan disk, empty selection,
+    #                          error input kosong, cancel flag
+    #
+    # Tanpa FLTK, tanpa jaringan, tanpa subprocess, tanpa git.
+    # Memakai temp directory sebagai fixture (RAII, auto-cleanup).
+    #------------------------------------------------------------------
+    set(FRANS_CONTEXT_TEST_SOURCES
+        tests/context/source_code_builder_tests.cpp
+        src/application/context/SourceCodeBuilder.cpp
+        src/application/context/ContextSelector.cpp
+        src/application/ingest/MarkdownRenderer.cpp
+        src/application/ingest/FileCollector.cpp
+        src/application/ai/GeminiClient.cpp
+        src/application/ai/ApiKeyProvider.cpp
+        src/application/ai/GeminiSchema.cpp
+        src/infrastructure/fs/SandboxedFileSystem.cpp
+        src/infrastructure/http/CurlTransport.cpp
+    )
+
+    if(WIN32)
+        list(APPEND FRANS_CONTEXT_TEST_SOURCES
+            src/infrastructure/system/ProcessExecutor_win32.cpp)
+    else()
+        list(APPEND FRANS_CONTEXT_TEST_SOURCES
+            src/infrastructure/system/ProcessExecutor_posix.cpp)
+    endif()
+
+    add_executable(frans_context_tests ${FRANS_CONTEXT_TEST_SOURCES})
+
+    target_include_directories(frans_context_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    )
+
+    target_link_libraries(frans_context_tests PRIVATE
+        Threads::Threads
+        ${FRANS_PLATFORM_LIBS}
+        frans_warnings
+    )
+
+    if(FRANS_PLATFORM_DEFS)
+        target_compile_definitions(frans_context_tests PRIVATE ${FRANS_PLATFORM_DEFS})
+    endif()
+
+    add_test(NAME source_code_builder_tests COMMAND frans_context_tests)
+
+    #------------------------------------------------------------------
+    # frans_git_facade_tests  (Fase D #67)
+    # GitFacade pure functions:
+    # - parseStatusPorcelain   : parse output git status --porcelain=v1 -b
+    # - suggestCommitMessage   : generate commit message suggestion
+    #
+    # Tanpa FLTK, tanpa jaringan, tanpa subprocess, tanpa git.
+    #------------------------------------------------------------------
+    add_executable(frans_git_facade_tests
+        tests/git/GitFacadeTest.cpp
+        src/application/git/GitFacade.cpp
+    )
+
+    target_include_directories(frans_git_facade_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_link_libraries(frans_git_facade_tests PRIVATE
+        frans_warnings
+    )
+
+    add_test(NAME git_facade_tests COMMAND frans_git_facade_tests)
+
 endif()
 ================================================
-FILE: src/infrastructure/system/ProcessExecutor.h
+FILE: src/application/git/GitFacade.cpp
+================================================
+#include "application/git/GitFacade.h"
+#include <algorithm>
+#include <cctype>
+#include <regex>
+#include <sstream>
+
+namespace frans::application {
+
+namespace {
+
+std::string trim(const std::string& s) {
+    auto start = s.begin();
+    while (start != s.end() && std::isspace(*start)) ++start;
+    auto end = s.end();
+    do { --end; } while (std::distance(start, end) > 0 && std::isspace(*end));
+    return std::string(start, end + 1);
+}
+
+std::string unquotePath(const std::string& path) {
+    if (path.size() >= 2 && path.front() == '"' && path.back() == '"') {
+        std::string result;
+        result.reserve(path.size() - 2);
+        for (size_t i = 1; i < path.size() - 1; ++i) {
+            if (path[i] == '\\' && i + 1 < path.size() - 1) {
+                char next = path[i + 1];
+                if (next == '"' || next == '\\' || next == 'n' || next == 't') {
+                    if (next == 'n') result += '\n';
+                    else if (next == 't') result += '\t';
+                    else result += next;
+                    ++i;
+                    continue;
+                }
+            }
+            result += path[i];
+        }
+        return result;
+    }
+    return path;
+}
+
+bool isSuspiciousPath(const std::string& path) {
+    static const std::vector<std::string> suspicious_patterns = {
+        ".env", ".env.", "credentials", "secret", "password",
+        "private_key", "id_rsa", "id_ed25519", ".pem", ".key"
+    };
+    
+    std::string lower_path = path;
+    std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    
+    for (const auto& pattern : suspicious_patterns) {
+        if (lower_path.find(pattern) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+GitFacade::GitFacade(std::string project_root)
+    : project_root_(std::move(project_root)) {}
+
+GitStatus GitFacade::parseStatusPorcelain(const std::string& text) {
+    GitStatus status;
+    
+    if (text.empty()) {
+        status.error = "Empty status output";
+        return status;
+    }
+    
+    std::istringstream stream(text);
+    std::string line;
+    bool first_line = true;
+    
+    while (std::getline(stream, line)) {
+        if (line.empty()) continue;
+        
+        if (first_line) {
+            first_line = false;
+            
+            if (line.substr(0, 3) != "## ") {
+                status.error = "Invalid porcelain format: missing branch header";
+                return status;
+            }
+            
+            status.is_repo = true;
+            
+            std::string branch_info = line.substr(3);
+            
+            auto dots_pos = branch_info.find("...");
+            if (dots_pos != std::string::npos) {
+                status.branch = branch_info.substr(0, dots_pos);
+                std::string rest = branch_info.substr(dots_pos + 3);
+                
+                auto bracket_pos = rest.find('[');
+                if (bracket_pos != std::string::npos) {
+                    status.upstream = rest.substr(0, bracket_pos);
+                    std::string counts = rest.substr(bracket_pos + 1);
+                    
+                    auto ahead_match = std::regex_search(counts, std::regex("ahead (\\d+)"));
+                    auto behind_match = std::regex_search(counts, std::regex("behind (\\d+)"));
+                    
+                    std::smatch match;
+                    if (std::regex_search(counts, match, std::regex("ahead (\\d+)"))) {
+                        status.ahead = std::stoi(match[1].str());
+                    }
+                    if (std::regex_search(counts, match, std::regex("behind (\\d+)"))) {
+                        status.behind = std::stoi(match[1].str());
+                    }
+                } else {
+                    status.upstream = trim(rest);
+                }
+            } else {
+                status.branch = trim(branch_info);
+            }
+            
+            continue;
+        }
+        
+        if (line.size() < 3) continue;
+        
+        GitFileChange change;
+        change.index_status = line[0];
+        change.worktree_status = line[1];
+        
+        std::string path_part = line.substr(3);
+        
+        auto arrow_pos = path_part.find(" -> ");
+        if (arrow_pos != std::string::npos) {
+            path_part = path_part.substr(arrow_pos + 4);
+        }
+        
+        change.path = unquotePath(trim(path_part));
+        change.suspicious = isSuspiciousPath(change.path);
+        
+        status.changes.push_back(std::move(change));
+    }
+    
+    return status;
+}
+
+std::string GitFacade::suggestCommitMessage(const GitStatus& st) {
+    if (st.changes.empty()) {
+        return "No changes to commit";
+    }
+    
+    int added = 0, modified = 0, deleted = 0, renamed = 0, untracked = 0;
+    std::vector<std::string> file_names;
+    
+    for (const auto& change : st.changes) {
+        char status = change.index_status != ' ' ? change.index_status : change.worktree_status;
+        
+        switch (status) {
+            case 'A': ++added; break;
+            case 'M': ++modified; break;
+            case 'D': ++deleted; break;
+            case 'R': ++renamed; break;
+            case '?': ++untracked; break;
+            default: break;
+        }
+        
+        if (file_names.size() < 3) {
+            auto last_slash = change.path.find_last_of('/');
+            std::string filename = (last_slash != std::string::npos) 
+                ? change.path.substr(last_slash + 1) 
+                : change.path;
+            file_names.push_back(filename);
+        }
+    }
+    
+    std::ostringstream msg;
+    
+    if (st.changes.size() == 1) {
+        const auto& change = st.changes[0];
+        char status = change.index_status != ' ' ? change.index_status : change.worktree_status;
+        
+        auto last_slash = change.path.find_last_of('/');
+        std::string filename = (last_slash != std::string::npos) 
+            ? change.path.substr(last_slash + 1) 
+            : change.path;
+        
+        switch (status) {
+            case 'A': msg << "Add " << filename; break;
+            case 'M': msg << "Update " << filename; break;
+            case 'D': msg << "Remove " << filename; break;
+            case 'R': msg << "Rename " << filename; break;
+            case '?': msg << "Add untracked " << filename; break;
+            default:  msg << "Update " << filename; break;
+        }
+    } else {
+        std::vector<std::string> actions;
+        if (added > 0) actions.push_back(std::to_string(added) + " added");
+        if (modified > 0) actions.push_back(std::to_string(modified) + " modified");
+        if (deleted > 0) actions.push_back(std::to_string(deleted) + " deleted");
+        if (renamed > 0) actions.push_back(std::to_string(renamed) + " renamed");
+        if (untracked > 0) actions.push_back(std::to_string(untracked) + " untracked");
+        
+        msg << "Update " << st.changes.size() << " files (";
+        for (size_t i = 0; i < actions.size(); ++i) {
+            if (i > 0) msg << ", ";
+            msg << actions[i];
+        }
+        msg << ")";
+        
+        if (msg.str().size() > 72) {
+            msg.str("");
+            msg << "Update " << st.changes.size() << " files";
+        }
+    }
+    
+    return msg.str();
+}
+
+GitStatus GitFacade::status(std::atomic<bool>* /*cancel*/) {
+    GitStatus result;
+    result.error = "Not implemented in Fase D #67 (pure functions only)";
+    return result;
+}
+
+GitOpResult GitFacade::addAll(std::atomic<bool>* /*cancel*/) {
+    GitOpResult result;
+    result.error = "Not implemented in Fase D #67";
+    return result;
+}
+
+GitOpResult GitFacade::commit(const std::string& /*message*/, std::atomic<bool>* /*cancel*/) {
+    GitOpResult result;
+    result.error = "Not implemented in Fase D #67";
+    return result;
+}
+
+GitOpResult GitFacade::push(std::atomic<bool>* /*cancel*/) {
+    GitOpResult result;
+    result.error = "Not implemented in Fase D #67";
+    return result;
+}
+
+} // namespace frans::application
+================================================
+FILE: src/application/git/GitFacade.h
 ================================================
 #pragma once
-
 #include <atomic>
 #include <string>
 #include <vector>
 
-namespace frans::infrastructure {
+namespace frans::application {
 
-struct ProcessResult {
-    int  exit_code = -1;
-    bool timed_out = false;
-    bool cancelled_by_user = false;
-    std::string stdout_text;
-    std::string stderr_text;
+struct GitFileChange {
+    char index_status = ' ';
+    char worktree_status = ' ';
+    std::string path;
+    bool suspicious = false;
 };
 
-// Jalankan argv (argv[0] di-resolve via PATH) dan tunggu selesai.
-//
-// - timeout_sec : >0 = batas detik; kalau lewat, proses di-kill.
-// - stdin_data  : kalau tidak kosong, ditulis ke stdin child.
-// - working_dir : kalau tidak kosong, child chdir ke sini SEBELUM exec.
-// - cancel_flag : kalau non-null dan bernilai true, kill child.
-ProcessResult runCommand(const std::vector<std::string>& argv,
-                         int timeout_sec = 30,
-                         const std::string& stdin_data = {},
-                         const std::string& working_dir = {},
-                         std::atomic<bool>* cancel_flag = nullptr);
+struct GitStatus {
+    bool is_repo = false;
+    bool git_available = true;
+    std::string branch;
+    std::string upstream;
+    std::string error;
+    int ahead = 0;
+    int behind = 0;
+    std::vector<GitFileChange> changes;
+    
+    bool clean() const { return is_repo && changes.empty(); }
+};
 
-} // namespace frans::infrastructure
+struct GitOpResult {
+    bool ok = false;
+    int exit_code = -1;
+    bool cancelled = false;
+    std::string output;
+    std::string error;
+};
+
+class GitFacade {
+public:
+    explicit GitFacade(std::string project_root);
+    
+    GitStatus   status(std::atomic<bool>* cancel = nullptr);
+    GitOpResult addAll(std::atomic<bool>* cancel = nullptr);
+    GitOpResult commit(const std::string& message, std::atomic<bool>* cancel = nullptr);
+    GitOpResult push(std::atomic<bool>* cancel = nullptr);
+    
+    static GitStatus   parseStatusPorcelain(const std::string& text);
+    static std::string suggestCommitMessage(const GitStatus& st);
+
+private:
+    std::string project_root_;
+};
+
+} // namespace frans::application
 ================================================
-FILE: src/infrastructure/system/ProcessExecutor_posix.cpp
+FILE: tests/git/GitFacadeTest.cpp
 ================================================
-#include "infrastructure/system/ProcessExecutor.h"
-
-#include <cerrno>
-#include <chrono>
-#include <csignal>
-#include <cstdio>
-#include <cstring>
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
-namespace frans::infrastructure {
-
-namespace {
-
-void close_if_valid(int fd) {
-    if (fd >= 0) ::close(fd);
-}
-
-std::string argvToStr(const std::vector<std::string>& argv) {
-    std::string s;
-    for (std::size_t i = 0; i < argv.size(); ++i) {
-        if (i) s += ' ';
-        s += argv[i];
-    }
-    return s;
-}
-
-} // namespace
-
-ProcessResult runCommand(const std::vector<std::string>& argv,
-                         int timeout_sec,
-                         const std::string& stdin_data,
-                         const std::string& working_dir,
-                         std::atomic<bool>* cancel_flag) {
-    ProcessResult result;
-    if (argv.empty()) {
-        result.stderr_text = "runCommand: argv kosong";
-        return result;
-    }
-
-    const std::string cmd_str = argvToStr(argv);
-    std::fprintf(stderr,
-        "[frans] runCommand START: %s (cwd=%s, timeout=%ds)\n",
-        cmd_str.c_str(), working_dir.c_str(), timeout_sec);
-    std::fflush(stderr);
-
-    int in_pipe[2]  = {-1, -1};
-    int out_pipe[2] = {-1, -1};
-    int err_pipe[2] = {-1, -1};
-
-    if (pipe(out_pipe) != 0 || pipe(err_pipe) != 0) {
-        result.stderr_text = std::string("pipe: ") + std::strerror(errno);
-        return result;
-    }
-    if (!stdin_data.empty() && pipe(in_pipe) != 0) {
-        result.stderr_text = std::string("pipe(stdin): ") + std::strerror(errno);
-        close_if_valid(out_pipe[0]); close_if_valid(out_pipe[1]);
-        close_if_valid(err_pipe[0]); close_if_valid(err_pipe[1]);
-        return result;
-    }
-
-    const pid_t pid = ::fork();
-    if (pid < 0) {
-        result.stderr_text = std::string("fork: ") + std::strerror(errno);
-        close_if_valid(in_pipe[0]);  close_if_valid(in_pipe[1]);
-        close_if_valid(out_pipe[0]); close_if_valid(out_pipe[1]);
-        close_if_valid(err_pipe[0]); close_if_valid(err_pipe[1]);
-        return result;
-    }
-
-    if (pid == 0) {
-        if (!stdin_data.empty()) {
-            ::dup2(in_pipe[0], STDIN_FILENO);
-            close_if_valid(in_pipe[0]);
-            close_if_valid(in_pipe[1]);
-        } else {
-            const int devnull = ::open("/dev/null", O_RDONLY);
-            if (devnull >= 0) { ::dup2(devnull, STDIN_FILENO); ::close(devnull); }
-        }
-
-        ::dup2(out_pipe[1], STDOUT_FILENO);
-        ::dup2(err_pipe[1], STDERR_FILENO);
-        close_if_valid(out_pipe[0]); close_if_valid(out_pipe[1]);
-        close_if_valid(err_pipe[0]); close_if_valid(err_pipe[1]);
-
-        if (!working_dir.empty()) {
-            if (::chdir(working_dir.c_str()) != 0) {
-                std::fprintf(stderr, "chdir(%s): %s\n",
-                             working_dir.c_str(), std::strerror(errno));
-                ::_exit(126);
-            }
-        }
-
-        std::vector<char*> c_argv;
-        c_argv.reserve(argv.size() + 1);
-        for (const auto& s : argv) c_argv.push_back(const_cast<char*>(s.c_str()));
-        c_argv.push_back(nullptr);
-
-        ::execvp(c_argv[0], c_argv.data());
-
-        std::fprintf(stderr, "execvp(%s): %s\n", c_argv[0], std::strerror(errno));
-        ::_exit(127);
-    }
-
-    close_if_valid(out_pipe[1]); out_pipe[1] = -1;
-    close_if_valid(err_pipe[1]); err_pipe[1] = -1;
-
-    if (!stdin_data.empty()) {
-        close_if_valid(in_pipe[0]); in_pipe[0] = -1;
-        const char* p = stdin_data.data();
-        std::size_t remaining = stdin_data.size();
-        while (remaining > 0) {
-            const ssize_t w = ::write(in_pipe[1], p, remaining);
-            if (w < 0) { if (errno == EINTR) continue; break; }
-            p += w;
-            remaining -= static_cast<std::size_t>(w);
-        }
-        close_if_valid(in_pipe[1]); in_pipe[1] = -1;
-    }
-
-    (void)::fcntl(out_pipe[0], F_SETFL, O_NONBLOCK);
-    (void)::fcntl(err_pipe[0], F_SETFL, O_NONBLOCK);
-
-    const int effective_timeout = timeout_sec > 0 ? timeout_sec : 30;
-    const auto deadline = std::chrono::steady_clock::now()
-                        + std::chrono::seconds(effective_timeout);
-
-    bool out_open = true;
-    bool err_open = true;
-    bool killed = false;
-    char buf[4096];
-
-    while (out_open || err_open) {
-        if (!killed && cancel_flag && cancel_flag->load()) {
-            result.cancelled_by_user = true;
-            ::kill(pid, SIGKILL);
-            killed = true;
-        }
-
-        if (!killed && std::chrono::steady_clock::now() > deadline) {
-            result.timed_out = true;
-            ::kill(pid, SIGKILL);
-            killed = true;
-        }
-
-        struct pollfd fds[2];
-        int nfds = 0;
-        int idx_out = -1, idx_err = -1;
-        if (out_open) { fds[nfds].fd = out_pipe[0]; fds[nfds].events = POLLIN; idx_out = nfds++; }
-        if (err_open) { fds[nfds].fd = err_pipe[0]; fds[nfds].events = POLLIN; idx_err = nfds++; }
-
-        const int p = ::poll(fds, static_cast<nfds_t>(nfds), 200);
-        if (p < 0) { if (errno == EINTR) continue; break; }
-        if (p == 0) continue;
-
-        for (int i = 0; i < nfds; ++i) {
-            if (!(fds[i].revents & (POLLIN | POLLHUP | POLLERR))) continue;
-            const ssize_t r = ::read(fds[i].fd, buf, sizeof(buf));
-            if (r > 0) {
-                if (i == idx_out)      result.stdout_text.append(buf, static_cast<std::size_t>(r));
-                else if (i == idx_err) result.stderr_text.append(buf, static_cast<std::size_t>(r));
-            } else if (r == 0) {
-                if (i == idx_out)      out_open = false;
-                else if (i == idx_err) err_open = false;
-            } else {
-                if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-                    if (i == idx_out)      out_open = false;
-                    else if (i == idx_err) err_open = false;
-                }
-            }
-        }
-    }
-
-    close_if_valid(out_pipe[0]);
-    close_if_valid(err_pipe[0]);
-
-    int status = 0;
-    while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-
-    if (WIFEXITED(status))         result.exit_code = WEXITSTATUS(status);
-    else if (WIFSIGNALED(status))  result.exit_code = 128 + WTERMSIG(status);
-    else                           result.exit_code = -1;
-
-    std::fprintf(stderr, "[frans] runCommand DONE: %s -> exit=%d%s%s\n",
-                 cmd_str.c_str(), result.exit_code,
-                 result.timed_out ? " (TIMED OUT)" : "",
-                 result.cancelled_by_user ? " (CANCELLED)" : "");
-    std::fflush(stderr);
-
-    return result;
-}
-
-} // namespace frans::infrastructure
-================================================
-FILE: src/infrastructure/system/ProcessExecutor_win32.cpp
-================================================
-// Implementasi Windows pakai CreateProcess + pipe.
-// Catatan: belum diuji di Windows asli; perlu verifikasi saat test.
-#include "infrastructure/system/ProcessExecutor.h"
-
-#include <windows.h>
-
-#include <chrono>
-#include <cstdio>
+#include "application/git/GitFacade.h"
+#include <cassert>
+#include <iostream>
 #include <string>
-#include <thread>
-#include <vector>
 
-namespace frans::infrastructure {
+using namespace frans::application;
 
-namespace {
-
-std::string joinArgv(const std::vector<std::string>& argv) {
-    std::string s;
-    for (std::size_t i = 0; i < argv.size(); ++i) {
-        if (i) s += ' ';
-        // Quote sederhana; tidak menangani embedded quote.
-        if (argv[i].find(' ') != std::string::npos) {
-            s += '"' + argv[i] + '"';
-        } else {
-            s += argv[i];
-        }
-    }
-    return s;
+void test_parseStatusPorcelain_clean() {
+    std::string input = "## main...origin/main\n";
+    auto status = GitFacade::parseStatusPorcelain(input);
+    
+    assert(status.is_repo);
+    assert(status.branch == "main");
+    assert(status.upstream == "origin/main");
+    assert(status.ahead == 0);
+    assert(status.behind == 0);
+    assert(status.changes.empty());
+    assert(status.clean());
+    
+    std::cout << "PASS: test_parseStatusPorcelain_clean\n";
 }
 
-std::string wideToUtf8(const std::wstring& w) {
-    if (w.empty()) return {};
-    const int n = ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
-        static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
-    std::string out(static_cast<std::size_t>(n), '\0');
-    ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
-        static_cast<int>(w.size()), out.data(), n, nullptr, nullptr);
-    return out;
+void test_parseStatusPorcelain_ahead_behind() {
+    std::string input = "## feature...origin/feature [ahead 3, behind 2]\n";
+    auto status = GitFacade::parseStatusPorcelain(input);
+    
+    assert(status.is_repo);
+    assert(status.branch == "feature");
+    assert(status.upstream == "origin/feature");
+    assert(status.ahead == 3);
+    assert(status.behind == 2);
+    
+    std::cout << "PASS: test_parseStatusPorcelain_ahead_behind\n";
 }
 
-std::wstring utf8ToWide(const std::string& s) {
-    if (s.empty()) return {};
-    const int n = ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
-        static_cast<int>(s.size()), nullptr, 0);
-    std::wstring out(static_cast<std::size_t>(n), L'\0');
-    ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
-        static_cast<int>(s.size()), out.data(), n);
-    return out;
+void test_parseStatusPorcelain_no_upstream() {
+    std::string input = "## new-branch\n";
+    auto status = GitFacade::parseStatusPorcelain(input);
+    
+    assert(status.is_repo);
+    assert(status.branch == "new-branch");
+    assert(status.upstream.empty());
+    
+    std::cout << "PASS: test_parseStatusPorcelain_no_upstream\n";
 }
 
-} // namespace
-
-ProcessResult runCommand(const std::vector<std::string>& argv,
-                         int timeout_sec,
-                         const std::string& stdin_data,
-                         const std::string& working_dir,
-                         std::atomic<bool>* cancel_flag) {
-    ProcessResult result;
-    if (argv.empty()) {
-        result.stderr_text = "runCommand: argv kosong";
-        return result;
-    }
-
-    const std::string cmd_str = joinArgv(argv);
-    std::fprintf(stderr, "[frans] runCommand START: %s (cwd=%s)\n",
-        cmd_str.c_str(), working_dir.c_str());
-    std::fflush(stderr);
-
-    SECURITY_ATTRIBUTES sa{};
-    sa.nLength        = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-
-    HANDLE out_r = nullptr, out_w = nullptr;
-    HANDLE err_r = nullptr, err_w = nullptr;
-    HANDLE in_r  = nullptr, in_w  = nullptr;
-
-    if (!::CreatePipe(&out_r, &out_w, &sa, 0)) {
-        result.stderr_text = "CreatePipe(stdout) gagal";
-        return result;
-    }
-    if (!::CreatePipe(&err_r, &err_w, &sa, 0)) {
-        ::CloseHandle(out_r); ::CloseHandle(out_w);
-        result.stderr_text = "CreatePipe(stderr) gagal";
-        return result;
-    }
-    if (!stdin_data.empty()) {
-        if (!::CreatePipe(&in_r, &in_w, &sa, 0)) {
-            ::CloseHandle(out_r); ::CloseHandle(out_w);
-            ::CloseHandle(err_r); ::CloseHandle(err_w);
-            result.stderr_text = "CreatePipe(stdin) gagal";
-            return result;
-        }
-    }
-
-    ::SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
-    ::SetHandleInformation(err_r, HANDLE_FLAG_INHERIT, 0);
-    if (in_w) ::SetHandleInformation(in_w, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOW si{};
-    si.cb         = sizeof(si);
-    si.dwFlags    = STARTF_USESTDHANDLES;
-    si.hStdOutput = out_w;
-    si.hStdError  = err_w;
-    si.hStdInput  = in_r ? in_r : ::GetStdHandle(STD_INPUT_HANDLE);
-
-    PROCESS_INFORMATION pi{};
-
-    std::wstring cmdw = utf8ToWide(cmd_str);
-    std::vector<wchar_t> cmd_buf(cmdw.begin(), cmdw.end());
-    cmd_buf.push_back(L'\0');
-
-    std::wstring cwdw = working_dir.empty() ? std::wstring{}
-                                             : utf8ToWide(working_dir);
-
-    const BOOL ok = ::CreateProcessW(
-        nullptr, cmd_buf.data(),
-        nullptr, nullptr, TRUE, 0,
-        nullptr,
-        cwdw.empty() ? nullptr : cwdw.c_str(),
-        &si, &pi);
-
-    ::CloseHandle(out_w);
-    ::CloseHandle(err_w);
-    if (in_r) ::CloseHandle(in_r);
-
-    if (!ok) {
-        ::CloseHandle(out_r); ::CloseHandle(err_r);
-        if (in_w) ::CloseHandle(in_w);
-        result.stderr_text = "CreateProcess gagal";
-        return result;
-    }
-
-    // Kirim stdin kalau ada.
-    if (!stdin_data.empty() && in_w) {
-        DWORD written = 0;
-        ::WriteFile(in_w, stdin_data.data(),
-                    static_cast<DWORD>(stdin_data.size()), &written, nullptr);
-        ::CloseHandle(in_w);
-    }
-
-    // Baca stdout + stderr.
-    auto readPipe = [](HANDLE h, std::string& out) {
-        char buf[4096];
-        DWORD r = 0;
-        while (::ReadFile(h, buf, sizeof(buf), &r, nullptr) && r > 0) {
-            out.append(buf, r);
-        }
-    };
-
-    std::thread t_out([&]{ readPipe(out_r, result.stdout_text); });
-    std::thread t_err([&]{ readPipe(err_r, result.stderr_text); });
-
-    const DWORD timeout_ms = timeout_sec > 0
-        ? static_cast<DWORD>(timeout_sec) * 1000u
-        : 30000u;
-
-    const auto start = std::chrono::steady_clock::now();
-    bool killed = false;
-
-    for (;;) {
-        const DWORD w = ::WaitForSingleObject(pi.hProcess, 200);
-        if (w == WAIT_OBJECT_0) break;
-
-        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start).count();
-        if (static_cast<DWORD>(elapsed) >= timeout_ms) {
-            result.timed_out = true;
-            ::TerminateProcess(pi.hProcess, 1);
-            killed = true;
-            break;
-        }
-        if (cancel_flag && cancel_flag->load()) {
-            result.cancelled_by_user = true;
-            ::TerminateProcess(pi.hProcess, 1);
-            killed = true;
-            break;
-        }
-    }
-
-    if (!killed) ::WaitForSingleObject(pi.hProcess, INFINITE);
-
-    DWORD ec = 0;
-    if (::GetExitCodeProcess(pi.hProcess, &ec)) {
-        result.exit_code = static_cast<int>(ec);
-    }
-
-    // Tutup pipe supaya thread pembaca selesai.
-    ::CloseHandle(out_r);
-    ::CloseHandle(err_r);
-    t_out.join();
-    t_err.join();
-
-    ::CloseHandle(pi.hProcess);
-    ::CloseHandle(pi.hThread);
-
-    std::fprintf(stderr, "[frans] runCommand DONE: %s -> exit=%d\n",
-        cmd_str.c_str(), result.exit_code);
-    std::fflush(stderr);
-    return result;
+void test_parseStatusPorcelain_modified() {
+    std::string input = 
+        "## main\n"
+        " M src/main.cpp\n"
+        "M  src/util.cpp\n";
+    
+    auto status = GitFacade::parseStatusPorcelain(input);
+    
+    assert(status.is_repo);
+    assert(status.changes.size() == 2);
+    
+    assert(status.changes[0].index_status == ' ');
+    assert(status.changes[0].worktree_status == 'M');
+    assert(status.changes[0].path == "src/main.cpp");
+    
+    assert(status.changes[1].index_status == 'M');
+    assert(status.changes[1].worktree_status == ' ');
+    assert(status.changes[1].path == "src/util.cpp");
+    
+    std::cout << "PASS: test_parseStatusPorcelain_modified\n";
 }
 
-} // namespace frans::infrastructure
+void test_parseStatusPorcelain_added() {
+    std::string input = 
+        "## main\n"
+        "A  new_file.cpp\n"
+        "?? untracked.txt\n";
+    
+    auto status = GitFacade::parseStatusPorcelain(input);
+    
+    assert(status.changes.size() == 2);
+    
+    assert(status.changes[0].index_status == 'A');
+    assert(status.changes[0].path == "new_file.cpp");
+    
+    assert(status.changes[1].index_status == '?');
+    assert(status.changes[1].worktree_status == '?');
+    assert(status.changes[1].path == "untracked.txt");
+    
+    std::cout << "PASS: test_parseStatusPorcelain_added\n";
+}
+
+void test_parseStatusPorcelain_deleted() {
+    std::string input = 
+        "## main\n"
+        "D  old_file.cpp\n";
+    
+    auto status = GitFacade::parseStatusPorcelain(input);
+    
+    assert(status.changes.size() == 1);
+    assert(status.changes[0].index_status == 'D');
+    assert(status.changes[0].path == "old_file.cpp");
+    
+    std::cout << "PASS: test_parseStatusPorcelain_deleted\n";
+}
+
+void test_parseStatusPorcelain_renamed() {
+    std::string input = 
+        "## main\n"
+        "R  old_name.cpp -> new_name.cpp\n";
+    
+    auto status = GitFacade::parseStatusPorcelain(input);
+    
+    assert(status.changes.size() == 1);
+    assert(status.changes[0].index_status == 'R');
+    assert(status.changes[0].path == "new_name.cpp");
+    
+    std::cout << "PASS: test_parseStatusPorcelain_renamed\n";
+}
+
+void test_parseStatusPorcelain_quoted_path() {
+    std::string input = 
+        "## main\n"
+        " M \"file with spaces.cpp\"\n";
+    
+    auto status = GitFacade::parseStatusPorcelain(input);
+    
+    assert(status.changes.size() == 1);
+    assert(status.changes[0].path == "file with spaces.cpp");
+    
+    std::cout << "PASS: test_parseStatusPorcelain_quoted_path\n";
+}
+
+void test_parseStatusPorcelain_suspicious() {
+    std::string input = 
+        "## main\n"
+        "A  .env\n"
+        "A  credentials.json\n"
+        "A  normal_file.cpp\n";
+    
+    auto status = GitFacade::parseStatusPorcelain(input);
+    
+    assert(status.changes.size() == 3);
+    assert(status.changes[0].suspicious == true);
+    assert(status.changes[1].suspicious == true);
+    assert(status.changes[2].suspicious == false);
+    
+    std::cout << "PASS: test_parseStatusPorcelain_suspicious\n";
+}
+
+void test_parseStatusPorcelain_empty() {
+    std::string input = "";
+    auto status = GitFacade::parseStatusPorcelain(input);
+    
+    assert(!status.is_repo);
+    assert(!status.error.empty());
+    
+    std::cout << "PASS: test_parseStatusPorcelain_empty\n";
+}
+
+void test_parseStatusPorcelain_invalid() {
+    std::string input = "Not a git repo\n";
+    auto status = GitFacade::parseStatusPorcelain(input);
+    
+    assert(!status.is_repo);
+    assert(!status.error.empty());
+    
+    std::cout << "PASS: test_parseStatusPorcelain_invalid\n";
+}
+
+void test_suggestCommitMessage_clean() {
+    GitStatus status;
+    status.is_repo = true;
+    
+    auto msg = GitFacade::suggestCommitMessage(status);
+    assert(msg == "No changes to commit");
+    
+    std::cout << "PASS: test_suggestCommitMessage_clean\n";
+}
+
+void test_suggestCommitMessage_single_added() {
+    GitStatus status;
+    status.is_repo = true;
+    status.changes.push_back({'A', ' ', "new_file.cpp", false});
+    
+    auto msg = GitFacade::suggestCommitMessage(status);
+    assert(msg == "Add new_file.cpp");
+    
+    std::cout << "PASS: test_suggestCommitMessage_single_added\n";
+}
+
+void test_suggestCommitMessage_single_modified() {
+    GitStatus status;
+    status.is_repo = true;
+    status.changes.push_back({'M', ' ', "src/main.cpp", false});
+    
+    auto msg = GitFacade::suggestCommitMessage(status);
+    assert(msg == "Update main.cpp");
+    
+    std::cout << "PASS: test_suggestCommitMessage_single_modified\n";
+}
+
+void test_suggestCommitMessage_single_deleted() {
+    GitStatus status;
+    status.is_repo = true;
+    status.changes.push_back({'D', ' ', "old_file.cpp", false});
+    
+    auto msg = GitFacade::suggestCommitMessage(status);
+    assert(msg == "Remove old_file.cpp");
+    
+    std::cout << "PASS: test_suggestCommitMessage_single_deleted\n";
+}
+
+void test_suggestCommitMessage_multiple() {
+    GitStatus status;
+    status.is_repo = true;
+    status.changes.push_back({'A', ' ', "file1.cpp", false});
+    status.changes.push_back({'M', ' ', "file2.cpp", false});
+    status.changes.push_back({'D', ' ', "file3.cpp", false});
+    
+    auto msg = GitFacade::suggestCommitMessage(status);
+    assert(msg.find("Update 3 files") != std::string::npos);
+    assert(msg.find("1 added") != std::string::npos);
+    assert(msg.find("1 modified") != std::string::npos);
+    assert(msg.find("1 deleted") != std::string::npos);
+    
+    std::cout << "PASS: test_suggestCommitMessage_multiple\n";
+}
+
+void test_suggestCommitMessage_many_files() {
+    GitStatus status;
+    status.is_repo = true;
+    for (int i = 0; i < 20; ++i) {
+        status.changes.push_back({'M', ' ', "file" + std::to_string(i) + ".cpp", false});
+    }
+    
+    auto msg = GitFacade::suggestCommitMessage(status);
+    assert(msg == "Update 20 files");
+    
+    std::cout << "PASS: test_suggestCommitMessage_many_files\n";
+}
+
+int main() {
+    std::cout << "Running GitFacade tests...\n\n";
+    
+    test_parseStatusPorcelain_clean();
+    test_parseStatusPorcelain_ahead_behind();
+    test_parseStatusPorcelain_no_upstream();
+    test_parseStatusPorcelain_modified();
+    test_parseStatusPorcelain_added();
+    test_parseStatusPorcelain_deleted();
+    test_parseStatusPorcelain_renamed();
+    test_parseStatusPorcelain_quoted_path();
+    test_parseStatusPorcelain_suspicious();
+    test_parseStatusPorcelain_empty();
+    test_parseStatusPorcelain_invalid();
+    
+    test_suggestCommitMessage_clean();
+    test_suggestCommitMessage_single_added();
+    test_suggestCommitMessage_single_modified();
+    test_suggestCommitMessage_single_deleted();
+    test_suggestCommitMessage_multiple();
+    test_suggestCommitMessage_many_files();
+    
+    std::cout << "\nAll tests passed!\n";
+    return 0;
+}

@@ -1,6 +1,6 @@
 {
-  "created_at": "2026-11-15 05:33",
-  "request_hash": "d4d822260ce860ca",
+  "created_at": "2026-11-15 06:25",
+  "request_hash": "78ff656bfb3c9ef3",
   "mode": "index",
   "model": "gemini-3.1-flash-lite",
   "files": [
@@ -15,10 +15,10 @@
     { "path": "cmake/PlatformLinux.cmake", "hash": "64f39360b3adc9a7", "size_bytes": 80 },
     { "path": "cmake/PlatformWindows.cmake", "hash": "ffded493b966e4a5", "size_bytes": 140 },
     { "path": "cmake/ProjectOptions.cmake", "hash": "9783b6c2ef2d4c94", "size_bytes": 365 },
-    { "path": "cmake/Sources.cmake", "hash": "852903d5acc0a230", "size_bytes": 2395 },
-    { "path": "cmake/Tests.cmake", "hash": "6926becfc40e4a05", "size_bytes": 6289 },
-    { "path": "src/infrastructure/system/ProcessExecutor.h", "hash": "fd6ee328eef7fb1f", "size_bytes": 953 },
-    { "path": "src/infrastructure/system/ProcessExecutor_posix.cpp", "hash": "619de50502fcfe0d", "size_bytes": 6651 },
-    { "path": "src/infrastructure/system/ProcessExecutor_win32.cpp", "hash": "ba4e5edaeb366f11", "size_bytes": 6230 }
+    { "path": "cmake/Sources.cmake", "hash": "5ce110faee2e3a29", "size_bytes": 2732 },
+    { "path": "cmake/Tests.cmake", "hash": "0c4eecba5a2d0e24", "size_bytes": 7998 },
+    { "path": "src/application/git/GitFacade.cpp", "hash": "e356946da16795dc", "size_bytes": 8055 },
+    { "path": "src/application/git/GitFacade.h", "hash": "3fd5c5ee5b4c6408", "size_bytes": 1253 },
+    { "path": "tests/git/GitFacadeTest.cpp", "hash": "e2492a6db54033b4", "size_bytes": 8085 }
   ]
 }
