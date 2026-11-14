@@ -1,29 +1,28 @@
 include_guard(GLOBAL)
 set(FRANS_SOURCES
-src/main.cpp
-# UI
-src/ui/MainWindow.cpp
-src/ui/ManualImportDialog.cpp
-src/ui/PromptDialog.cpp
-src/ui/IngestDialog.cpp
-# Application -- import
-src/application/import/MultiFileParser.cpp
-# Application -- manual_import
-src/application/manual_import/ManualImporter.cpp
-# Application -- safety
-src/application/safety/DangerCheckHandler.cpp
-# Application -- prompt (Fase A #41)
-src/application/prompt/PromptGenerator.cpp
-# Application -- ai (Fase C #54, #56, #57, #58)
-# GeminiClient dipakai langsung oleh PromptDialog (tombol "Tes Koneksi /
-# Daftar Model" #58), jadi WAJIB masuk executable utama -- bukan hanya
-# target test. GeminiSchema juga ikut agar konsisten dengan GeminiClient.
-src/application/ai/ApiKeyProvider.cpp
-src/application/ai/GeminiClient.cpp
-src/application/ai/GeminiSchema.cpp
-# Application -- build_runner
-src/application/build_runner/BuildRunner.cpp
-src/application/build_runner/ProjectDetector.cpp
+    src/main.cpp
+    # UI
+    src/ui/MainWindow.cpp
+    src/ui/ManualImportDialog.cpp
+    src/ui/PromptDialog.cpp
+    src/ui/IngestDialog.cpp
+    # Application -- import
+    src/application/import/MultiFileParser.cpp
+    # Application -- manual_import
+    src/application/manual_import/ManualImporter.cpp
+    # Application -- safety
+    src/application/safety/DangerCheckHandler.cpp
+    # Application -- prompt (Fase A #41)
+    src/application/prompt/PromptGenerator.cpp
+    # Application -- ai (Fase C #54, #56, #57, #58)
+    src/application/ai/ApiKeyProvider.cpp
+    src/application/ai/GeminiClient.cpp
+    src/application/ai/GeminiSchema.cpp
+    # Application -- context (Fase C #59)
+    src/application/context/ContextSelector.cpp
+    # Application -- build_runner
+    src/application/build_runner/BuildRunner.cpp
+    src/application/build_runner/ProjectDetector.cpp
 # Fase A #44: ringkasan error untuk SessionState (murni, tanpa FLTK)
 src/application/build_runner/BuildErrorSummary.cpp
 src/application/build_runner/BuildSystems/CMakeBuildSystem.cpp
