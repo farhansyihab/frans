@@ -1,5 +1,8 @@
 // Implementasi Windows pakai CreateProcess + pipe.
 // Catatan: belum diuji di Windows asli; perlu verifikasi saat test.
+// Fase D #66: env_extra BELUM diimplementasikan di Win32 (akan dikerjakan
+// di #72). Signature di-update agar match dengan header; entri env_extra
+// non-kosong akan memicu warning di stderr.
 #include "infrastructure/system/ProcessExecutor.h"
 
 #include <windows.h>
@@ -31,20 +34,24 @@ std::string joinArgv(const std::vector<std::string>& argv) {
 std::string wideToUtf8(const std::wstring& w) {
     if (w.empty()) return {};
     const int n = ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
-        static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+                                        static_cast<int>(w.size()),
+                                        nullptr, 0, nullptr, nullptr);
     std::string out(static_cast<std::size_t>(n), '\0');
     ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
-        static_cast<int>(w.size()), out.data(), n, nullptr, nullptr);
+                          static_cast<int>(w.size()),
+                          out.data(), n, nullptr, nullptr);
     return out;
 }
 
 std::wstring utf8ToWide(const std::string& s) {
     if (s.empty()) return {};
     const int n = ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
-        static_cast<int>(s.size()), nullptr, 0);
+                                        static_cast<int>(s.size()),
+                                        nullptr, 0);
     std::wstring out(static_cast<std::size_t>(n), L'\0');
     ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
-        static_cast<int>(s.size()), out.data(), n);
+                          static_cast<int>(s.size()),
+                          out.data(), n);
     return out;
 }
 
@@ -54,16 +61,31 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
                          int timeout_sec,
                          const std::string& stdin_data,
                          const std::string& working_dir,
-                         std::atomic<bool>* cancel_flag) {
+                         std::atomic<bool>* cancel_flag,
+                         const std::vector<std::string>& env_extra) {
     ProcessResult result;
     if (argv.empty()) {
         result.stderr_text = "runCommand: argv kosong";
         return result;
     }
 
+    // Fase D #66: env_extra belum didukung di Win32.
+    // Beri warning eksplisit supaya caller tahu nilainya diabaikan.
+    // Implementasi env block akan dikerjakan di #72.
+    if (!env_extra.empty()) {
+        std::fprintf(stderr,
+            "[frans] runCommand: WARNING env_extra (%zu entries) IGNORED on "
+            "Win32 (not implemented yet, see blueprint #72)\n",
+            env_extra.size());
+        for (const auto& e : env_extra) {
+            std::fprintf(stderr, "  - %s\n", e.c_str());
+        }
+        std::fflush(stderr);
+    }
+
     const std::string cmd_str = joinArgv(argv);
     std::fprintf(stderr, "[frans] runCommand START: %s (cwd=%s)\n",
-        cmd_str.c_str(), working_dir.c_str());
+                 cmd_str.c_str(), working_dir.c_str());
     std::fflush(stderr);
 
     SECURITY_ATTRIBUTES sa{};
@@ -109,8 +131,9 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
     std::vector<wchar_t> cmd_buf(cmdw.begin(), cmdw.end());
     cmd_buf.push_back(L'\0');
 
-    std::wstring cwdw = working_dir.empty() ? std::wstring{}
-                                             : utf8ToWide(working_dir);
+    std::wstring cwdw = working_dir.empty()
+        ? std::wstring{}
+        : utf8ToWide(working_dir);
 
     const BOOL ok = ::CreateProcessW(
         nullptr, cmd_buf.data(),
@@ -134,7 +157,8 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
     if (!stdin_data.empty() && in_w) {
         DWORD written = 0;
         ::WriteFile(in_w, stdin_data.data(),
-                    static_cast<DWORD>(stdin_data.size()), &written, nullptr);
+                    static_cast<DWORD>(stdin_data.size()),
+                    &written, nullptr);
         ::CloseHandle(in_w);
     }
 
@@ -153,7 +177,6 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
     const DWORD timeout_ms = timeout_sec > 0
         ? static_cast<DWORD>(timeout_sec) * 1000u
         : 30000u;
-
     const auto start = std::chrono::steady_clock::now();
     bool killed = false;
 
@@ -161,8 +184,9 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
         const DWORD w = ::WaitForSingleObject(pi.hProcess, 200);
         if (w == WAIT_OBJECT_0) break;
 
-        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start).count();
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
         if (static_cast<DWORD>(elapsed) >= timeout_ms) {
             result.timed_out = true;
             ::TerminateProcess(pi.hProcess, 1);
@@ -194,8 +218,9 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
     ::CloseHandle(pi.hThread);
 
     std::fprintf(stderr, "[frans] runCommand DONE: %s -> exit=%d\n",
-        cmd_str.c_str(), result.exit_code);
+                 cmd_str.c_str(), result.exit_code);
     std::fflush(stderr);
+
     return result;
 }
 

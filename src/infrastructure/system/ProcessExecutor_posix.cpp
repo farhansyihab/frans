@@ -1,9 +1,11 @@
+// Implementasi POSIX pakai fork/execvp + pipe.
 #include "infrastructure/system/ProcessExecutor.h"
 
 #include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <poll.h>
@@ -27,13 +29,42 @@ std::string argvToStr(const std::vector<std::string>& argv) {
     return s;
 }
 
+// Terapkan env_extra ke environment child.
+// Entri harus berformat "KEY=VALUE" (key tidak boleh kosong).
+// Entri invalid di-skip dengan warning.
+// Dipanggil di child process setelah fork, sebelum execvp.
+// Return false jika setenv gagal (caller harus _exit).
+bool applyEnvExtra(const std::vector<std::string>& env_extra) {
+    for (const auto& entry : env_extra) {
+        const auto eq = entry.find('=');
+        if (eq == std::string::npos || eq == 0) {
+            std::fprintf(stderr,
+                "[frans] runCommand: skipping invalid env_extra entry: '%s'\n",
+                entry.c_str());
+            continue;
+        }
+        const std::string key = entry.substr(0, eq);
+        const std::string val = entry.substr(eq + 1);
+        // overwrite = 1: timpa nilai dari parent bila ada
+        // (mis. GIT_TERMINAL_PROMPT=0 harus mengalahkan nilai parent).
+        if (::setenv(key.c_str(), val.c_str(), 1) != 0) {
+            std::fprintf(stderr,
+                "[frans] runCommand: setenv(%s) failed: %s\n",
+                key.c_str(), std::strerror(errno));
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 ProcessResult runCommand(const std::vector<std::string>& argv,
                          int timeout_sec,
                          const std::string& stdin_data,
                          const std::string& working_dir,
-                         std::atomic<bool>* cancel_flag) {
+                         std::atomic<bool>* cancel_flag,
+                         const std::vector<std::string>& env_extra) {
     ProcessResult result;
     if (argv.empty()) {
         result.stderr_text = "runCommand: argv kosong";
@@ -42,8 +73,11 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
 
     const std::string cmd_str = argvToStr(argv);
     std::fprintf(stderr,
-        "[frans] runCommand START: %s (cwd=%s, timeout=%ds)\n",
-        cmd_str.c_str(), working_dir.c_str(), timeout_sec);
+        "[frans] runCommand START: %s (cwd=%s, timeout=%ds, env_extra=%zu)\n",
+        cmd_str.c_str(),
+        working_dir.c_str(),
+        timeout_sec,
+        env_extra.size());
     std::fflush(stderr);
 
     int in_pipe[2]  = {-1, -1};
@@ -71,13 +105,17 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
     }
 
     if (pid == 0) {
+        // --- Child process ---
         if (!stdin_data.empty()) {
             ::dup2(in_pipe[0], STDIN_FILENO);
             close_if_valid(in_pipe[0]);
             close_if_valid(in_pipe[1]);
         } else {
             const int devnull = ::open("/dev/null", O_RDONLY);
-            if (devnull >= 0) { ::dup2(devnull, STDIN_FILENO); ::close(devnull); }
+            if (devnull >= 0) {
+                ::dup2(devnull, STDIN_FILENO);
+                ::close(devnull);
+            }
         }
 
         ::dup2(out_pipe[1], STDOUT_FILENO);
@@ -93,17 +131,26 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
             }
         }
 
+        // Fase D #66: apply env_extra sebelum execvp.
+        // Urutan: chdir dulu, lalu setenv, baru exec.
+        if (!applyEnvExtra(env_extra)) {
+            ::_exit(126);
+        }
+
         std::vector<char*> c_argv;
         c_argv.reserve(argv.size() + 1);
-        for (const auto& s : argv) c_argv.push_back(const_cast<char*>(s.c_str()));
+        for (const auto& s : argv) {
+            c_argv.push_back(const_cast<char*>(s.c_str()));
+        }
         c_argv.push_back(nullptr);
 
         ::execvp(c_argv[0], c_argv.data());
-
-        std::fprintf(stderr, "execvp(%s): %s\n", c_argv[0], std::strerror(errno));
+        std::fprintf(stderr, "execvp(%s): %s\n",
+                     c_argv[0], std::strerror(errno));
         ::_exit(127);
     }
 
+    // --- Parent process ---
     close_if_valid(out_pipe[1]); out_pipe[1] = -1;
     close_if_valid(err_pipe[1]); err_pipe[1] = -1;
 
@@ -113,7 +160,10 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
         std::size_t remaining = stdin_data.size();
         while (remaining > 0) {
             const ssize_t w = ::write(in_pipe[1], p, remaining);
-            if (w < 0) { if (errno == EINTR) continue; break; }
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
             p += w;
             remaining -= static_cast<std::size_t>(w);
         }
@@ -148,19 +198,33 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
         struct pollfd fds[2];
         int nfds = 0;
         int idx_out = -1, idx_err = -1;
-        if (out_open) { fds[nfds].fd = out_pipe[0]; fds[nfds].events = POLLIN; idx_out = nfds++; }
-        if (err_open) { fds[nfds].fd = err_pipe[0]; fds[nfds].events = POLLIN; idx_err = nfds++; }
+        if (out_open) {
+            fds[nfds].fd = out_pipe[0];
+            fds[nfds].events = POLLIN;
+            idx_out = nfds++;
+        }
+        if (err_open) {
+            fds[nfds].fd = err_pipe[0];
+            fds[nfds].events = POLLIN;
+            idx_err = nfds++;
+        }
 
         const int p = ::poll(fds, static_cast<nfds_t>(nfds), 200);
-        if (p < 0) { if (errno == EINTR) continue; break; }
+        if (p < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
         if (p == 0) continue;
 
         for (int i = 0; i < nfds; ++i) {
             if (!(fds[i].revents & (POLLIN | POLLHUP | POLLERR))) continue;
             const ssize_t r = ::read(fds[i].fd, buf, sizeof(buf));
             if (r > 0) {
-                if (i == idx_out)      result.stdout_text.append(buf, static_cast<std::size_t>(r));
-                else if (i == idx_err) result.stderr_text.append(buf, static_cast<std::size_t>(r));
+                if (i == idx_out) {
+                    result.stdout_text.append(buf, static_cast<std::size_t>(r));
+                } else if (i == idx_err) {
+                    result.stderr_text.append(buf, static_cast<std::size_t>(r));
+                }
             } else if (r == 0) {
                 if (i == idx_out)      out_open = false;
                 else if (i == idx_err) err_open = false;
@@ -184,7 +248,8 @@ ProcessResult runCommand(const std::vector<std::string>& argv,
     else                           result.exit_code = -1;
 
     std::fprintf(stderr, "[frans] runCommand DONE: %s -> exit=%d%s%s\n",
-                 cmd_str.c_str(), result.exit_code,
+                 cmd_str.c_str(),
+                 result.exit_code,
                  result.timed_out ? " (TIMED OUT)" : "",
                  result.cancelled_by_user ? " (CANCELLED)" : "");
     std::fflush(stderr);

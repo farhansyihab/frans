@@ -1,0 +1,24 @@
+{
+  "created_at": "2026-11-15 05:33",
+  "request_hash": "d4d822260ce860ca",
+  "mode": "index",
+  "model": "gemini-3.1-flash-lite",
+  "files": [
+    { "path": "CMakeLists.txt", "hash": "dc09deb7669031ec", "size_bytes": 431 },
+    { "path": "cmake/CompilerWarnings.cmake", "hash": "d001a78f2e72691c", "size_bytes": 313 },
+    { "path": "cmake/Dependencies.cmake", "hash": "8dccd3387738b338", "size_bytes": 112 },
+    { "path": "cmake/FLTK.cmake", "hash": "5dcb6c2931db0870", "size_bytes": 272 },
+    { "path": "cmake/GeminiTests.cmake", "hash": "851034cc47a7af0d", "size_bytes": 3582 },
+    { "path": "cmake/Install.cmake", "hash": "4124c4f2a1b55ef4", "size_bytes": 1826 },
+    { "path": "cmake/NlohmannJson.cmake", "hash": "4ec1bc7c74a0ae38", "size_bytes": 3069 },
+    { "path": "cmake/Platform.cmake", "hash": "41302d4fa6ceccb0", "size_bytes": 127 },
+    { "path": "cmake/PlatformLinux.cmake", "hash": "64f39360b3adc9a7", "size_bytes": 80 },
+    { "path": "cmake/PlatformWindows.cmake", "hash": "ffded493b966e4a5", "size_bytes": 140 },
+    { "path": "cmake/ProjectOptions.cmake", "hash": "9783b6c2ef2d4c94", "size_bytes": 365 },
+    { "path": "cmake/Sources.cmake", "hash": "852903d5acc0a230", "size_bytes": 2395 },
+    { "path": "cmake/Tests.cmake", "hash": "6926becfc40e4a05", "size_bytes": 6289 },
+    { "path": "src/infrastructure/system/ProcessExecutor.h", "hash": "fd6ee328eef7fb1f", "size_bytes": 953 },
+    { "path": "src/infrastructure/system/ProcessExecutor_posix.cpp", "hash": "619de50502fcfe0d", "size_bytes": 6651 },
+    { "path": "src/infrastructure/system/ProcessExecutor_win32.cpp", "hash": "ba4e5edaeb366f11", "size_bytes": 6230 }
+  ]
+}

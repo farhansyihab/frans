@@ -6,19 +6,17 @@
   "build_timeout_sec": 120,
   "test_timeout_sec": 120,
   "run_timeout_sec": 30,
-
   "ingest_output_dir": "~/frans-out",
   "ingest_max_file_kb": 256,
   "ingest_max_total_mb": 5,
-
+  "default_project_root": "/home/farhan/Proyek/AgenAI/proyek/frans",
   "prompt_template_path": "config/prompt_template.txt",
   "selector_prompt_path": "config/gemini_selector_prompt.txt",
   "context_output_name": "SourceCode.md",
   "context_max_kb": 300,
   "context_max_files": 40,
-  "context_always_include": "BluePrint.md",
-
-  "gemini_model": "gemini-2.5-flash",
+  "context_always_include": "CMakeLists.txt, cmake/CompilerWarnings.cmake, cmake/Dependencies.cmake, cmake/FLTK.cmake, cmake/GeminiTests.cmake, cmake/Install.cmake, cmake/NlohmannJson.cmake, cmake/Platform.cmake, cmake/PlatformLinux.cmake, cmake/PlatformWindows.cmake, cmake/ProjectOptions.cmake, cmake/Sources.cmake, cmake/Tests.cmake",
+  "gemini_model": "gemini-3.1-flash-lite",
   "gemini_endpoint": "https://generativelanguage.googleapis.com/v1beta",
   "gemini_timeout_sec": 90,
   "gemini_full_mode_max_tokens": 150000,
