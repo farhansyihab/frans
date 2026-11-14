@@ -1,6 +1,9 @@
 // src/ui/PromptDialog.cpp
 #include "ui/PromptDialog.h"
 #include "application/prompt/PromptGenerator.h"
+#include "application/ai/ApiKeyProvider.h"
+#include "application/ai/GeminiClient.h"
+#include "infrastructure/http/CurlTransport.h"
 #include <FL/Fl.H>
 #include <FL/Fl_Box.H>
 #include <FL/Fl_Button.H>
@@ -30,6 +33,45 @@ std::ostringstream ss;
 ss << f.rdbuf();
 return ss.str();
 }
+// Tampilkan pesan panjang dalam dialog scrollable.
+// Modal, blok sampai user klik OK.
+void showScrollableMessage(const char* title, const std::string& message) {
+constexpr int dlg_w = 650;
+constexpr int dlg_h = 500;
+constexpr int pad   = 10;
+constexpr int btn_w = 80;
+constexpr int btn_h = 30;
+Fl_Window* win = new Fl_Window(dlg_w, dlg_h, title);
+win->set_modal();
+win->begin();
+// Text display (read-only, scrollable)
+Fl_Text_Display* display = new Fl_Text_Display(
+pad, pad, dlg_w - 2 * pad, dlg_h - 2 * pad - btn_h - pad);
+Fl_Text_Buffer* buf = new Fl_Text_Buffer();
+display->buffer(buf);
+display->textfont(FL_COURIER);
+display->textsize(11);
+display->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
+display->color(FL_WHITE);
+buf->text(message.c_str());
+// OK button
+Fl_Button* ok_btn = new Fl_Button(
+dlg_w - pad - btn_w, dlg_h - pad - btn_h, btn_w, btn_h, "OK");
+ok_btn->callback([](Fl_Widget* w, void*) {
+if (Fl_Window* win = w ? w->window() : nullptr) {
+win->hide();
+}
+});
+ok_btn->take_focus();
+win->end();
+win->resizable(display);
+win->show();
+// Loop modal sampai window di-hide
+while (win->shown()) Fl::wait();
+// Cleanup
+delete buf;
+delete win;
+}
 } // namespace
 // ===========================================================================
 // Public
@@ -55,6 +97,13 @@ PromptDialog::~PromptDialog() {
 delete request_buf_;     request_buf_    = nullptr;
 delete error_buf_;       error_buf_      = nullptr;
 delete preview_buf_;     preview_buf_    = nullptr;
+// Cancel worker jika masih berjalan
+if (worker_running_.load()) {
+worker_cancel_.store(true);
+if (worker_thread_.joinable()) {
+worker_thread_.join();
+}
+}
 if (win_) {
 if (win_->shown()) win_->hide();
 delete win_;
@@ -131,6 +180,22 @@ error_editor_->tooltip(
 "Error output akan menggantikan {{ERROR_OUTPUT}}.\n"
 "Otomatis di-tail +/- 8 KB saat di-render.");
 y += editor_h + kRowGap;
+}
+// ---- Fase C #58: Test Connection button ----
+{
+Fl_Box* l = new Fl_Box(kPadX, y, kInnerW - 200, 20,
+"Verifikasi API Key & Model:");
+l->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+l->labelsize(11);
+l->labelcolor(FL_DARK_BLUE);
+test_conn_btn_ = new Fl_Button(
+kPadX + kInnerW - 190, y, 190, 22,
+"Tes Koneksi / Daftar Model");
+test_conn_btn_->callback(cbTestConnection, this);
+test_conn_btn_->tooltip(
+"Verifikasi GEMINI_API_KEY dan tampilkan daftar model\n"
+"yang tersedia. Memanggil GET /models endpoint.");
+y += 22 + kRowGap;
 }
 // ---- Status bar ----
 {
@@ -281,6 +346,113 @@ setStatus("Error dari build terakhir dimuat ke kotak error output.",
 FL_DARK_GREEN);
 }
 }
+// ===========================================================================
+// Fase C #58 -- Test Connection
+// ===========================================================================
+void PromptDialog::doTestConnection() {
+if (worker_running_.load()) {
+fl_message("Tes koneksi sedang berjalan. Tunggu hingga selesai "
+"atau tutup dialog untuk membatalkan.");
+return;
+}
+// Resolve API key
+frans::application::ApiKeyOptions key_opt;
+key_opt.key_file = cfg_.gemini_api_key_file;
+auto key_result = frans::application::ApiKeyProvider::resolve(key_opt);
+if (!key_result.found()) {
+std::string msg = "GEMINI_API_KEY tidak ditemukan.\n\n" + frans::application::apiKeyMissingHint();
+fl_message("%s", msg.c_str());
+return;
+}
+// Disable button during test
+if (test_conn_btn_) test_conn_btn_->deactivate();
+setStatus("Menguji koneksi ke Gemini API...", FL_DARK_BLUE);
+// Start worker thread
+worker_cancel_.store(false);
+worker_running_.store(true);
+worker_result_ok_ = false;
+worker_result_message_.clear();
+worker_thread_ = std::thread(&PromptDialog::workerListModels, this);
+// Start polling
+Fl::add_timeout(0.1, cbPollWorker, this);
+}
+void PromptDialog::workerListModels() {
+// Resolve API key again in worker (safe, no UI access)
+frans::application::ApiKeyOptions key_opt;
+key_opt.key_file = cfg_.gemini_api_key_file;
+auto key_result = frans::application::ApiKeyProvider::resolve(key_opt);
+if (!key_result.found()) {
+worker_result_ok_ = false;
+worker_result_message_ = "API key tidak ditemukan.";
+worker_running_.store(false);
+return;
+}
+// Create transport and client
+auto transport = std::make_shared<frans::infrastructure::http::CurlTransport>();
+frans::application::GeminiClient client(transport);
+// Call listModels
+auto result = client.listModels(
+cfg_.gemini_endpoint,
+key_result.key,
+&worker_cancel_);
+if (!result.ok) {
+worker_result_ok_ = false;
+worker_result_message_ = "Error: " + result.error.message;
+if (result.error.http_status > 0) {
+worker_result_message_ += " (HTTP " + std::to_string(result.error.http_status) + ")";
+}
+} else {
+worker_result_ok_ = true;
+std::ostringstream ss;
+ss << "Koneksi berhasil! Ditemukan " << result.models.size() << " model:\n\n";
+int count = 0;
+for (const auto& m : result.models) {
+if (count >= 20) {
+ss << "... dan " << (result.models.size() - 20) << " model lainnya.\n";
+break;
+}
+ss << "• " << m.name;
+if (!m.display_name.empty() && m.display_name != m.name) {
+ss << " (" << m.display_name << ")";
+}
+ss << "\n";
+if (!m.description.empty()) {
+// Truncate description to keep output readable
+std::string desc = m.description;
+if (desc.size() > 100) {
+desc = desc.substr(0, 97) + "...";
+}
+ss << "  " << desc << "\n";
+}
+if (!m.supported_methods.empty()) {
+ss << "  Methods: ";
+for (size_t i = 0; i < m.supported_methods.size(); ++i) {
+if (i > 0) ss << ", ";
+ss << m.supported_methods[i];
+}
+ss << "\n";
+}
+ss << "\n";
+++count;
+}
+// Check if configured model is in the list
+bool model_found = false;
+for (const auto& m : result.models) {
+if (m.name == cfg_.gemini_model || m.name == "models/" + cfg_.gemini_model) {
+model_found = true;
+break;
+}
+}
+if (model_found) {
+ss << "✓ Model '" << cfg_.gemini_model << "' tersedia untuk akun Anda.\n";
+} else {
+ss << "⚠ Model '" << cfg_.gemini_model << "' TIDAK ditemukan dalam daftar.\n";
+ss << "  Periksa config/app.json dan ganti 'gemini_model' dengan nama yang valid.\n";
+}
+worker_result_message_ = ss.str();
+}
+worker_running_.store(false);
+}
 void PromptDialog::setStatus(const std::string& msg, unsigned color) {
 if (!status_box_) return;
 status_box_->copy_label(msg.c_str());
@@ -299,9 +471,41 @@ static_cast<PromptDialog*>(data)->doCopy();
 void PromptDialog::cbFetchLastError(Fl_Widget*, void* data) {
 static_cast<PromptDialog*>(data)->doFetchLastError();
 }
+void PromptDialog::cbTestConnection(Fl_Widget*, void* data) {
+static_cast<PromptDialog*>(data)->doTestConnection();
+}
 void PromptDialog::cbClose(Fl_Widget* w, void*) {
 if (Fl_Window* win = w ? w->window() : nullptr) {
 win->hide();
 }
+}
+void PromptDialog::cbPollWorker(void* data) {
+auto* dlg = static_cast<PromptDialog*>(data);
+if (!dlg) return;
+// Check if worker is still running
+if (dlg->worker_running_.load()) {
+// Still running, poll again
+Fl::repeat_timeout(0.1, cbPollWorker, data);
+return;
+}
+// Worker finished, join thread
+if (dlg->worker_thread_.joinable()) {
+dlg->worker_thread_.join();
+}
+// Re-enable button
+if (dlg->test_conn_btn_) {
+dlg->test_conn_btn_->activate();
+}
+// Show result using scrollable dialog
+if (dlg->worker_result_ok_) {
+dlg->setStatus("Tes koneksi berhasil. Lihat detail di dialog.", FL_DARK_GREEN);
+showScrollableMessage("Daftar Model Gemini", dlg->worker_result_message_);
+} else {
+dlg->setStatus("Tes koneksi gagal.", FL_RED);
+showScrollableMessage("Tes Koneksi Gagal", dlg->worker_result_message_);
+}
+// Clear worker state
+dlg->worker_result_message_.clear();
+dlg->worker_result_ok_ = false;
 }
 } // namespace frans::ui
