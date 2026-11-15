@@ -1,12 +1,11 @@
 #include "application/safety/DangerCheckHandler.h"
-
 #include <algorithm>
+#include <cctype>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
 namespace frans::application {
-
 namespace {
 
 const std::unordered_map<std::string, DangerVerdict>& pythonPatterns() {
@@ -18,14 +17,12 @@ const std::unordered_map<std::string, DangerVerdict>& pythonPatterns() {
         {"os.exec",                  DangerVerdict::NeedsConfirm},
         {"os.fork",                  DangerVerdict::NeedsConfirm},
         {"subprocess.",              DangerVerdict::NeedsConfirm},
-
         // Dynamic code
         {"eval(",                    DangerVerdict::NeedsConfirm},
         {"exec(",                    DangerVerdict::NeedsConfirm},
         {"__import__(",              DangerVerdict::NeedsConfirm},
         {"pickle.loads",             DangerVerdict::NeedsConfirm},
         {"marshal.loads",            DangerVerdict::NeedsConfirm},
-
         // Filesystem destruction
         {"shutil.rmtree",            DangerVerdict::NeedsConfirm},
         {"os.removedirs",            DangerVerdict::NeedsConfirm},
@@ -33,7 +30,6 @@ const std::unordered_map<std::string, DangerVerdict>& pythonPatterns() {
         {"os.unlink(",               DangerVerdict::NeedsConfirm},
         {"os.rmdir(",                DangerVerdict::NeedsConfirm},
         {"os.truncate(",             DangerVerdict::NeedsConfirm},
-
         // Network
         {"socket.socket",            DangerVerdict::NeedsConfirm},
         {"socket.create_connection", DangerVerdict::NeedsConfirm},
@@ -47,7 +43,6 @@ const std::unordered_map<std::string, DangerVerdict>& pythonPatterns() {
     return kPatterns;
 }
 
-// Path sistem Linux kritis -> Blocked.
 const std::vector<std::string>& blockedLinuxPaths() {
     static const std::vector<std::string> kPaths = {
         "/etc/passwd",
@@ -58,7 +53,6 @@ const std::vector<std::string>& blockedLinuxPaths() {
     return kPaths;
 }
 
-// Path sistem Windows kritis -> Blocked.
 const std::vector<std::string>& blockedWindowsPaths() {
     static const std::vector<std::string> kPaths = {
         "C:/Windows/System32/config/SAM",
@@ -70,7 +64,6 @@ const std::vector<std::string>& blockedWindowsPaths() {
     return kPaths;
 }
 
-// Prefix path yang mencurigakan -> NeedsConfirm.
 const std::vector<std::string>& suspiciousPathPrefixes() {
     static const std::vector<std::string> kPrefixes = {
         "/etc/",
@@ -82,7 +75,6 @@ const std::vector<std::string>& suspiciousPathPrefixes() {
     return kPrefixes;
 }
 
-// Base command berbahaya (Linux + Windows).
 const std::unordered_set<std::string>& dangerousBaseCommands() {
     static const std::unordered_set<std::string> kCmds = {
         // Linux
@@ -110,6 +102,98 @@ std::string joinPatterns(const std::vector<std::string>& v) {
     return s;
 }
 
+bool isGitDangerousCommand(const std::vector<std::string>& argv,
+                           std::string& pattern_out) {
+    if (argv.empty()) return false;
+
+    std::string base = basename(argv[0]);
+    std::string lower_base = base;
+    std::transform(lower_base.begin(), lower_base.end(), lower_base.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    
+    // Handle both 'git' and 'git.exe' (case-insensitive for Windows)
+    if (lower_base != "git" && lower_base != "git.exe") {
+        return false;
+    }
+
+    // Find the subcommand, skipping global flags and their arguments
+    std::string subcmd;
+    std::size_t subcmd_idx = 0;
+    for (std::size_t i = 1; i < argv.size(); ++i) {
+        const std::string& a = argv[i];
+        if (a.empty()) continue;
+        
+        if (a[0] == '-') {
+            // Global flags that take a separate argument value
+            if (a == "-C" || a == "--git-dir" || a == "--work-tree" || 
+                a == "--namespace" || a == "-c" || a == "--config") {
+                ++i; // skip the next element which is the argument value
+            }
+            continue; // skip the flag itself
+        }
+        
+        // First non-flag argument is the subcommand
+        subcmd = a;
+        subcmd_idx = i;
+        break;
+    }
+
+    if (subcmd.empty()) return false;
+
+    auto hasFlag = [&](const std::string& flag) {
+        for (std::size_t i = subcmd_idx + 1; i < argv.size(); ++i) {
+            if (argv[i] == flag) return true;
+        }
+        return false;
+    };
+
+    auto hasDotPath = [&]() {
+        for (std::size_t i = subcmd_idx + 1; i < argv.size(); ++i) {
+            if (argv[i] == ".") return true;
+        }
+        return false;
+    };
+
+    auto hasCredentialArg = [&]() {
+        for (std::size_t i = subcmd_idx + 1; i < argv.size(); ++i) {
+            std::string lower = argv[i];
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            if (lower.find("credential") != std::string::npos) return true;
+        }
+        return false;
+    };
+
+    if (subcmd == "push") {
+        if (hasFlag("--force") || hasFlag("-f") || hasFlag("--force-with-lease")) {
+            pattern_out = "git:push (force)";
+            return true;
+        }
+    } else if (subcmd == "reset") {
+        if (hasFlag("--hard")) {
+            pattern_out = "git:reset --hard";
+            return true;
+        }
+    } else if (subcmd == "clean") {
+        if (hasFlag("-f") || hasFlag("--force")) {
+            pattern_out = "git:clean (force)";
+            return true;
+        }
+    } else if (subcmd == "checkout" || subcmd == "restore") {
+        if (hasDotPath()) {
+            pattern_out = "git:" + subcmd + " .";
+            return true;
+        }
+    } else if (subcmd == "config") {
+        if (hasCredentialArg()) {
+            pattern_out = "git:config (credential)";
+            return true;
+        }
+    }
+
+    return false;
+}
+
 } // namespace
 
 DangerCheckResult DangerCheckHandler::checkCode(
@@ -118,13 +202,11 @@ DangerCheckResult DangerCheckHandler::checkCode(
 {
     DangerCheckResult r;
 
-    // Saat ini pattern hanya untuk Python.
     if (language != "python") return r;
 
     bool any_blocked = false;
     bool any_confirm = false;
 
-    // Linux blocked paths.
     for (const auto& needle : blockedLinuxPaths()) {
         if (code.find(needle) != std::string::npos) {
             r.matched_patterns.push_back(needle);
@@ -132,7 +214,6 @@ DangerCheckResult DangerCheckHandler::checkCode(
         }
     }
 
-    // Windows blocked paths.
     for (const auto& needle : blockedWindowsPaths()) {
         if (code.find(needle) != std::string::npos) {
             r.matched_patterns.push_back(needle);
@@ -140,7 +221,6 @@ DangerCheckResult DangerCheckHandler::checkCode(
         }
     }
 
-    // Suspicious path prefixes.
     for (const auto& pfx : suspiciousPathPrefixes()) {
         const std::string dq = "\"" + pfx;
         const std::string sq = "'"  + pfx;
@@ -154,7 +234,6 @@ DangerCheckResult DangerCheckHandler::checkCode(
         }
     }
 
-    // Pattern API.
     for (const auto& [needle, verdict] : pythonPatterns()) {
         if (code.find(needle) == std::string::npos) continue;
         r.matched_patterns.push_back(needle);
@@ -190,8 +269,13 @@ DangerCheckResult DangerCheckHandler::checkCommand(
     DangerCheckResult r;
     if (argv.empty()) return r;
 
-    const std::string base = basename(argv[0]);
+    std::string git_pattern;
+    if (isGitDangerousCommand(argv, git_pattern)) {
+        r.matched_patterns.push_back(git_pattern);
+        r.verdict = DangerVerdict::NeedsConfirm;
+    }
 
+    const std::string base = basename(argv[0]);
     if (dangerousBaseCommands().count(base) > 0) {
         r.matched_patterns.push_back("cmd:" + base);
         r.verdict = DangerVerdict::NeedsConfirm;
@@ -204,7 +288,6 @@ DangerCheckResult DangerCheckHandler::checkCommand(
             r.matched_patterns.push_back("flag:" + a);
             r.verdict = DangerVerdict::NeedsConfirm;
         }
-
         for (const auto& blocked : blockedLinuxPaths()) {
             if (a.find(blocked) != std::string::npos) {
                 r.matched_patterns.push_back("arg:" + a);

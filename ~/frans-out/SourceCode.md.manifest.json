@@ -1,6 +1,6 @@
 {
-  "created_at": "2026-11-15 06:25",
-  "request_hash": "78ff656bfb3c9ef3",
+  "created_at": "2026-11-15 08:22",
+  "request_hash": "60a3546cc62fbb7a",
   "mode": "index",
   "model": "gemini-3.1-flash-lite",
   "files": [
@@ -16,9 +16,9 @@
     { "path": "cmake/PlatformWindows.cmake", "hash": "ffded493b966e4a5", "size_bytes": 140 },
     { "path": "cmake/ProjectOptions.cmake", "hash": "9783b6c2ef2d4c94", "size_bytes": 365 },
     { "path": "cmake/Sources.cmake", "hash": "5ce110faee2e3a29", "size_bytes": 2732 },
-    { "path": "cmake/Tests.cmake", "hash": "0c4eecba5a2d0e24", "size_bytes": 7998 },
-    { "path": "src/application/git/GitFacade.cpp", "hash": "e356946da16795dc", "size_bytes": 8055 },
-    { "path": "src/application/git/GitFacade.h", "hash": "3fd5c5ee5b4c6408", "size_bytes": 1253 },
-    { "path": "tests/git/GitFacadeTest.cpp", "hash": "e2492a6db54033b4", "size_bytes": 8085 }
+    { "path": "cmake/Tests.cmake", "hash": "86dc3580dff1973b", "size_bytes": 8195 },
+    { "path": "src/application/safety/DangerCheckHandler.cpp", "hash": "a6f924511826f9d3", "size_bytes": 8042 },
+    { "path": "src/application/safety/DangerCheckHandler.h", "hash": "f4a1c2a401ed2f32", "size_bytes": 1142 },
+    { "path": "tests/ScenarioTest.cpp", "hash": "4d0128ce31edca1b", "size_bytes": 46882 }
   ]
 }

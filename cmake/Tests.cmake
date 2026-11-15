@@ -7,13 +7,14 @@ if(FRANS_BUILD_TESTS)
 
     #------------------------------------------------------------------
     # frans_scenarios
+    #
     # Runner test scenario untuk Manual Import + Danger Check + Sandbox
     # + error parser (traceback frame picking) + PromptGenerator (#42)
     # + FileCollector (#46) + MarkdownRenderer (#48).
     #
-    # frans_scenarios                -> jalankan semua scenario
-    # frans_scenarios --list         -> daftar nama scenario
-    # frans_scenarios --dump NAME    -> print scenario (paste ke GUI)
+    #   frans_scenarios              -> jalankan semua scenario
+    #   frans_scenarios --list       -> daftar nama scenario
+    #   frans_scenarios --dump NAME  -> print scenario (paste ke GUI)
     #------------------------------------------------------------------
     set(FRANS_SCENARIO_SOURCES
         tests/ScenarioTest.cpp
@@ -22,10 +23,8 @@ if(FRANS_BUILD_TESTS)
         src/infrastructure/fs/SandboxedFileSystem.cpp
         src/application/build_runner/BuildSystems/StandaloneBuildSystem.cpp
         src/application/prompt/PromptGenerator.cpp
-
         # Fase B #46: FileCollector + ProcessExecutor (untuk git ls-files fallback)
         src/application/ingest/FileCollector.cpp
-
         # Fase B #48: MarkdownRenderer (murni, tanpa I/O)
         src/application/ingest/MarkdownRenderer.cpp
     )
@@ -39,30 +38,27 @@ if(FRANS_BUILD_TESTS)
     endif()
 
     add_executable(frans_scenarios ${FRANS_SCENARIO_SOURCES})
-
     target_include_directories(frans_scenarios PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-
     target_link_libraries(frans_scenarios PRIVATE
         Threads::Threads
         ${FRANS_PLATFORM_LIBS}
         frans_warnings
     )
-
     if(FRANS_PLATFORM_DEFS)
         target_compile_definitions(frans_scenarios PRIVATE ${FRANS_PLATFORM_DEFS})
     endif()
-
     add_test(NAME scenario_tests COMMAND frans_scenarios)
 
     #------------------------------------------------------------------
     # frans_session_tests  (Fase A #44 + #45)
+    #
     # Test ringan, TANPA FLTK dan TANPA ProsesExecutor:
-    # - summarizeBuildError()  : isi ringkasan error per phase
-    # - wasCancelledByUser()   : deteksi cancel
-    # - SessionState           : aturan publish / clear / skip-cancel
-    # - integrasi ke PromptGenerator (blok ERROR)
+    #   - summarizeBuildError()  : isi ringkasan error per phase
+    #   - wasCancelledByUser()   : deteksi cancel
+    #   - SessionState           : aturan publish / clear / skip-cancel
+    #   - integrasi ke PromptGenerator (blok ERROR)
     #
     # Hanya 3 file .cpp -> compile cepat di mesin lama.
     #------------------------------------------------------------------
@@ -71,19 +67,17 @@ if(FRANS_BUILD_TESTS)
         src/application/build_runner/BuildErrorSummary.cpp
         src/application/prompt/PromptGenerator.cpp
     )
-
     target_include_directories(frans_session_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-
     target_link_libraries(frans_session_tests PRIVATE
         frans_warnings
     )
-
     add_test(NAME session_state_tests COMMAND frans_session_tests)
 
     #------------------------------------------------------------------
     # frans_apikey_tests  (Fase C #54)
+    #
     # ApiKeyProvider: env -> file kunci -> default ~/.gemini/api_key,
     # trim/BOM/CRLF, izin file longgar, masking 4 karakter terakhir,
     # dan pastikan diagnostik tidak membocorkan key.
@@ -95,19 +89,17 @@ if(FRANS_BUILD_TESTS)
         tests/ApiKeyProviderTest.cpp
         src/application/ai/ApiKeyProvider.cpp
     )
-
     target_include_directories(frans_apikey_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-
     target_link_libraries(frans_apikey_tests PRIVATE
         frans_warnings
     )
-
     add_test(NAME apikey_provider_tests COMMAND frans_apikey_tests)
 
     #------------------------------------------------------------------
     # frans_gemini_schema_tests  (Fase C #57)
+    #
     # GeminiSchema: verifikasi struktur JSON schema untuk response Gemini
     # dan file prompt gemini_selector_prompt.txt ada serta valid.
     #
@@ -117,12 +109,10 @@ if(FRANS_BUILD_TESTS)
         tests/GeminiSchemaTest.cpp
         src/application/ai/GeminiSchema.cpp
     )
-
     target_include_directories(frans_gemini_schema_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     )
-
     target_link_libraries(frans_gemini_schema_tests PRIVATE
         frans_warnings
     )
@@ -134,17 +124,17 @@ if(FRANS_BUILD_TESTS)
             ${CMAKE_CURRENT_BINARY_DIR}/config
         COMMENT "Copying config files for gemini schema tests"
     )
-
     add_test(NAME gemini_schema_tests COMMAND frans_gemini_schema_tests)
 
     #------------------------------------------------------------------
     # frans_context_tests  (Fase C #60)
+    #
     # SourceCodeBuilder:
-    # - fnv1a_64_hex         : panjang, lowercase, konsistensi, vektor known
-    # - buildManifestJson    : struktur JSON, escape karakter, files kosong
-    # - buildSourceCode      : happy path, unselected excluded, content
-    #                          identik dengan disk, empty selection,
-    #                          error input kosong, cancel flag
+    #   - fnv1a_64_hex         : panjang, lowercase, konsistensi, vektor known
+    #   - buildManifestJson    : struktur JSON, escape karakter, files kosong
+    #   - buildSourceCode      : happy path, unselected excluded, content
+    #                           identik dengan disk, empty selection,
+    #                           error input kosong, cancel flag
     #
     # Tanpa FLTK, tanpa jaringan, tanpa subprocess, tanpa git.
     # Memakai temp directory sebagai fixture (RAII, auto-cleanup).
@@ -171,45 +161,79 @@ if(FRANS_BUILD_TESTS)
     endif()
 
     add_executable(frans_context_tests ${FRANS_CONTEXT_TEST_SOURCES})
-
     target_include_directories(frans_context_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     )
-
     target_link_libraries(frans_context_tests PRIVATE
         Threads::Threads
         ${FRANS_PLATFORM_LIBS}
         frans_warnings
     )
-
     if(FRANS_PLATFORM_DEFS)
         target_compile_definitions(frans_context_tests PRIVATE ${FRANS_PLATFORM_DEFS})
     endif()
-
     add_test(NAME source_code_builder_tests COMMAND frans_context_tests)
 
     #------------------------------------------------------------------
-    # frans_git_facade_tests  (Fase D #67)
-    # GitFacade pure functions:
-    # - parseStatusPorcelain   : parse output git status --porcelain=v1 -b
-    # - suggestCommitMessage   : generate commit message suggestion
+    # frans_git_facade_tests  (Fase D #67 + #68)
     #
-    # Tanpa FLTK, tanpa jaringan, tanpa subprocess, tanpa git.
+    # GitFacade:
+    #   - parseStatusPorcelain   : parse output git status --porcelain=v1 -b
+    #   - suggestCommitMessage   : generate commit message suggestion
+    #   - status/addAll/commit/push : operasi git via ProcessExecutor
+    #
+    # Tanpa FLTK, tanpa jaringan, tanpa git binary (untuk pure tests).
+    # Operasi git memerlukan ProcessExecutor (untuk runCommand).
     #------------------------------------------------------------------
-    add_executable(frans_git_facade_tests
+    set(FRANS_GIT_FACADE_TEST_SOURCES
         tests/git/GitFacadeTest.cpp
         src/application/git/GitFacade.cpp
     )
 
+    # Fase D #68: GitFacade memanggil runCommand() dari ProcessExecutor,
+    # jadi kita perlu link implementasi ProcessExecutor agar tidak error linker.
+    if(WIN32)
+        list(APPEND FRANS_GIT_FACADE_TEST_SOURCES
+            src/infrastructure/system/ProcessExecutor_win32.cpp)
+    else()
+        list(APPEND FRANS_GIT_FACADE_TEST_SOURCES
+            src/infrastructure/system/ProcessExecutor_posix.cpp)
+    endif()
+
+    add_executable(frans_git_facade_tests ${FRANS_GIT_FACADE_TEST_SOURCES})
     target_include_directories(frans_git_facade_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-
     target_link_libraries(frans_git_facade_tests PRIVATE
+        Threads::Threads
+        ${FRANS_PLATFORM_LIBS}
         frans_warnings
     )
-
+    if(FRANS_PLATFORM_DEFS)
+        target_compile_definitions(frans_git_facade_tests PRIVATE ${FRANS_PLATFORM_DEFS})
+    endif()
     add_test(NAME git_facade_tests COMMAND frans_git_facade_tests)
+
+    #------------------------------------------------------------------
+    # frans_danger_git_tests  (Fase D #69)
+    #
+    # DangerCheckHandler: pola git berbahaya (push --force, reset --hard,
+    # clean -f, checkout ., restore ., config credential).
+    #
+    # Tanpa FLTK, tanpa jaringan, tanpa git binary.
+    # Hanya test logika pattern matching.
+    #------------------------------------------------------------------
+    add_executable(frans_danger_git_tests
+        tests/git/DangerCheckGitTest.cpp
+        src/application/safety/DangerCheckHandler.cpp
+    )
+    target_include_directories(frans_danger_git_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(frans_danger_git_tests PRIVATE
+        frans_warnings
+    )
+    add_test(NAME danger_git_tests COMMAND frans_danger_git_tests)
 
 endif()
