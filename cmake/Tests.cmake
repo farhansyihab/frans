@@ -176,6 +176,44 @@ if(FRANS_BUILD_TESTS)
     add_test(NAME source_code_builder_tests COMMAND frans_context_tests)
 
     #------------------------------------------------------------------
+    # frans_selection_cache_tests  (Fase E #73)
+    #
+    # SelectionCache:
+    #   - LRU          : store/lookup, timpa, eviksi, cache nonaktif, clear
+    #   - hash request : deterministik, sensitif ke field relevan,
+    #                    TIDAK sensitif ke api_key/endpoint/timeout
+    #   - hash daftar  : tidak bergantung urutan, sensitif ke tambah/hapus/
+    #                    ukuran/flag skipped
+    #
+    # SelectionCache.cpp berisi selectContextCached() yang memanggil
+    # selectContext() + collectFiles(), jadi daftar source memakai ulang
+    # FRANS_CONTEXT_TEST_SOURCES (tanpa main test lama).
+    # Tanpa FLTK, tanpa jaringan.
+    #------------------------------------------------------------------
+    set(FRANS_SELCACHE_TEST_SOURCES ${FRANS_CONTEXT_TEST_SOURCES})
+    list(REMOVE_ITEM FRANS_SELCACHE_TEST_SOURCES
+        tests/context/source_code_builder_tests.cpp)
+    list(APPEND FRANS_SELCACHE_TEST_SOURCES
+        tests/context/selection_cache_tests.cpp
+        src/application/context/SelectionCache.cpp
+    )
+
+    add_executable(frans_selection_cache_tests ${FRANS_SELCACHE_TEST_SOURCES})
+    target_include_directories(frans_selection_cache_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    )
+    target_link_libraries(frans_selection_cache_tests PRIVATE
+        Threads::Threads
+        ${FRANS_PLATFORM_LIBS}
+        frans_warnings
+    )
+    if(FRANS_PLATFORM_DEFS)
+        target_compile_definitions(frans_selection_cache_tests PRIVATE ${FRANS_PLATFORM_DEFS})
+    endif()
+    add_test(NAME selection_cache_tests COMMAND frans_selection_cache_tests)
+
+    #------------------------------------------------------------------
     # frans_git_facade_tests  (Fase D #67 + #68)
     #
     # GitFacade:

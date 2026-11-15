@@ -30,8 +30,9 @@ set(FRANS_SOURCES
     src/application/ai/GeminiClient.cpp
     src/application/ai/GeminiSchema.cpp
 
-    # Application -- context (Fase C #59, #60)
+    # Application -- context (Fase C #59, #60; Fase E #73)
     src/application/context/ContextSelector.cpp
+    src/application/context/SelectionCache.cpp
     src/application/context/SourceCodeBuilder.cpp
 
     # Application -- build_runner

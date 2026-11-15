@@ -7,6 +7,7 @@
 #include "application/context/SourceCodeBuilder.h"
 #include "application/ingest/FileCollector.h"
 #include "infrastructure/http/CurlTransport.h"
+#include "application/context/SelectionCache.h"
 #include <FL/Fl_Text_Buffer.H>
 #include <chrono>
 #include <cstdio>
@@ -199,7 +200,16 @@ void PromptDialog::workerSelectFiles() {
     auto transport = std::make_shared<frans::infrastructure::http::CurlTransport>();
     frans::application::GeminiClient client(transport);
     
-    auto result = frans::application::selectContext(ctx_req, client, &select_worker_cancel_);
+    // Fase E #73: seleksi dengan cache (hash permintaan + hash daftar file).
+    frans::application::SelectionCacheOutcome cache_outcome;
+    auto result = frans::application::selectContextCached(
+        ctx_req, client, &select_worker_cancel_, &cache_outcome);
+    
+    std::fprintf(stderr, "[frans][prompt_dialog] workerSelectFiles: %s\n",
+                 cache_outcome.cache_hit
+                     ? "hasil dari CACHE (tanpa panggilan API)"
+                     : "hasil dari Gemini API");
+    std::fflush(stderr);
     
     if (select_worker_cancel_.load()) {
         select_worker_ok_ = false;

@@ -1,6 +1,6 @@
 {
-  "created_at": "2026-11-15 09:40",
-  "request_hash": "0839ab1f6942cdce",
+  "created_at": "2026-11-15 16:43",
+  "request_hash": "91dfc8af659e485b",
   "mode": "index",
   "model": "gemini-3.1-flash-lite",
   "files": [
@@ -17,9 +17,13 @@
     { "path": "cmake/ProjectOptions.cmake", "hash": "9783b6c2ef2d4c94", "size_bytes": 365 },
     { "path": "cmake/Sources.cmake", "hash": "33b47bae68a7e19f", "size_bytes": 2877 },
     { "path": "cmake/Tests.cmake", "hash": "c15abb8cfe00d43d", "size_bytes": 9678 },
-    { "path": "src/ui/GitDialog.cpp", "hash": "2060bcc0f49523b8", "size_bytes": 17447 },
-    { "path": "src/ui/GitDialog.h", "hash": "a6a94619dabe8f8f", "size_bytes": 2827 },
-    { "path": "src/application/git/GitFacade.cpp", "hash": "e442ac1f7696de1e", "size_bytes": 14409 },
-    { "path": "src/application/git/GitFacade.h", "hash": "3fd5c5ee5b4c6408", "size_bytes": 1253 }
+    { "path": "src/application/context/SourceCodeBuilder.cpp", "hash": "aaa899ee30486015", "size_bytes": 5794 },
+    { "path": "src/application/context/SourceCodeBuilder.h", "hash": "d7a5ac82ff1aa140", "size_bytes": 3357 },
+    { "path": "src/ui/PromptDialog_Actions.cpp", "hash": "5bbbdcb6879ddd8a", "size_bytes": 10781 },
+    { "path": "BluePrint-v9-Addendum.md", "hash": "072a228d34003c28", "size_bytes": 72499 },
+    { "path": "src/application/context/ContextSelector.h", "hash": "a55846332b45ac1f", "size_bytes": 3232 },
+    { "path": "src/config/AppConfig.h", "hash": "3be9d60892efbf7f", "size_bytes": 1488 },
+    { "path": "src/ui/PromptDialog.h", "hash": "373027ec82923c44", "size_bytes": 4439 },
+    { "path": "src/ui/PromptDialog_Callbacks.cpp", "hash": "458713c61bec5e8d", "size_bytes": 11584 }
   ]
 }
