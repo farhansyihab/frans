@@ -274,4 +274,30 @@ if(FRANS_BUILD_TESTS)
     )
     add_test(NAME danger_git_tests COMMAND frans_danger_git_tests)
 
+    #------------------------------------------------------------------
+    # frans_include_resolver_tests  (Fase E #74)
+    #
+    # IncludeResolver (local include closure):
+    #   - parseQuotedIncludes  : kutip vs <>, komentar, CRLF, include_next
+    #   - normalizeRelPath     : ".", "..", backslash, absolut, keluar root
+    #   - closure              : kedalaman, siklus, budget, not_found,
+    #                            ambiguous, skipped/secret, disabled, cancel
+    #   - mergeIncludeClosure  : Entry lengkap & Entry minimal
+    #
+    # Hanya butuh SandboxedFileSystem (untuk test jalur disk).
+    # Tanpa FLTK, tanpa jaringan, tanpa subprocess, tanpa git.
+    #------------------------------------------------------------------
+    add_executable(frans_include_resolver_tests
+        tests/context/include_resolver_tests.cpp
+        src/application/context/IncludeResolver.cpp
+        src/infrastructure/fs/SandboxedFileSystem.cpp
+    )
+    target_include_directories(frans_include_resolver_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(frans_include_resolver_tests PRIVATE
+        frans_warnings
+    )
+    add_test(NAME include_resolver_tests COMMAND frans_include_resolver_tests)
+
 endif()

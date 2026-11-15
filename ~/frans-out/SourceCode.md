@@ -1,5 +1,5 @@
 # SourceCode.md: frans
-Dibuat oleh Frans | 2026-11-15 16:43 | 21 file disertakan | 132.9 KB
+Dibuat oleh Frans | 2026-11-15 17:02 | 17 file disertakan | 106.8 KB
 Permintaan: - baca `SourceCode.md`
 - `SourceCode.md` adalah code yang paling terakhir, paling update
 - PERHATIKAN root app adalah `/home/farhan/Proyek/AgenAI/proyek/frans/`
@@ -77,7 +77,9 @@ Directory structure:
     │   │   │   └── ProjectInfo.h
     │   │   ├── context/
     │   │   │   ├── ContextSelector.cpp
-    │   │   │   ├── ContextSelector.h *
+    │   │   │   ├── ContextSelector.h
+    │   │   │   ├── SelectionCache.cpp
+    │   │   │   ├── SelectionCache.h
     │   │   │   ├── SourceCodeBuilder.cpp *
     │   │   │   └── SourceCodeBuilder.h *
     │   │   ├── git/
@@ -88,7 +90,7 @@ Directory structure:
     │   │   │   └── MultiFileParser.h
     │   │   ├── ingest/
     │   │   │   ├── FileCollector.cpp
-    │   │   │   ├── FileCollector.h
+    │   │   │   ├── FileCollector.h *
     │   │   │   ├── MarkdownRenderer.cpp
     │   │   │   ├── MarkdownRenderer.h
     │   │   │   ├── RepoIngester.cpp
@@ -104,7 +106,7 @@ Directory structure:
     │   │       └── DangerCheckHandler.h
     │   ├── config/
     │   │   ├── AppConfig.cpp
-    │   │   ├── AppConfig.h *
+    │   │   ├── AppConfig.h
     │   │   ├── AppPaths.cpp
     │   │   └── AppPaths.h
     │   ├── domain/
@@ -145,9 +147,9 @@ Directory structure:
     │       ├── ManualImportDialog.cpp
     │       ├── ManualImportDialog.h
     │       ├── PromptDialog.cpp
-    │       ├── PromptDialog.h *
-    │       ├── PromptDialog_Actions.cpp *
-    │       ├── PromptDialog_Callbacks.cpp *
+    │       ├── PromptDialog.h
+    │       ├── PromptDialog_Actions.cpp
+    │       ├── PromptDialog_Callbacks.cpp
     │       ├── PromptDialog_Workers.cpp
     │       └── SessionState.h
     ├── test_env_extra.cpp
@@ -162,6 +164,7 @@ Directory structure:
     │   │   ├── FakeHttpTransport.h
     │   │   └── gemini_client_tests.cpp
     │   ├── context/
+    │   │   ├── selection_cache_tests.cpp
     │   │   └── source_code_builder_tests.cpp
     │   ├── git/
     │   │   ├── DangerCheckGitTest.cpp
@@ -1053,14 +1056,14 @@ Penomoran melanjutkan v8 (item terakhir v8 yang disebut = #36).
 | 68  | `GitFacade` operasi: status, add, commit, push (selesai)                                     | argv, `GIT_TERMINAL_PROMPT=0` |
 | 69  | Pola git di `DangerCheckHandler` + test (selesai)                                            | §4.9                          |
 | 70  | `GitDialog`: status, Add, Commit, Push (+ konfirmasi, peringatan file mencurigakan)(selesai) |                               |
-| 71  | Validasi nyata: push ke repo uji; skenario gagal auth tidak menggantung                      |                               |
+| 71  | Validasi nyata: push ke repo uji; skenario gagal auth tidak menggantung(selesai)             |                               |
 | 72  | `ProcessExecutor_win32.cpp`: env block                                                       | ⚠️ ikut tertunda (v8 #21)     |
 
 ### Fase E: Polish
 
 | #   | Item                                                                              | Keterangan                        |
 | --- | --------------------------------------------------------------------------------- | --------------------------------- |
-| 73  | Cache hasil seleksi per (hash permintaan + hash daftar file)                      | Hemat panggilan API               |
+| 73  | Cache hasil seleksi per (hash permintaan + hash daftar file)(selesai)             | Hemat panggilan API               |
 | 74  | Local include closure (C/C++ `#include "..."`) untuk melengkapi seleksi Gemini    | Opsional, toggle                  |
 | 75  | Snapshot commit otomatis sebelum Write to Disk                                    | Rollback murah (v8 #35)           |
 | 76  | Diff view sebelum Write memakai `DiffEngine`                                      | v8 #27                            |
@@ -1593,8 +1596,9 @@ set(FRANS_SOURCES
     src/application/ai/GeminiClient.cpp
     src/application/ai/GeminiSchema.cpp
 
-    # Application -- context (Fase C #59, #60)
+    # Application -- context (Fase C #59, #60; Fase E #73)
     src/application/context/ContextSelector.cpp
+    src/application/context/SelectionCache.cpp
     src/application/context/SourceCodeBuilder.cpp
 
     # Application -- build_runner
@@ -1842,6 +1846,44 @@ if(FRANS_BUILD_TESTS)
     add_test(NAME source_code_builder_tests COMMAND frans_context_tests)
 
     #------------------------------------------------------------------
+    # frans_selection_cache_tests  (Fase E #73)
+    #
+    # SelectionCache:
+    #   - LRU          : store/lookup, timpa, eviksi, cache nonaktif, clear
+    #   - hash request : deterministik, sensitif ke field relevan,
+    #                    TIDAK sensitif ke api_key/endpoint/timeout
+    #   - hash daftar  : tidak bergantung urutan, sensitif ke tambah/hapus/
+    #                    ukuran/flag skipped
+    #
+    # SelectionCache.cpp berisi selectContextCached() yang memanggil
+    # selectContext() + collectFiles(), jadi daftar source memakai ulang
+    # FRANS_CONTEXT_TEST_SOURCES (tanpa main test lama).
+    # Tanpa FLTK, tanpa jaringan.
+    #------------------------------------------------------------------
+    set(FRANS_SELCACHE_TEST_SOURCES ${FRANS_CONTEXT_TEST_SOURCES})
+    list(REMOVE_ITEM FRANS_SELCACHE_TEST_SOURCES
+        tests/context/source_code_builder_tests.cpp)
+    list(APPEND FRANS_SELCACHE_TEST_SOURCES
+        tests/context/selection_cache_tests.cpp
+        src/application/context/SelectionCache.cpp
+    )
+
+    add_executable(frans_selection_cache_tests ${FRANS_SELCACHE_TEST_SOURCES})
+    target_include_directories(frans_selection_cache_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    )
+    target_link_libraries(frans_selection_cache_tests PRIVATE
+        Threads::Threads
+        ${FRANS_PLATFORM_LIBS}
+        frans_warnings
+    )
+    if(FRANS_PLATFORM_DEFS)
+        target_compile_definitions(frans_selection_cache_tests PRIVATE ${FRANS_PLATFORM_DEFS})
+    endif()
+    add_test(NAME selection_cache_tests COMMAND frans_selection_cache_tests)
+
+    #------------------------------------------------------------------
     # frans_git_facade_tests  (Fase D #67 + #68)
     #
     # GitFacade:
@@ -1903,92 +1945,6 @@ if(FRANS_BUILD_TESTS)
     add_test(NAME danger_git_tests COMMAND frans_danger_git_tests)
 
 endif()
-================================================
-FILE: src/application/context/ContextSelector.h
-================================================
-#pragma once
-// Fase C #59 -- ContextSelector (BluePrint v9 Addendum §4.5)
-//
-// Tugas: Menjembatani FileCollector <-> GeminiClient <-> SourceCodeBuilder.
-// - Susun input untuk Gemini (Full/Index mode).
-// - Panggil Gemini untuk seleksi file.
-// - Validasi path hasil Gemini terhadap daftar file nyata.
-// - Terapkan always_include, batas ukuran, dan batas jumlah.
-// - Kembalikan SelectionResult untuk ditinjau manusia.
-//
-// Catatan nama:
-//   - `frans::application::SelectedFile`      -> milik GeminiClient (data mentah dari API).
-//   - `frans::application::ContextFileEntry`  -> milik ContextSelector (diperkaya dengan
-//                                               size_bytes dari disk + flag `selected` untuk UI).
-//   Keduanya sengaja dibedakan agar tidak terjadi redefinition ketika ContextSelector.h
-//   meng-include GeminiClient.h.
-
-#include "application/ai/GeminiClient.h"
-#include "application/ingest/FileCollector.h"
-#include <atomic>
-#include <string>
-#include <vector>
-#include <cstddef>
-
-namespace frans::application {
-
-struct ContextRequest {
-    std::string project_root;
-    std::string request_text;
-    std::string error_output;                 // Opsional, ikut dikirim sebagai konteks
-    std::vector<std::string> always_include;  // Dari config: file yang selalu disertakan
-    std::size_t max_context_bytes = 300 * 1024; // Default 300 KB
-    std::size_t max_files         = 40;       // Default 40 file
-
-    // Konfigurasi dari AppConfig
-    std::string gemini_model;
-    std::string gemini_endpoint;
-    std::string api_key;
-    std::string selector_prompt;              // Isi config/gemini_selector_prompt.txt
-    int gemini_timeout_sec = 90;
-    std::size_t gemini_full_mode_max_tokens = 150000;
-    int gemini_index_head_lines = 40;
-};
-
-// Versi diperkaya dari GeminiClient::SelectedFile.
-// Ditambah: size_bytes (dari disk) + selected (state UI checkbox).
-struct ContextFileEntry {
-    std::string path;
-    std::string priority;   // "must" | "helpful" | "pinned" | "manual"
-    std::string reason;
-    std::size_t size_bytes = 0;
-    bool        selected   = true;   // Dicentang di UI
-};
-
-struct SelectionResult {
-    bool ok = false;
-    std::string error;
-
-    std::vector<ContextFileEntry> files;
-    std::vector<std::string> new_files_expected;
-    std::string notes;
-
-    std::vector<std::string> dropped_invalid;   // Path halusinasi (tidak ada di disk)
-    std::vector<std::string> dropped_budget;    // Dibuang karena batas ukuran/jumlah
-
-    std::string mode;                           // "full" | "index"
-    std::size_t sent_bytes = 0;                 // Estimasi byte yang dikirim ke Gemini
-    std::size_t est_tokens = 0;                 // Estimasi token (bytes / 4)
-};
-
-/**
- * @brief Seleksi konteks via Gemini API.
- *
- * @param req Parameter permintaan dan konfigurasi.
- * @param client Instance GeminiClient yang sudah dikonfigurasi.
- * @param cancel Pointer ke flag pembatalan (opsional).
- * @return SelectionResult berisi daftar file terpilih dan metadata.
- */
-SelectionResult selectContext(const ContextRequest& req,
-                              GeminiClient& client,
-                              std::atomic<bool>* cancel = nullptr);
-
-} // namespace frans::application
 ================================================
 FILE: src/application/context/SourceCodeBuilder.cpp
 ================================================
@@ -2252,838 +2208,83 @@ const BuildManifest& manifest,
 const std::vector<FileHashInfo>& file_hashes);
 } // namespace frans::application
 ================================================
-FILE: src/config/AppConfig.h
+FILE: src/application/ingest/FileCollector.h
 ================================================
-#pragma once
-#include <string>
-namespace frans::config {
-struct AppConfig {
-    // Window
-    int         window_width     = 0;
-    int         window_height    = 0;
-    int         window_margin_px = 24;
-    std::string window_title     = "Frans";
-    std::string default_project_root;  // <-- INI YANG HILANG
-
-    // Build timeouts
-    int build_timeout_sec = 120;
-    int test_timeout_sec  = 120;
-    int run_timeout_sec   = 30;
-
-    // --- Baru untuk v3 ---
-    // Ingest
-    std::string ingest_output_dir    = "~/frans-out";
-    int         ingest_max_file_kb   = 256;
-    int         ingest_max_total_mb  = 5;
-
-    // Prompt
-    std::string prompt_template_path = "config/prompt_template.txt";
-
-    // Context / Gemini selector
-    std::string selector_prompt_path      = "config/gemini_selector_prompt.txt";
-    std::string context_output_name       = "SourceCode.md";
-    int         context_max_kb            = 300;
-    int         context_max_files         = 40;
-    std::string context_always_include    = "BluePrint.md";
-
-    // Gemini
-    std::string gemini_model              = "gemini-2.5-flash";
-    std::string gemini_endpoint           = "https://generativelanguage.googleapis.com/v1beta";
-    int         gemini_timeout_sec        = 90;
-    int         gemini_full_mode_max_tokens = 150000;
-    int         gemini_index_head_lines   = 40;
-    std::string gemini_api_key_file;
-
-    static AppConfig loadFromFile(const std::string& path);
-};
-} // namespace frans::config
-================================================
-FILE: src/ui/PromptDialog.h
-================================================
-// src/ui/PromptDialog.h
+// src/application/ingest/FileCollector.h
 //
-// Dialog Prompt Generator — Fase A #43 + Fase C #58 + Fase C #61.
+// Fase B #46-47 -- kumpulkan file repo untuk Ingest & Context Pack.
+//
+// Jalur utama: `git ls-files -z --cached --others --exclude-standard`
+//   (honor .gitignore penuh, termasuk untracked file).
+// Fallback: std::filesystem walker dengan exclude bawaan kalau bukan
+//   git repo atau git tidak tersedia.
+//
+// Filter (Fase B #47):
+//   1. Secret: file dengan basename yang cocok pola rahasia (.env, *.pem, dll)
+//   2. Binary: file yang mengandung NUL byte di 8 KB pertama
+//   3. Ukuran: file yang melebihi max_file_bytes
+//   4. Self-exclude: file di dalam output_dir (untuk menghindari ingest output Frans)
+//
+// Murni pembacaan disk; tidak menulis apapun.
 #pragma once
-#include "config/AppConfig.h"
-#include "ui/SessionState.h"
-#include "application/context/ContextSelector.h"
-#include "application/context/SourceCodeBuilder.h"
-#include "application/ai/GeminiClient.h"
-#include <string>
+
 #include <atomic>
-#include <thread>
-#include <vector>
-class Fl_Window;
-class Fl_Text_Editor;
-class Fl_Text_Buffer;
-class Fl_Text_Display;
-class Fl_Button;
-class Fl_Box;
-class Fl_Check_Browser;
-class Fl_Widget;
-namespace frans::ui {
-class PromptDialog {
-public:
-static void show(SessionState* session,
-const frans::config::AppConfig& cfg);
-PromptDialog(const PromptDialog&)            = delete;
-PromptDialog& operator=(const PromptDialog&) = delete;
-private:
-explicit PromptDialog(SessionState* session,
-const frans::config::AppConfig& cfg);
-~PromptDialog();
-void buildUI();
-void doGenerate();
-void doCopy();
-void doFetchLastError();
-void doTestConnection();
-void doSelectFiles();
-void doAddManual();
-void doCancelSelect();
-void doBuildSourceCode();
-void doOpenFolder();
-void setStatus(const std::string& msg, unsigned color);
-std::string loadTemplate();
-void updateBrowserFromSelection();
-void updateTotals();
-void updateFreshnessDisplay();
-void updateKeyStatus();
-void updateModeDisplay();
-enum class Freshness { NoFile, Stale, Fresh };
-Freshness checkFreshness();
-std::string computeRequestHash();
-std::string formatBytes(std::size_t bytes);
-void workerListModels();
-void workerSelectFiles();
-void workerBuildSourceCode();
-static void cbGenerate(Fl_Widget*, void*);
-static void cbCopy(Fl_Widget*, void*);
-static void cbFetchLastError(Fl_Widget*, void*);
-static void cbTestConnection(Fl_Widget*, void*);
-static void cbSelectFiles(Fl_Widget*, void*);
-static void cbAddManual(Fl_Widget*, void*);
-static void cbCancelSelect(Fl_Widget*, void*);
-static void cbBrowserChanged(Fl_Widget*, void*);
-static void cbBuildSourceCode(Fl_Widget*, void*);
-static void cbOpenFolder(Fl_Widget*, void*);
-static void cbClose(Fl_Widget*, void*);
-static void cbPollListModelsWorker(void*);
-static void cbPollSelectWorker(void*);
-static void cbPollBuildWorker(void*);
-SessionState*                  session_;
-const frans::config::AppConfig& cfg_;
-Fl_Window*       win_              = nullptr;
-Fl_Text_Editor*  request_editor_   = nullptr;
-Fl_Text_Buffer*  request_buf_      = nullptr;
-Fl_Text_Editor*  error_editor_     = nullptr;
-Fl_Text_Buffer*  error_buf_        = nullptr;
-Fl_Button*       fetch_btn_        = nullptr;
-Fl_Button*       select_btn_        = nullptr;
-Fl_Box*          key_status_box_    = nullptr;
-Fl_Box*          mode_box_          = nullptr;
-Fl_Check_Browser* file_browser_     = nullptr;
-Fl_Box*          total_box_         = nullptr;
-Fl_Button*       add_manual_btn_    = nullptr;
-Fl_Button*       cancel_select_btn_ = nullptr;
-Fl_Button*       build_btn_         = nullptr;
-Fl_Box*          freshness_box_     = nullptr;
-Fl_Box*          location_box_      = nullptr;
-Fl_Button*       open_folder_btn_   = nullptr;
-Fl_Button*       generate_btn_      = nullptr;
-Fl_Button*       copy_btn_          = nullptr;
-Fl_Button*       test_conn_btn_     = nullptr;
-Fl_Text_Display* preview_display_   = nullptr;
-Fl_Text_Buffer*  preview_buf_       = nullptr;
-Fl_Box*          status_box_        = nullptr;
-std::string last_generated_prompt_;
-frans::application::SelectionResult last_selection_;
-std::vector<frans::application::CollectedFile> last_collected_files_;
-frans::application::BuildResult last_build_result_;
-std::string current_request_hash_;
-bool has_fresh_source_code_ = false;
-std::thread list_models_worker_thread_;
-std::atomic<bool> list_models_worker_running_{false};
-std::atomic<bool> list_models_worker_cancel_{false};
-std::string list_models_worker_message_;
-bool list_models_worker_ok_ = false;
-std::vector<frans::application::ModelInfo> list_models_worker_models_;
-std::thread select_worker_thread_;
-std::atomic<bool> select_worker_running_{false};
-std::atomic<bool> select_worker_cancel_{false};
-frans::application::SelectionResult select_worker_result_;
-std::vector<frans::application::CollectedFile> select_worker_collected_;
-bool select_worker_ok_ = false;
-std::string select_worker_error_;
-std::string select_worker_used_model_;
-std::thread build_worker_thread_;
-std::atomic<bool> build_worker_running_{false};
-frans::application::BuildResult build_worker_result_;
-};
-} // namespace frans::ui
-================================================
-FILE: src/ui/PromptDialog_Actions.cpp
-================================================
-// src/ui/PromptDialog_Actions.cpp
-// Action methods: doGenerate, doCopy, doFetchLastError, doTestConnection,
-// doSelectFiles, doAddManual, doCancelSelect, doBuildSourceCode, doOpenFolder
-#include "ui/PromptDialog.h"
-#include "application/prompt/PromptGenerator.h"
-#include "application/ai/ApiKeyProvider.h"
-#include "application/ai/GeminiClient.h"
-#include "application/context/ContextSelector.h"
-#include "application/context/SourceCodeBuilder.h"
-#include "infrastructure/http/CurlTransport.h"
-#include <FL/Fl.H>
-#include <FL/Fl_Button.H>
-#include <FL/Fl_File_Chooser.H>
-#include <FL/Fl_Text_Buffer.H>
-#include <FL/Fl_Window.H>
-#include <FL/fl_ask.H>
-#include <filesystem>
-#include <fstream>
-#include <sstream>
-
-namespace frans::ui {
-
-namespace {
-
-std::string resolveProjectRoot(SessionState* session,
-                               const frans::config::AppConfig& cfg)
-{
-    if (session && !session->last_project_root.empty()) {
-        return session->last_project_root;
-    }
-    if (!cfg.default_project_root.empty()) {
-        return cfg.default_project_root;
-    }
-    return "";
-}
-
-std::string normalizeModelName(const std::string& raw) {
-    std::string s = raw;
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
-    
-    const std::string prefix = "models/";
-    if (s.size() > prefix.size() && s.compare(0, prefix.size(), prefix) == 0) {
-        s = s.substr(prefix.size());
-    }
-    return s;
-}
-
-} // namespace
-
-// ===========================================================================
-// Actions
-// ===========================================================================
-void PromptDialog::doGenerate() {
-    if (!request_buf_ || !preview_buf_) return;
-    
-    const char* req_raw = request_buf_->text();
-    const std::string request = req_raw ? req_raw : "";
-    
-    if (request.empty()) {
-        fl_message("Permintaan kosong.\nTulis permintaan Anda di kotak atas dulu.");
-        return;
-    }
-    
-    Freshness fresh = checkFreshness();
-    std::string context_file_name;
-    
-    if (fresh == Freshness::Fresh) {
-        context_file_name = cfg_.context_output_name;
-    } else {
-        int choice = fl_choice("SourceCode.md tidak segar atau belum ada.\n"
-                               "Generate prompt tanpa konteks file?",
-                               "Batal", "Tetap generate", nullptr);
-        if (choice == 0) return;
-        context_file_name = "";
-    }
-    
-    const char* err_raw = error_buf_ ? error_buf_->text() : nullptr;
-    const std::string error_output = err_raw ? err_raw : "";
-    
-    frans::application::PromptInput in;
-    in.tmpl              = loadTemplate();
-    in.request           = request;
-    in.error_output      = error_output;
-    in.context_file_name = context_file_name;
-    
-    std::string new_files_hint;
-    for (const auto& nf : last_selection_.new_files_expected) {
-        if (!new_files_hint.empty()) new_files_hint += "\n";
-        new_files_hint += nf;
-    }
-    in.new_files_hint = new_files_hint;
-    
-    last_generated_prompt_ = frans::application::renderPrompt(in);
-    preview_buf_->text(last_generated_prompt_.c_str());
-    
-    if (copy_btn_) copy_btn_->activate();
-    
-    char buf[256];
-    std::snprintf(buf, sizeof(buf),
-                  "Prompt di-generate (%zu karakter). Klik [Copy] untuk menyalin.",
-                  last_generated_prompt_.size());
-    setStatus(buf, FL_DARK_GREEN);
-}
-
-void PromptDialog::doCopy() {
-    if (last_generated_prompt_.empty()) {
-        fl_message("Belum ada prompt yang di-generate.\nKlik [Generate Prompt] dulu.");
-        return;
-    }
-    
-    Fl::copy(last_generated_prompt_.c_str(),
-             static_cast<int>(last_generated_prompt_.size()), 1);
-    setStatus("Prompt disalin ke clipboard. Paste ke AI browser Anda.", FL_DARK_GREEN);
-}
-
-void PromptDialog::doFetchLastError() {
-    if (!session_) {
-        fl_message("SessionState tidak tersedia.");
-        return;
-    }
-    
-    if (session_->last_build_error.empty()) {
-        fl_message("Belum ada error dari build terakhir.");
-        return;
-    }
-    
-    if (error_buf_) {
-        error_buf_->text(session_->last_build_error.c_str());
-        setStatus("Error dari build terakhir dimuat.", FL_DARK_GREEN);
-    }
-}
-
-void PromptDialog::doTestConnection() {
-    if (list_models_worker_running_.load()) {
-        fl_message("Tes koneksi sedang berjalan.");
-        return;
-    }
-    
-    frans::application::ApiKeyOptions key_opt;
-    key_opt.key_file = cfg_.gemini_api_key_file;
-    auto key_result = frans::application::ApiKeyProvider::resolve(key_opt);
-    
-    if (!key_result.found()) {
-        std::string msg = "GEMINI_API_KEY tidak ditemukan.\n" + frans::application::apiKeyMissingHint();
-        fl_message("%s", msg.c_str());
-        return;
-    }
-    
-    if (list_models_worker_thread_.joinable()) list_models_worker_thread_.join();
-    
-    if (test_conn_btn_) test_conn_btn_->deactivate();
-    setStatus("Menguji koneksi ke Gemini API...", FL_DARK_BLUE);
-    
-    list_models_worker_cancel_.store(false);
-    list_models_worker_running_.store(true);
-    list_models_worker_ok_ = false;
-    list_models_worker_message_.clear();
-    list_models_worker_models_.clear();
-    
-    list_models_worker_thread_ = std::thread(&PromptDialog::workerListModels, this);
-    Fl::add_timeout(0.1, cbPollListModelsWorker, this);
-}
-
-void PromptDialog::doSelectFiles() {
-    if (select_worker_running_.load()) {
-        fl_message("Seleksi file sedang berjalan.");
-        return;
-    }
-    
-    if (!request_buf_) return;
-    
-    const char* req_raw = request_buf_->text();
-    std::string request = req_raw ? req_raw : "";
-    
-    if (request.empty()) {
-        fl_message("Permintaan kosong.\nTulis permintaan dulu sebelum memilih file.");
-        return;
-    }
-    
-    frans::application::ApiKeyOptions key_opt;
-    key_opt.key_file = cfg_.gemini_api_key_file;
-    auto key_result = frans::application::ApiKeyProvider::resolve(key_opt);
-    
-    if (!key_result.found()) {
-        fl_message("GEMINI_API_KEY tidak ditemukan.");
-        return;
-    }
-    
-    std::string project_root = resolveProjectRoot(session_, cfg_);
-    if (project_root.empty()) {
-        fl_message("Project root belum diatur.\n"
-                   "Isi path project di MainWindow atau set 'default_project_root' di config/app.json.");
-        return;
-    }
-    
-    std::string model_name = normalizeModelName(cfg_.gemini_model);
-    std::fprintf(stderr, "[frans][prompt_dialog] doSelectFiles: project_root='%s', model='%s' (raw='%s')\n",
-                 project_root.c_str(), model_name.c_str(), cfg_.gemini_model.c_str());
-    std::fflush(stderr);
-    
-    if (select_worker_thread_.joinable()) select_worker_thread_.join();
-    
-    if (select_btn_) select_btn_->deactivate();
-    if (cancel_select_btn_) cancel_select_btn_->activate();
-    setStatus("Memilih file via Gemini (model: " + model_name + ")...", FL_DARK_BLUE);
-    
-    select_worker_cancel_.store(false);
-    select_worker_running_.store(true);
-    select_worker_ok_ = false;
-    select_worker_error_.clear();
-    select_worker_result_ = frans::application::SelectionResult{};
-    select_worker_collected_.clear();
-    
-    select_worker_thread_ = std::thread(&PromptDialog::workerSelectFiles, this);
-    Fl::add_timeout(0.1, cbPollSelectWorker, this);
-}
-
-void PromptDialog::doAddManual() {
-    std::string project_root = resolveProjectRoot(session_, cfg_);
-    if (project_root.empty()) {
-        fl_message("Project root belum diatur.\n"
-                   "Isi path project di MainWindow atau set 'default_project_root' di config/app.json.");
-        return;
-    }
-    
-    const char* picked = fl_file_chooser("Pilih file untuk ditambahkan",
-                                         "*",
-                                         project_root.c_str());
-    if (!picked) return;
-    
-    std::string abs_path = picked;
-    std::string rel_path;
-    
-    if (abs_path.find(project_root) == 0) {
-        rel_path = abs_path.substr(project_root.size());
-        if (!rel_path.empty() && (rel_path[0] == '/' || rel_path[0] == '\\')) {
-            rel_path = rel_path.substr(1);
-        }
-    } else {
-        fl_message("File harus berada di dalam project root.");
-        return;
-    }
-    
-    for (char& c : rel_path) if (c == '\\') c = '/';
-    
-    for (const auto& entry : last_selection_.files) {
-        if (entry.path == rel_path) {
-            fl_message("File sudah ada dalam daftar.");
-            return;
-        }
-    }
-    
-    std::ifstream f(abs_path, std::ios::binary | std::ios::ate);
-    if (!f) {
-        fl_message("Gagal membaca file.");
-        return;
-    }
-    
-    std::size_t size = static_cast<std::size_t>(f.tellg());
-    
-    frans::application::ContextFileEntry entry;
-    entry.path = rel_path;
-    entry.priority = "manual";
-    entry.reason = "Ditambahkan manual";
-    entry.size_bytes = size;
-    entry.selected = true;
-    
-    last_selection_.files.push_back(entry);
-    updateBrowserFromSelection();
-    setStatus("File ditambahkan: " + rel_path, FL_DARK_GREEN);
-}
-
-void PromptDialog::doCancelSelect() {
-    if (select_worker_running_.load()) {
-        select_worker_cancel_.store(true);
-        setStatus("Membatalkan seleksi...", FL_DARK_BLUE);
-    }
-}
-
-void PromptDialog::doBuildSourceCode() {
-    if (build_worker_running_.load()) {
-        fl_message("Build sedang berjalan.");
-        return;
-    }
-    
-    if (last_selection_.files.empty()) {
-        fl_message("Belum ada file terpilih.\nKlik [Pilih File via Gemini] dulu.");
-        return;
-    }
-    
-    std::string project_root = resolveProjectRoot(session_, cfg_);
-    if (project_root.empty()) {
-        fl_message("Project root belum diatur.");
-        return;
-    }
-    
-    if (!request_buf_) return;
-    
-    if (build_worker_thread_.joinable()) build_worker_thread_.join();
-    
-    if (build_btn_) build_btn_->deactivate();
-    setStatus("Membangun SourceCode.md...", FL_DARK_BLUE);
-    
-    build_worker_running_.store(true);
-    build_worker_result_ = frans::application::BuildResult{};
-    
-    build_worker_thread_ = std::thread(&PromptDialog::workerBuildSourceCode, this);
-    Fl::add_timeout(0.1, cbPollBuildWorker, this);
-}
-
-void PromptDialog::doOpenFolder() {
-    if (last_build_result_.source_code_path.empty()) return;
-    
-    std::string dir = std::filesystem::path(last_build_result_.source_code_path).parent_path().string();
-    if (dir.empty()) return;
-    
-#ifdef _WIN32
-    std::string cmd = "explorer \"" + dir + "\"";
-#else
-    std::string cmd = "xdg-open \"" + dir + "\" &";
-#endif
-    
-    int ret = std::system(cmd.c_str());
-    (void)ret;
-}
-
-} // namespace frans::ui
-================================================
-FILE: src/ui/PromptDialog_Callbacks.cpp
-================================================
-// src/ui/PromptDialog_Callbacks.cpp
-// Static callback wrappers and polling callbacks
-#include "ui/PromptDialog.h"
-#include <FL/Fl.H>
-#include <FL/Fl_Box.H>
-#include <FL/Fl_Button.H>
-#include <FL/Fl_Check_Browser.H>
-#include <FL/Fl_Text_Buffer.H>
-#include <FL/Fl_Text_Display.H>
-#include <FL/Fl_Window.H>
-#include <FL/fl_ask.H>
-#include <algorithm>
-#include <cctype>
-#include <sstream>
+#include <cstddef>
 #include <string>
 #include <vector>
 
-namespace frans::ui {
+namespace frans::application {
 
-namespace {
+// Satu file yang terdeteksi di repo.
+//
+// `skipped = true` berarti file terdaftar (muncul di tree) tapi isinya
+// tidak boleh dibaca / tidak boleh dikirim ke AI. `skip_reason` memberi
+// tahu kenapa: "secret" | "binary" | "too_large".
+struct CollectedFile {
+    std::string relative_path;   // forward slash, relatif terhadap project_root
+    std::size_t size_bytes = 0;
+    bool        is_text    = true;   // false = binary / bukan UTF-8
+    bool        skipped    = false;
+    std::string skip_reason;         // "secret" | "binary" | "too_large"
+};
 
-std::string normalizeModelName(const std::string& raw) {
-    std::string s = raw;
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
-    
-    const std::string prefix = "models/";
-    if (s.size() > prefix.size() && s.compare(0, prefix.size(), prefix) == 0) {
-        s = s.substr(prefix.size());
-    }
-    return s;
-}
+struct CollectOptions {
+    std::size_t max_file_bytes = 256 * 1024;   // 256 KB default
+    bool        exclude_secrets = true;
+    std::vector<std::string> extra_excludes;   // nama dir / glob basename
+    std::string output_dir;                    // di-exclude jika di dalam repo
+};
 
-bool isModelNotFoundError(const std::string& error) {
-    std::string lower = error;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    
-    return lower.find("model") != std::string::npos &&
-           (lower.find("not found") != std::string::npos ||
-            lower.find("tidak ditemukan") != std::string::npos ||
-            lower.find("404") != std::string::npos ||
-            lower.find("does not exist") != std::string::npos ||
-            lower.find("invalid model") != std::string::npos ||
-            lower.find("modelnotfound") != std::string::npos);
-}
+struct CollectResult {
+    bool ok = false;
+    std::string error;
+    bool used_git = false;
+    std::vector<CollectedFile> files;   // terurut leksikografis
+};
 
-std::string findSimilarModel(const std::string& target,
-                             const std::vector<frans::application::ModelInfo>& models,
-                             int max_suggestions = 5) {
-    std::string target_lower = target;
-    std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    
-    struct Scored {
-        std::string name;
-        int score = 0;
-    };
-    
-    std::vector<Scored> scored;
-    scored.reserve(models.size());
-    
-    for (const auto& m : models) {
-        std::string name = normalizeModelName(m.name);
-        std::string name_lower = name;
-        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
-        
-        int score = 0;
-        std::size_t common = 0;
-        while (common < target_lower.size() && common < name_lower.size() &&
-               target_lower[common] == name_lower[common]) {
-            ++common;
-        }
-        score += static_cast<int>(common) * 2;
-        
-        if (name_lower.find(target_lower) != std::string::npos ||
-            target_lower.find(name_lower) != std::string::npos) {
-            score += 20;
-        }
-        
-        int len_diff = std::abs(static_cast<int>(name_lower.size()) -
-                                static_cast<int>(target_lower.size()));
-        if (len_diff < 5) score += 5;
-        
-        if (score > 0) {
-            scored.push_back({name, score});
-        }
-    }
-    
-    std::sort(scored.begin(), scored.end(),
-              [](const Scored& a, const Scored& b) { return a.score > b.score; });
-    
-    std::ostringstream oss;
-    int count = 0;
-    for (const auto& s : scored) {
-        if (count >= max_suggestions) break;
-        oss << "  - " << s.name << "\n";
-        ++count;
-    }
-    
-    return oss.str();
-}
+// Kumpulkan file di `project_root`.
+//
+// - `cancel` boleh nullptr. Kalau non-null dan bernilai true, proses
+//   dihentikan dan `result.error = "dibatalkan"`.
+// - Return `ok = true` bila traversal selesai (meski beberapa file di-skip).
+// - Return `ok = false` bila project_root invalid atau dibatalkan.
+CollectResult collectFiles(const std::string& project_root,
+                           const CollectOptions& opt,
+                           std::atomic<bool>* cancel = nullptr);
 
-void showScrollableMessage(const char* title, const std::string& message) {
-    constexpr int dlg_w = 650;
-    constexpr int dlg_h = 500;
-    constexpr int pad   = 10;
-    constexpr int btn_w = 80;
-    constexpr int btn_h = 30;
-    
-    Fl_Window* win = new Fl_Window(dlg_w, dlg_h, title);
-    win->set_modal();
-    win->begin();
-    
-    Fl_Text_Display* display = new Fl_Text_Display(
-        pad, pad, dlg_w - 2 * pad, dlg_h - 2 * pad - btn_h - pad);
-    Fl_Text_Buffer* buf = new Fl_Text_Buffer();
-    display->buffer(buf);
-    display->textfont(FL_COURIER);
-    display->textsize(11);
-    display->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
-    display->color(FL_WHITE);
-    buf->text(message.c_str());
-    
-    Fl_Button* ok_btn = new Fl_Button(
-        dlg_w - pad - btn_w, dlg_h - pad - btn_h, btn_w, btn_h, "OK");
-    ok_btn->callback([](Fl_Widget* w, void*) {
-        if (Fl_Window* win = w ? w->window() : nullptr) {
-            win->hide();
-        }
-    });
-    ok_btn->take_focus();
-    
-    win->end();
-    win->resizable(display);
-    win->show();
-    
-    while (win->shown()) Fl::wait();
-    
-    delete buf;
-    delete win;
-}
+// ---------------------------------------------------------------------------
+// Helper yang diekspos untuk unit test (murni, tanpa I/O).
+// ---------------------------------------------------------------------------
 
-} // namespace
+// Apakah `basename` cocok salah satu pola secret bawaan?
+bool isSecretBasename(const std::string& basename);
 
-// ===========================================================================
-// Callbacks
-// ===========================================================================
-void PromptDialog::cbGenerate(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doGenerate();
-}
+// Apakah `rel_path` (forward slash) harus di-exclude karena komponen
+// path-nya masuk daftar exclude bawaan atau `extra_excludes`?
+bool isExcludedPath(const std::string& rel_path,
+                    const std::vector<std::string>& extra_excludes);
 
-void PromptDialog::cbCopy(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doCopy();
-}
+// Apakah konten file bersifat binary (mengandung NUL byte)?
+bool isBinaryContent(const std::string& file_path);
 
-void PromptDialog::cbFetchLastError(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doFetchLastError();
-}
-
-void PromptDialog::cbTestConnection(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doTestConnection();
-}
-
-void PromptDialog::cbSelectFiles(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doSelectFiles();
-}
-
-void PromptDialog::cbAddManual(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doAddManual();
-}
-
-void PromptDialog::cbCancelSelect(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doCancelSelect();
-}
-
-void PromptDialog::cbBrowserChanged(Fl_Widget*, void* data) {
-    auto* dlg = static_cast<PromptDialog*>(data);
-    if (!dlg || !dlg->file_browser_) return;
-    
-    int n = dlg->file_browser_->nitems();
-    for (int i = 0; i < n && i < static_cast<int>(dlg->last_selection_.files.size()); ++i) {
-        dlg->last_selection_.files[i].selected = dlg->file_browser_->checked(i + 1) != 0;
-    }
-    dlg->updateTotals();
-}
-
-void PromptDialog::cbBuildSourceCode(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doBuildSourceCode();
-}
-
-void PromptDialog::cbOpenFolder(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doOpenFolder();
-}
-
-void PromptDialog::cbClose(Fl_Widget* w, void*) {
-    if (Fl_Window* win = w ? w->window() : nullptr) {
-        win->hide();
-    }
-}
-
-// ===========================================================================
-// Polling callbacks
-// ===========================================================================
-void PromptDialog::cbPollListModelsWorker(void* data) {
-    auto* dlg = static_cast<PromptDialog*>(data);
-    if (!dlg) return;
-    
-    if (dlg->list_models_worker_running_.load()) {
-        Fl::repeat_timeout(0.1, cbPollListModelsWorker, data);
-        return;
-    }
-    
-    if (dlg->list_models_worker_thread_.joinable()) {
-        dlg->list_models_worker_thread_.join();
-    }
-    
-    if (dlg->test_conn_btn_) dlg->test_conn_btn_->activate();
-    
-    if (dlg->list_models_worker_ok_) {
-        dlg->setStatus("Tes koneksi berhasil.", FL_DARK_GREEN);
-        showScrollableMessage("Daftar Model Gemini", dlg->list_models_worker_message_);
-    } else {
-        dlg->setStatus("Tes koneksi gagal.", FL_RED);
-        showScrollableMessage("Tes Koneksi Gagal", dlg->list_models_worker_message_);
-    }
-    
-    dlg->list_models_worker_message_.clear();
-    dlg->list_models_worker_ok_ = false;
-}
-
-void PromptDialog::cbPollSelectWorker(void* data) {
-    auto* dlg = static_cast<PromptDialog*>(data);
-    if (!dlg) return;
-    
-    if (dlg->select_worker_running_.load()) {
-        Fl::repeat_timeout(0.1, cbPollSelectWorker, data);
-        return;
-    }
-    
-    if (dlg->select_worker_thread_.joinable()) {
-        dlg->select_worker_thread_.join();
-    }
-    
-    if (dlg->select_btn_) dlg->select_btn_->activate();
-    if (dlg->cancel_select_btn_) dlg->cancel_select_btn_->deactivate();
-    
-    if (dlg->select_worker_ok_) {
-        dlg->last_selection_ = dlg->select_worker_result_;
-        dlg->last_collected_files_ = dlg->select_worker_collected_;
-        dlg->updateBrowserFromSelection();
-        dlg->updateModeDisplay();
-        dlg->setStatus("Seleksi file selesai. Tinjau dan koreksi centang.", FL_DARK_GREEN);
-    } else {
-        dlg->setStatus("Seleksi file gagal: " + dlg->select_worker_error_, FL_RED);
-        
-        std::string error_msg = dlg->select_worker_error_;
-        if (isModelNotFoundError(error_msg)) {
-            std::ostringstream oss;
-            oss << "GEMINI MODEL TIDAK DITEMUKAN\n";
-            oss << "================================\n\n";
-            oss << "Model yang dipakai: " << dlg->select_worker_used_model_ << "\n";
-            oss << "Dari config:        " << dlg->cfg_.gemini_model << "\n\n";
-            oss << "API key Anda VALID (Tes Koneksi berhasil dengan "
-                << dlg->list_models_worker_models_.size() << " model),\n";
-            oss << "tetapi nama model di config/app.json tidak ada di daftar.\n\n";
-            oss << "SOLUSI:\n";
-            oss << "1. Klik [Tes Koneksi / Daftar Model] untuk melihat nama model yang valid.\n";
-            oss << "2. Edit config/app.json, ganti 'gemini_model' dengan nama yang valid.\n";
-            oss << "3. Contoh: \"gemini_model\": \"gemini-3.8-flash\"\n\n";
-            
-            if (!dlg->list_models_worker_models_.empty()) {
-                std::string similar = findSimilarModel(
-                    dlg->select_worker_used_model_,
-                    dlg->list_models_worker_models_);
-                if (!similar.empty()) {
-                    oss << "Model yang MIRIP dengan '" << dlg->select_worker_used_model_ << "':\n";
-                    oss << similar;
-                    oss << "\n";
-                }
-            } else {
-                oss << "Tip: Klik [Tes Koneksi] dulu untuk mengisi daftar model.\n";
-            }
-            
-            oss << "\nError detail dari Gemini:\n" << error_msg << "\n";
-            showScrollableMessage("Model Gemini Tidak Ditemukan", oss.str());
-        } else {
-            fl_message("Seleksi file gagal:\n%s", error_msg.c_str());
-        }
-    }
-    
-    dlg->select_worker_error_.clear();
-    dlg->select_worker_ok_ = false;
-}
-
-void PromptDialog::cbPollBuildWorker(void* data) {
-    auto* dlg = static_cast<PromptDialog*>(data);
-    if (!dlg) return;
-    
-    if (dlg->build_worker_running_.load()) {
-        Fl::repeat_timeout(0.1, cbPollBuildWorker, data);
-        return;
-    }
-    
-    if (dlg->build_worker_thread_.joinable()) {
-        dlg->build_worker_thread_.join();
-    }
-    
-    if (dlg->build_btn_) dlg->build_btn_->activate();
-    
-    if (dlg->build_worker_result_.ok) {
-        dlg->last_build_result_ = dlg->build_worker_result_;
-        
-        if (dlg->session_) {
-            dlg->session_->last_context_path = dlg->last_build_result_.source_code_path;
-        }
-        
-        dlg->updateFreshnessDisplay();
-        
-        char buf[256];
-        std::snprintf(buf, sizeof(buf),
-                      "SourceCode.md dibangun: %zu file, %s",
-                      dlg->last_build_result_.files_included,
-                      dlg->formatBytes(dlg->last_build_result_.total_bytes).c_str());
-        dlg->setStatus(buf, FL_DARK_GREEN);
-    } else {
-        dlg->setStatus("Build gagal: " + dlg->build_worker_result_.error, FL_RED);
-        fl_message("Build SourceCode.md gagal:\n%s", dlg->build_worker_result_.error.c_str());
-    }
-}
-
-} // namespace frans::ui
+} // namespace frans::application
