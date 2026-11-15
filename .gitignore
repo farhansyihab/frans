@@ -5,6 +5,7 @@ logs/
 *.so
 *.d
 *.exe
+BluePrint-v9-Addendum.md
 compile_commands.json
 
 # secrets

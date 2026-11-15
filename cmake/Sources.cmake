@@ -2,7 +2,7 @@ include_guard(GLOBAL)
 
 set(FRANS_SOURCES
     src/main.cpp
-    
+
     # UI
     src/ui/MainWindow.cpp
     src/ui/ManualImportDialog.cpp
@@ -11,32 +11,33 @@ set(FRANS_SOURCES
     src/ui/PromptDialog_Workers.cpp
     src/ui/PromptDialog_Callbacks.cpp
     src/ui/IngestDialog.cpp
-    
+    src/ui/GitDialog.cpp
+
     # Application -- import
     src/application/import/MultiFileParser.cpp
-    
+
     # Application -- manual_import
     src/application/manual_import/ManualImporter.cpp
-    
+
     # Application -- safety
     src/application/safety/DangerCheckHandler.cpp
-    
+
     # Application -- prompt (Fase A #41)
     src/application/prompt/PromptGenerator.cpp
-    
+
     # Application -- ai (Fase C #54, #56, #57, #58)
     src/application/ai/ApiKeyProvider.cpp
     src/application/ai/GeminiClient.cpp
     src/application/ai/GeminiSchema.cpp
-    
+
     # Application -- context (Fase C #59, #60)
     src/application/context/ContextSelector.cpp
     src/application/context/SourceCodeBuilder.cpp
-    
+
     # Application -- build_runner
     src/application/build_runner/BuildRunner.cpp
     src/application/build_runner/ProjectDetector.cpp
-    
+
     # Fase A #44: ringkasan error untuk SessionState (murni, tanpa FLTK)
     src/application/build_runner/BuildErrorSummary.cpp
     src/application/build_runner/BuildSystems/CMakeBuildSystem.cpp
@@ -45,22 +46,22 @@ set(FRANS_SOURCES
     src/application/build_runner/BuildSystems/NpmBuildSystem.cpp
     src/application/build_runner/BuildSystems/PoetryBuildSystem.cpp
     src/application/build_runner/BuildSystems/StandaloneBuildSystem.cpp
-    
+
     # Application -- ingest (Fase B #46, #48, #50)
     src/application/ingest/FileCollector.cpp
     src/application/ingest/MarkdownRenderer.cpp
     src/application/ingest/RepoIngester.cpp
-    
-    # Application -- git (Fase D #67)
+
+    # Application -- git (Fase D #67, #68, #70)
     src/application/git/GitFacade.cpp
-    
+
     # Infrastructure
     src/infrastructure/fs/SandboxedFileSystem.cpp
     src/infrastructure/system/DiffEngine.cpp
-    
+
     # Infrastructure -- http (Fase C #55)
     src/infrastructure/http/CurlTransport.cpp
-    
+
     # Config
     src/config/AppConfig.cpp
     src/config/AppPaths.cpp

@@ -1,6 +1,7 @@
 # SourceCode.md: frans
-Dibuat oleh Frans | 2026-11-15 08:58 | 15 file disertakan | 70.4 KB
-Permintaan: file `src/ui/PromptDialog.cpp` terlalu besar, pecah jadi beberapa bagian
+Dibuat oleh Frans | 2026-11-15 09:40 | 17 file disertakan | 57.4 KB
+Permintaan: Ada error ketika compile "Fase D: Git" bagian no 70 "GitDialog`: status, Add, Commit, Push (+ konfirmasi, peringatan file mencurigakan)"
+fix error
 Tanda "*" pada struktur di bawah = isi file disertakan setelah bagian ini.
 
 Directory structure:
@@ -78,8 +79,8 @@ Directory structure:
     │   │   │   ├── SourceCodeBuilder.cpp
     │   │   │   └── SourceCodeBuilder.h
     │   │   ├── git/
-    │   │   │   ├── GitFacade.cpp
-    │   │   │   └── GitFacade.h
+    │   │   │   ├── GitFacade.cpp *
+    │   │   │   └── GitFacade.h *
     │   │   ├── import/
     │   │   │   ├── MultiFileParser.cpp
     │   │   │   └── MultiFileParser.h
@@ -133,14 +134,19 @@ Directory structure:
     │   │   └── RepoIngester.h
     │   ├── main.cpp
     │   └── ui/
+    │       ├── GitDialog.cpp *
+    │       ├── GitDialog.h *
     │       ├── IngestDialog.cpp
     │       ├── IngestDialog.h
     │       ├── MainWindow.cpp
     │       ├── MainWindow.h
     │       ├── ManualImportDialog.cpp
     │       ├── ManualImportDialog.h
-    │       ├── PromptDialog.cpp *
-    │       ├── PromptDialog.h *
+    │       ├── PromptDialog.cpp
+    │       ├── PromptDialog.h
+    │       ├── PromptDialog_Actions.cpp
+    │       ├── PromptDialog_Callbacks.cpp
+    │       ├── PromptDialog_Workers.cpp
     │       └── SessionState.h
     ├── test_env_extra.cpp
     ├── tests/
@@ -506,7 +512,11 @@ set(FRANS_SOURCES
     src/ui/MainWindow.cpp
     src/ui/ManualImportDialog.cpp
     src/ui/PromptDialog.cpp
+    src/ui/PromptDialog_Actions.cpp
+    src/ui/PromptDialog_Workers.cpp
+    src/ui/PromptDialog_Callbacks.cpp
     src/ui/IngestDialog.cpp
+    src/ui/GitDialog.cpp
 
     # Application -- import
     src/application/import/MultiFileParser.cpp
@@ -547,7 +557,7 @@ set(FRANS_SOURCES
     src/application/ingest/MarkdownRenderer.cpp
     src/application/ingest/RepoIngester.cpp
 
-    # Application -- git (Fase D #67)
+    # Application -- git (Fase D #67, #68, #70)
     src/application/git/GitFacade.cpp
 
     # Infrastructure
@@ -836,1335 +846,1132 @@ if(FRANS_BUILD_TESTS)
 
 endif()
 ================================================
-FILE: src/ui/PromptDialog.cpp
+FILE: src/application/git/GitFacade.cpp
 ================================================
-// src/ui/PromptDialog.cpp
-#include "ui/PromptDialog.h"
-#include "application/prompt/PromptGenerator.h"
-#include "application/ai/ApiKeyProvider.h"
-#include "application/ai/GeminiClient.h"
-#include "application/context/ContextSelector.h"
-#include "application/context/SourceCodeBuilder.h"
-#include "infrastructure/http/CurlTransport.h"
-#include "infrastructure/fs/SandboxedFileSystem.h"
-#include <FL/Fl.H>
-#include <FL/Fl_Box.H>
-#include <FL/Fl_Button.H>
-#include <FL/Fl_Check_Browser.H>
-#include <FL/Fl_File_Chooser.H>
-#include <FL/Fl_Text_Buffer.H>
-#include <FL/Fl_Text_Display.H>
-#include <FL/Fl_Text_Editor.H>
-#include <FL/Fl_Window.H>
-#include <FL/fl_ask.H>
-#include <FL/filename.H>
-#include <nlohmann/json.hpp>
+#include "application/git/GitFacade.h"
+#include "infrastructure/system/ProcessExecutor.h"
 #include <algorithm>
 #include <cctype>
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <iomanip>
+#include <regex>
 #include <sstream>
+
+namespace frans::application {
+
+namespace {
+
+std::string trim(const std::string& s) {
+    auto start = s.begin();
+    while (start != s.end() && std::isspace(static_cast<unsigned char>(*start))) ++start;
+    if (start == s.end()) return {};
+    auto end = s.end();
+    do { --end; } while (std::distance(start, end) > 0 &&
+                         std::isspace(static_cast<unsigned char>(*end)));
+    return std::string(start, end + 1);
+}
+
+std::string unquotePath(const std::string& path) {
+    if (path.size() >= 2 && path.front() == '"' && path.back() == '"') {
+        std::string result;
+        result.reserve(path.size() - 2);
+        for (size_t i = 1; i + 1 < path.size(); ++i) {
+            if (path[i] == '\\' && i + 1 < path.size() - 1) {
+                char next = path[i + 1];
+                if (next == '"' || next == '\\' || next == 'n' || next == 't') {
+                    if (next == 'n') result += '\n';
+                    else if (next == 't') result += '\t';
+                    else result += next;
+                    ++i;
+                    continue;
+                }
+            }
+            result += path[i];
+        }
+        return result;
+    }
+    return path;
+}
+
+bool isSuspiciousPath(const std::string& path) {
+    static const std::vector<std::string> suspicious_patterns = {
+        ".env", ".env.", "credentials", "secret", "password",
+        "private_key", "id_rsa", "id_ed25519", ".pem", ".key"
+    };
+    
+    std::string lower_path = path;
+    std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    
+    for (const auto& pattern : suspicious_patterns) {
+        if (lower_path.find(pattern) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+infrastructure::ProcessResult runGitCommand(
+    const std::string& project_root,
+    const std::vector<std::string>& args,
+    std::atomic<bool>* cancel,
+    int timeout_sec = 30)
+{
+    std::vector<std::string> argv = {"git"};
+    argv.insert(argv.end(), args.begin(), args.end());
+    
+    std::vector<std::string> env_extra = {"GIT_TERMINAL_PROMPT=0"};
+    
+    return infrastructure::runCommand(
+        argv,
+        timeout_sec,
+        {},  // stdin_data
+        project_root,  // working_dir
+        cancel,
+        env_extra
+    );
+}
+
+std::string toLower(const std::string& s) {
+    std::string result = s;
+    std::transform(result.begin(), result.end(), result.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    return result;
+}
+
+} // namespace
+
+GitFacade::GitFacade(std::string project_root)
+    : project_root_(std::move(project_root)) {}
+
+GitStatus GitFacade::parseStatusPorcelain(const std::string& text) {
+    GitStatus status;
+    
+    if (text.empty()) {
+        status.error = "Empty status output";
+        return status;
+    }
+    
+    std::istringstream stream(text);
+    std::string line;
+    bool first_line = true;
+    
+    while (std::getline(stream, line)) {
+        if (line.empty()) continue;
+        
+        if (first_line) {
+            first_line = false;
+            if (line.size() < 3 || line.substr(0, 3) != "## ") {
+                status.error = "Invalid porcelain format: missing branch header";
+                return status;
+            }
+            
+            status.is_repo = true;
+            std::string branch_info = line.substr(3);
+            
+            auto dots_pos = branch_info.find("...");
+            if (dots_pos != std::string::npos) {
+                status.branch = branch_info.substr(0, dots_pos);
+                std::string rest = branch_info.substr(dots_pos + 3);
+                
+                auto bracket_pos = rest.find('[');
+                if (bracket_pos != std::string::npos) {
+                    status.upstream = trim(rest.substr(0, bracket_pos));
+                    std::string counts = rest.substr(bracket_pos + 1);
+                    
+                    std::smatch match;
+                    if (std::regex_search(counts, match, std::regex("ahead (\\d+)"))) {
+                        status.ahead = std::stoi(match[1].str());
+                    }
+                    if (std::regex_search(counts, match, std::regex("behind (\\d+)"))) {
+                        status.behind = std::stoi(match[1].str());
+                    }
+                } else {
+                    status.upstream = trim(rest);
+                }
+            } else {
+                status.branch = trim(branch_info);
+            }
+            continue;
+        }
+        
+        if (line.size() < 3) continue;
+        
+        GitFileChange change;
+        change.index_status    = line[0];
+        change.worktree_status = line[1];
+        
+        std::string path_part = line.substr(3);
+        
+        // Renamed: "R  old -> new" — ambil path baru saja.
+        auto arrow_pos = path_part.find(" -> ");
+        if (arrow_pos != std::string::npos) {
+            path_part = path_part.substr(arrow_pos + 4);
+        }
+        
+        change.path       = unquotePath(trim(path_part));
+        change.suspicious = isSuspiciousPath(change.path);
+        
+        status.changes.push_back(std::move(change));
+    }
+    
+    return status;
+}
+
+std::string GitFacade::suggestCommitMessage(const GitStatus& st) {
+    if (st.changes.empty()) {
+        return "No changes to commit";
+    }
+    
+    int added = 0, modified = 0, deleted = 0, renamed = 0, untracked = 0;
+    
+    for (const auto& change : st.changes) {
+        char s = change.index_status != ' ' ? change.index_status : change.worktree_status;
+        switch (s) {
+            case 'A': ++added;     break;
+            case 'M': ++modified;  break;
+            case 'D': ++deleted;   break;
+            case 'R': ++renamed;   break;
+            case '?': ++untracked; break;
+            default: break;
+        }
+    }
+    
+    std::ostringstream msg;
+    
+    if (st.changes.size() == 1) {
+        const auto& change = st.changes[0];
+        char s = change.index_status != ' ' ? change.index_status : change.worktree_status;
+        
+        auto last_slash = change.path.find_last_of('/');
+        std::string filename = (last_slash != std::string::npos)
+            ? change.path.substr(last_slash + 1)
+            : change.path;
+        
+        switch (s) {
+            case 'A': msg << "Add "            << filename; break;
+            case 'M': msg << "Update "         << filename; break;
+            case 'D': msg << "Remove "         << filename; break;
+            case 'R': msg << "Rename "         << filename; break;
+            case '?': msg << "Add untracked "  << filename; break;
+            default:  msg << "Update "         << filename; break;
+        }
+    } else {
+        std::vector<std::string> actions;
+        if (added     > 0) actions.push_back(std::to_string(added)     + " added");
+        if (modified  > 0) actions.push_back(std::to_string(modified)  + " modified");
+        if (deleted   > 0) actions.push_back(std::to_string(deleted)   + " deleted");
+        if (renamed   > 0) actions.push_back(std::to_string(renamed)   + " renamed");
+        if (untracked > 0) actions.push_back(std::to_string(untracked) + " untracked");
+        
+        std::ostringstream detail;
+        detail << "Update " << st.changes.size() << " files (";
+        for (size_t i = 0; i < actions.size(); ++i) {
+            if (i > 0) detail << ", ";
+            detail << actions[i];
+        }
+        detail << ")";
+        
+        // Conventional commit line length ~72 chars.
+        if (detail.str().size() > 72) {
+            msg << "Update " << st.changes.size() << " files";
+        } else {
+            msg << detail.str();
+        }
+    }
+    
+    return msg.str();
+}
+
+// ---------------------------------------------------------------------------
+// Operasi git via ProcessExecutor — implementasi Fase D #68
+// ---------------------------------------------------------------------------
+
+GitStatus GitFacade::status(std::atomic<bool>* cancel) {
+    GitStatus result;
+    
+    // Jalankan git status --porcelain=v1 -b
+    auto cmd_result = runGitCommand(
+        project_root_,
+        {"status", "--porcelain=v1", "-b"},
+        cancel
+    );
+    
+    if (cmd_result.cancelled_by_user) {
+        result.error = "Dibatalkan oleh pengguna";
+        return result;
+    }
+    
+    if (cmd_result.timed_out) {
+        result.error = "Timeout saat menjalankan git status";
+        return result;
+    }
+    
+    // Cek exit code dan stderr untuk deteksi error
+    if (cmd_result.exit_code != 0) {
+        std::string stderr_lower = toLower(cmd_result.stderr_text);
+        
+        if (stderr_lower.find("not a git repository") != std::string::npos) {
+            result.is_repo = false;
+            result.git_available = true;
+            result.error = "Bukan git repository: " + project_root_;
+        } else if (stderr_lower.find("command not found") != std::string::npos ||
+                   stderr_lower.find("no such file or directory") != std::string::npos ||
+                   cmd_result.exit_code == 127) {
+            result.git_available = false;
+            result.error = "git tidak terinstal atau tidak ada di PATH";
+        } else {
+            result.error = "git status gagal: " + cmd_result.stderr_text;
+        }
+        return result;
+    }
+    
+    // Parse output
+    result = parseStatusPorcelain(cmd_result.stdout_text);
+    result.git_available = true;
+    
+    return result;
+}
+
+GitOpResult GitFacade::addAll(std::atomic<bool>* cancel) {
+    GitOpResult result;
+    
+    auto cmd_result = runGitCommand(
+        project_root_,
+        {"add", "-A"},
+        cancel
+    );
+    
+    result.exit_code = cmd_result.exit_code;
+    result.output = cmd_result.stdout_text;
+    result.error = cmd_result.stderr_text;
+    result.cancelled = cmd_result.cancelled_by_user;
+    
+    if (cmd_result.timed_out) {
+        result.ok = false;
+        result.error = "Timeout saat menjalankan git add";
+        return result;
+    }
+    
+    if (cmd_result.cancelled_by_user) {
+        result.ok = false;
+        result.error = "Dibatalkan oleh pengguna";
+        return result;
+    }
+    
+    result.ok = (cmd_result.exit_code == 0);
+    
+    if (!result.ok && result.error.empty()) {
+        result.error = "git add gagal dengan exit code " + std::to_string(cmd_result.exit_code);
+    }
+    
+    return result;
+}
+
+GitOpResult GitFacade::commit(const std::string& message, std::atomic<bool>* cancel) {
+    GitOpResult result;
+    
+    // Cek apakah ada perubahan yang di-stage
+    auto check_result = runGitCommand(
+        project_root_,
+        {"diff", "--cached", "--name-only"},
+        cancel,
+        10
+    );
+    
+    if (check_result.exit_code == 0) {
+        std::string output = trim(check_result.stdout_text);
+        
+        if (output.empty()) {
+            result.ok = false;
+            result.error = "Tidak ada perubahan yang di-stage untuk di-commit. Gunakan 'git add' terlebih dahulu.";
+            return result;
+        }
+    }
+    
+    auto cmd_result = runGitCommand(
+        project_root_,
+        {"commit", "-m", message},
+        cancel
+    );
+    
+    result.exit_code = cmd_result.exit_code;
+    result.output = cmd_result.stdout_text;
+    result.error = cmd_result.stderr_text;
+    result.cancelled = cmd_result.cancelled_by_user;
+    
+    if (cmd_result.timed_out) {
+        result.ok = false;
+        result.error = "Timeout saat menjalankan git commit";
+        return result;
+    }
+    
+    if (cmd_result.cancelled_by_user) {
+        result.ok = false;
+        result.error = "Dibatalkan oleh pengguna";
+        return result;
+    }
+    
+    result.ok = (cmd_result.exit_code == 0);
+    
+    if (!result.ok && result.error.empty()) {
+        result.error = "git commit gagal dengan exit code " + std::to_string(cmd_result.exit_code);
+    }
+    
+    return result;
+}
+
+GitOpResult GitFacade::push(std::atomic<bool>* cancel) {
+    GitOpResult result;
+    
+    auto cmd_result = runGitCommand(
+        project_root_,
+        {"push"},
+        cancel,
+        60  // push bisa lebih lama karena network
+    );
+    
+    result.exit_code = cmd_result.exit_code;
+    result.output = cmd_result.stdout_text;
+    result.error = cmd_result.stderr_text;
+    result.cancelled = cmd_result.cancelled_by_user;
+    
+    if (cmd_result.timed_out) {
+        result.ok = false;
+        result.error = "Timeout saat menjalankan git push";
+        return result;
+    }
+    
+    if (cmd_result.cancelled_by_user) {
+        result.ok = false;
+        result.error = "Dibatalkan oleh pengguna";
+        return result;
+    }
+    
+    result.ok = (cmd_result.exit_code == 0);
+    
+    if (!result.ok) {
+        std::string error_lower = toLower(result.error);
+        
+        // Cek error spesifik
+        if (error_lower.find("no upstream") != std::string::npos ||
+            error_lower.find("has no upstream") != std::string::npos ||
+            error_lower.find("set-upstream") != std::string::npos) {
+            result.error = "Branch tidak memiliki upstream. Gunakan: git push -u origin <branch>";
+        } else if (error_lower.find("authentication failed") != std::string::npos ||
+                   error_lower.find("permission denied") != std::string::npos ||
+                   error_lower.find("could not read username") != std::string::npos) {
+            result.error = "Autentikasi gagal. Periksa kredensial git Anda (SSH key atau Git Credential Manager).";
+        } else if (error_lower.find("rejected") != std::string::npos &&
+                   error_lower.find("non-fast-forward") != std::string::npos) {
+            result.error = "Push ditolak: branch remote lebih baru. Pull terlebih dahulu atau gunakan force push (tidak disarankan).";
+        } else if (error_lower.find("everything up-to-date") != std::string::npos) {
+            // Ini sebenarnya bukan error, tapi git mengembalikan exit code 0
+            result.ok = true;
+            result.error = "Everything up-to-date";
+        } else if (result.error.empty()) {
+            result.error = "git push gagal dengan exit code " + std::to_string(cmd_result.exit_code);
+        }
+    }
+    
+    return result;
+}
+
+} // namespace frans::application
+================================================
+FILE: src/application/git/GitFacade.h
+================================================
+#pragma once
+#include <atomic>
 #include <string>
+#include <vector>
+
+namespace frans::application {
+
+struct GitFileChange {
+    char index_status = ' ';
+    char worktree_status = ' ';
+    std::string path;
+    bool suspicious = false;
+};
+
+struct GitStatus {
+    bool is_repo = false;
+    bool git_available = true;
+    std::string branch;
+    std::string upstream;
+    std::string error;
+    int ahead = 0;
+    int behind = 0;
+    std::vector<GitFileChange> changes;
+    
+    bool clean() const { return is_repo && changes.empty(); }
+};
+
+struct GitOpResult {
+    bool ok = false;
+    int exit_code = -1;
+    bool cancelled = false;
+    std::string output;
+    std::string error;
+};
+
+class GitFacade {
+public:
+    explicit GitFacade(std::string project_root);
+    
+    GitStatus   status(std::atomic<bool>* cancel = nullptr);
+    GitOpResult addAll(std::atomic<bool>* cancel = nullptr);
+    GitOpResult commit(const std::string& message, std::atomic<bool>* cancel = nullptr);
+    GitOpResult push(std::atomic<bool>* cancel = nullptr);
+    
+    static GitStatus   parseStatusPorcelain(const std::string& text);
+    static std::string suggestCommitMessage(const GitStatus& st);
+
+private:
+    std::string project_root_;
+};
+
+} // namespace frans::application
+================================================
+FILE: src/ui/GitDialog.cpp
+================================================
+// src/ui/GitDialog.cpp
+#include "ui/GitDialog.h"
+
+#include <FL/fl_ask.H>
+
+#include <algorithm>
+#include <cstdio>
+#include <sstream>
+#include <utility>
 
 namespace frans::ui {
 
 namespace {
 
-constexpr int kW      = 720;
-constexpr int kH      = 850;
-constexpr int kPadX   = 15;
-constexpr int kInnerW = kW - 2 * kPadX;
-constexpr int kBtnH   = 28;
-constexpr int kRowGap = 6;
+constexpr int kMinW = 720;
+constexpr int kMinH = 560;
 
-// ---------------------------------------------------------------------------
-// Helper: Resolve project root dengan fallback.
-// ---------------------------------------------------------------------------
-std::string resolveProjectRoot(SessionState* session,
-                               const frans::config::AppConfig& cfg)
-{
-    if (session && !session->last_project_root.empty()) {
-        return session->last_project_root;
+std::string formatStatusLine(const frans::application::GitStatus& st) {
+    if (!st.is_repo) {
+        return "Not a git repository";
     }
-    if (!cfg.default_project_root.empty()) {
-        std::fprintf(stderr,
-                     "[frans][prompt_dialog] session->last_project_root kosong, "
-                     "fallback ke default_project_root: %s\n",
-                     cfg.default_project_root.c_str());
-        std::fflush(stderr);
-        return cfg.default_project_root;
-    }
-    return "";
-}
-
-// ---------------------------------------------------------------------------
-// Helper: Normalisasi nama model Gemini.
-// ---------------------------------------------------------------------------
-std::string normalizeModelName(const std::string& raw) {
-    std::string s = raw;
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))  s.pop_back();
-    const std::string prefix = "models/";
-    if (s.size() > prefix.size() &&
-        s.compare(0, prefix.size(), prefix) == 0) {
-        s = s.substr(prefix.size());
-    }
-    return s;
-}
-
-// ---------------------------------------------------------------------------
-// Helper: Deteksi apakah error message mengindikasikan "model tidak ditemukan".
-// ---------------------------------------------------------------------------
-bool isModelNotFoundError(const std::string& error) {
-    std::string lower = error;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    return lower.find("model") != std::string::npos &&
-           (lower.find("not found") != std::string::npos ||
-            lower.find("tidak ditemukan") != std::string::npos ||
-            lower.find("404") != std::string::npos ||
-            lower.find("does not exist") != std::string::npos ||
-            lower.find("invalid model") != std::string::npos ||
-            lower.find("modelnotfound") != std::string::npos);
-}
-
-// ---------------------------------------------------------------------------
-// Helper: Format timestamp ISO-like: "2026-11-15 03:42".
-// ---------------------------------------------------------------------------
-std::string formatTimestampNow() {
-    auto now = std::chrono::system_clock::now();
-    auto time = std::chrono::system_clock::to_time_t(now);
-    std::tm tm = *std::localtime(&time);
     std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y-%m-%d %H:%M");
+    oss << "Branch: " << (st.branch.empty() ? "(detached)" : st.branch);
+    if (!st.upstream.empty()) {
+        oss << "  |  Upstream: " << st.upstream;
+    } else {
+        oss << "  |  Upstream: (none)";
+    }
+    if (st.ahead > 0 || st.behind > 0) {
+        oss << "  |  ahead " << st.ahead << ", behind " << st.behind;
+    }
+    oss << "  |  " << st.changes.size() << " change(s)";
     return oss.str();
 }
 
-// ---------------------------------------------------------------------------
-// Helper: Cari model yang namanya paling mirip dengan target.
-// ---------------------------------------------------------------------------
-std::string findSimilarModel(const std::string& target,
-                             const std::vector<frans::application::ModelInfo>& models,
-                             int max_suggestions = 5) {
-    std::string target_lower = target;
-    std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-
-    struct Scored {
-        std::string name;
-        int score = 0;
-    };
-    std::vector<Scored> scored;
-    scored.reserve(models.size());
-
-    for (const auto& m : models) {
-        std::string name = normalizeModelName(m.name);
-        std::string name_lower = name;
-        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
-
-        int score = 0;
-        std::size_t common = 0;
-        while (common < target_lower.size() && common < name_lower.size() &&
-               target_lower[common] == name_lower[common]) {
-            ++common;
-        }
-        score += static_cast<int>(common) * 2;
-
-        if (name_lower.find(target_lower) != std::string::npos ||
-            target_lower.find(name_lower) != std::string::npos) {
-            score += 20;
-        }
-
-        int len_diff = std::abs(static_cast<int>(name_lower.size()) -
-                                static_cast<int>(target_lower.size()));
-        if (len_diff < 5) score += 5;
-
-        if (score > 0) {
-            scored.push_back({name, score});
-        }
-    }
-
-    std::sort(scored.begin(), scored.end(),
-              [](const Scored& a, const Scored& b) { return a.score > b.score; });
-
-    std::ostringstream oss;
-    int count = 0;
-    for (const auto& s : scored) {
-        if (count >= max_suggestions) break;
-        oss << "  - " << s.name << "\n";
-        ++count;
-    }
-    return oss.str();
+char statusChar(char idx, char wt) {
+    if (idx != ' ') return idx;
+    if (wt != ' ') return wt;
+    return ' ';
 }
 
-std::string readFileContents(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return {};
-    std::ostringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
-}
-
-void showScrollableMessage(const char* title, const std::string& message) {
-    constexpr int dlg_w = 650;
-    constexpr int dlg_h = 500;
-    constexpr int pad   = 10;
-    constexpr int btn_w = 80;
-    constexpr int btn_h = 30;
-
-    Fl_Window* win = new Fl_Window(dlg_w, dlg_h, title);
-    win->set_modal();
-    win->begin();
-
-    Fl_Text_Display* display = new Fl_Text_Display(
-        pad, pad, dlg_w - 2 * pad, dlg_h - 2 * pad - btn_h - pad);
-    Fl_Text_Buffer* buf = new Fl_Text_Buffer();
-    display->buffer(buf);
-    display->textfont(FL_COURIER);
-    display->textsize(11);
-    display->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
-    display->color(FL_WHITE);
-    buf->text(message.c_str());
-
-    Fl_Button* ok_btn = new Fl_Button(
-        dlg_w - pad - btn_w, dlg_h - pad - btn_h, btn_w, btn_h, "OK");
-    ok_btn->callback([](Fl_Widget* w, void*) {
-        if (Fl_Window* win = w ? w->window() : nullptr) {
-            win->hide();
-        }
-    });
-    ok_btn->take_focus();
-
-    win->end();
-    win->resizable(display);
-    win->show();
-
-    while (win->shown()) Fl::wait();
-
-    delete buf;
-    delete win;
-}
-
-std::string formatBytesHelper(std::size_t bytes) {
-    if (bytes < 1024) return std::to_string(bytes) + " B";
-    if (bytes < 1024 * 1024) {
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "%.1f KB", bytes / 1024.0);
-        return buf;
+const char* statusColor(char idx, char wt) {
+    char s = statusChar(idx, wt);
+    switch (s) {
+        case 'A': return "green";
+        case 'M': return "blue";
+        case 'D': return "red";
+        case 'R': return "magenta";
+        case '?': return "gray";
+        default:  return "black";
     }
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%.1f MB", bytes / (1024.0 * 1024.0));
-    return buf;
 }
 
 } // namespace
 
-// ===========================================================================
+// ---------------------------------------------------------------------------
 // Public
-// ===========================================================================
-void PromptDialog::show(SessionState* session,
-                        const frans::config::AppConfig& cfg)
-{
-    PromptDialog* dlg = new PromptDialog(session, cfg);
-    dlg->win_->set_modal();
-    dlg->win_->show();
-    while (dlg->win_->shown()) Fl::wait();
-    delete dlg;
+// ---------------------------------------------------------------------------
+
+void GitDialog::show(const std::string& project_root,
+                     SessionState* session,
+                     const frans::config::AppConfig& cfg) {
+    GitDialog dlg(project_root, session, cfg);
+    dlg.createUI();
+    dlg.win_->set_modal();
+    dlg.win_->show();
+    dlg.refreshStatus();
+    while (dlg.win_->shown()) {
+        Fl::wait();
+    }
 }
 
-PromptDialog::PromptDialog(SessionState* session,
-                           const frans::config::AppConfig& cfg)
-    : session_(session), cfg_(cfg)
-{
-    buildUI();
-    updateKeyStatus();
-    updateFreshnessDisplay();
+GitDialog::GitDialog(const std::string& project_root,
+                     SessionState* session,
+                     const frans::config::AppConfig& cfg)
+    : project_root_(project_root),
+      session_(session),
+      cfg_(cfg) {
+    git_ = std::make_unique<frans::application::GitFacade>(project_root_);
 }
 
-PromptDialog::~PromptDialog() {
-    delete request_buf_;     request_buf_    = nullptr;
-    delete error_buf_;       error_buf_      = nullptr;
-    delete preview_buf_;     preview_buf_    = nullptr;
-
-    if (list_models_worker_running_.load()) {
-        list_models_worker_cancel_.store(true);
+GitDialog::~GitDialog() {
+    cancelWorker();
+    if (worker_thread_.joinable()) {
+        worker_thread_.join();
     }
-    if (list_models_worker_thread_.joinable()) list_models_worker_thread_.join();
-
-    if (select_worker_running_.load()) {
-        select_worker_cancel_.store(true);
-    }
-    if (select_worker_thread_.joinable()) select_worker_thread_.join();
-
-    if (build_worker_thread_.joinable()) build_worker_thread_.join();
-
     if (win_) {
-        if (win_->shown()) win_->hide();
+        win_->hide();
         delete win_;
         win_ = nullptr;
     }
 }
 
-// ===========================================================================
-// UI construction
-// ===========================================================================
-void PromptDialog::buildUI() {
-    win_ = new Fl_Window(kW, kH, "Prompt Generator");
-    win_->begin();
-    int y = kPadX;
+// ---------------------------------------------------------------------------
+// UI
+// ---------------------------------------------------------------------------
 
-    {
-        Fl_Box* t = new Fl_Box(kPadX, y, kInnerW, 20, "1. Permintaan");
-        t->labelfont(FL_BOLD);
-        t->labelsize(13);
-        t->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        y += 22;
-    }
-    {
-        Fl_Box* l = new Fl_Box(kPadX, y, kInnerW, 16,
-                               "Tulis permintaan Anda untuk AI (wajib):");
-        l->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        l->labelsize(11);
-        l->labelcolor(FL_DARK_BLUE);
-        y += 18;
-    }
-    {
-        const int editor_h = 100;
-        request_editor_ = new Fl_Text_Editor(kPadX, y, kInnerW, editor_h, nullptr);
-        request_buf_ = new Fl_Text_Buffer();
-        request_editor_->buffer(request_buf_);
-        request_editor_->textfont(FL_COURIER);
-        request_editor_->textsize(11);
-        request_editor_->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
-        request_editor_->color(FL_WHITE);
-        y += editor_h + kRowGap;
-    }
+void GitDialog::createUI() {
+    int sx = 0, sy = 0, sw = 0, sh = 0;
+    Fl::screen_work_area(sx, sy, sw, sh);
+    int ww = std::max(kMinW, std::min(sw - 80, 820));
+    int wh = std::max(kMinH, std::min(sh - 80, 640));
 
-    {
-        Fl_Box* l = new Fl_Box(kPadX, y, kInnerW - 180, 18, "Error output (opsional):");
-        l->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        l->labelsize(11);
-        l->labelcolor(FL_DARK_BLUE);
-        fetch_btn_ = new Fl_Button(kPadX + kInnerW - 170, y, 170, 20, "Ambil dari build terakhir");
-        fetch_btn_->callback(cbFetchLastError, this);
-        y += 22;
-    }
-    {
-        const int editor_h = 60;
-        error_editor_ = new Fl_Text_Editor(kPadX, y, kInnerW, editor_h, nullptr);
-        error_buf_ = new Fl_Text_Buffer();
-        error_editor_->buffer(error_buf_);
-        error_editor_->textfont(FL_COURIER);
-        error_editor_->textsize(10);
-        error_editor_->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
-        error_editor_->color(FL_WHITE);
-        y += editor_h + kRowGap;
-    }
-
-    {
-        Fl_Box* t = new Fl_Box(kPadX, y, 120, 20, "2. Pilih file");
-        t->labelfont(FL_BOLD);
-        t->labelsize(13);
-        t->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        select_btn_ = new Fl_Button(kPadX + 130, y, 180, 22, "Pilih File via Gemini");
-        select_btn_->callback(cbSelectFiles, this);
-        key_status_box_ = new Fl_Box(kPadX + 320, y, kInnerW - 320, 20, "");
-        key_status_box_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        key_status_box_->labelsize(10);
-        y += 24;
-    }
-    {
-        mode_box_ = new Fl_Box(kPadX, y, kInnerW - 200, 18, "Mode: - | Token: -");
-        mode_box_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        mode_box_->labelsize(10);
-        mode_box_->labelcolor(FL_DARK_GREEN);
-        test_conn_btn_ = new Fl_Button(kPadX + kInnerW - 190, y, 190, 20, "Tes Koneksi / Daftar Model");
-        test_conn_btn_->callback(cbTestConnection, this);
-        y += 22;
-    }
-    {
-        const int browser_h = 130;
-        file_browser_ = new Fl_Check_Browser(kPadX, y, kInnerW, browser_h);
-        file_browser_->callback(cbBrowserChanged, this);
-        file_browser_->textfont(FL_COURIER);
-        file_browser_->textsize(10);
-        y += browser_h + kRowGap;
-    }
-    {
-        total_box_ = new Fl_Box(kPadX, y, kInnerW - 280, 20, "Total terpilih: 0 file, 0 B");
-        total_box_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        total_box_->labelsize(11);
-        add_manual_btn_ = new Fl_Button(kPadX + kInnerW - 270, y, 130, 22, "+ Tambah manual...");
-        add_manual_btn_->callback(cbAddManual, this);
-        cancel_select_btn_ = new Fl_Button(kPadX + kInnerW - 130, y, 130, 22, "Batal");
-        cancel_select_btn_->callback(cbCancelSelect, this);
-        cancel_select_btn_->deactivate();
-        y += 24 + kRowGap;
-    }
-
-    {
-        Fl_Box* t = new Fl_Box(kPadX, y, 140, 20, "3. SourceCode.md");
-        t->labelfont(FL_BOLD);
-        t->labelsize(13);
-        t->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        build_btn_ = new Fl_Button(kPadX + 150, y, 180, 22, "Bangun SourceCode.md");
-        build_btn_->callback(cbBuildSourceCode, this);
-        freshness_box_ = new Fl_Box(kPadX + 340, y, kInnerW - 340, 20, "Status: -");
-        freshness_box_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        freshness_box_->labelsize(11);
-        y += 24;
-    }
-    {
-        location_box_ = new Fl_Box(kPadX, y, kInnerW - 120, 18, "Lokasi: -");
-        location_box_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        location_box_->labelsize(10);
-        open_folder_btn_ = new Fl_Button(kPadX + kInnerW - 110, y, 110, 20, "Buka Folder");
-        open_folder_btn_->callback(cbOpenFolder, this);
-        open_folder_btn_->deactivate();
-        y += 22 + kRowGap;
-    }
-
-    {
-        status_box_ = new Fl_Box(kPadX, y, kInnerW, 22,
-                                 "Idle. Tulis permintaan lalu klik [Pilih File via Gemini].");
-        status_box_->box(FL_DOWN_BOX);
-        status_box_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        status_box_->labelsize(11);
-        y += 22 + kRowGap;
-    }
-
-    {
-        generate_btn_ = new Fl_Button(kPadX, y, 160, kBtnH, "Generate Prompt");
-        generate_btn_->callback(cbGenerate, this);
-        copy_btn_ = new Fl_Button(kPadX + 170, y, 100, kBtnH, "Copy");
-        copy_btn_->callback(cbCopy, this);
-        copy_btn_->deactivate();
-        Fl_Button* close_btn = new Fl_Button(kPadX + kInnerW - 100, y, 100, kBtnH, "Close");
-        close_btn->callback(cbClose, this);
-        y += kBtnH + kRowGap;
-    }
-
-    {
-        Fl_Box* l = new Fl_Box(kPadX, y, kInnerW, 16, "4. Preview Prompt (read-only):");
-        l->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        l->labelsize(11);
-        l->labelcolor(FL_DARK_BLUE);
-        y += 18;
-    }
-    {
-        const int preview_h = kH - y - kPadX;
-        preview_display_ = new Fl_Text_Display(kPadX, y, kInnerW, preview_h > 60 ? preview_h : 60, nullptr);
-        preview_buf_ = new Fl_Text_Buffer();
-        preview_display_->buffer(preview_buf_);
-        preview_display_->textfont(FL_COURIER);
-        preview_display_->textsize(10);
-        preview_display_->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
-        preview_display_->color(FL_WHITE);
-    }
-
+    win_ = new Fl_Window(sx + 40, sy + 40, ww, wh, "Git — Frans");
+    layout();
     win_->end();
-    win_->resizable(preview_display_);
+    win_->resizable(win_);
+    win_->size_range(kMinW, kMinH);
 }
 
-// ===========================================================================
-// Helper methods
-// ===========================================================================
-std::string PromptDialog::formatBytes(std::size_t bytes) {
-    return formatBytesHelper(bytes);
-}
+void GitDialog::layout() {
+    const int pad = 12;
+    const int gap = 8;
+    const int ww  = win_->w();
+    const int wh  = win_->h();
 
-std::string PromptDialog::computeRequestHash() {
-    if (!request_buf_) return "";
-    const char* text = request_buf_->text();
-    std::string req = text ? text : "";
-    return frans::application::fnv1a_64_hex(req);
-}
+    int y = pad;
 
-PromptDialog::Freshness PromptDialog::checkFreshness() {
-    if (last_build_result_.manifest_path.empty()) return Freshness::NoFile;
+    // ---- Status label ----
+    status_label_ = new Fl_Box(pad, y, ww - 2 * pad, 22,
+                               "Loading git status...");
+    status_label_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+    status_label_->labelfont(FL_COURIER_BOLD);
+    status_label_->labelsize(12);
+    y += 26;
 
-    std::ifstream f(last_build_result_.manifest_path);
-    if (!f) return Freshness::NoFile;
-    std::ostringstream ss;
-    ss << f.rdbuf();
-    std::string manifest_text = ss.str();
+    // ---- Changes browser ----
+    changes_browser_ = new Fl_Browser(pad, y, ww - 2 * pad, 180);
+    changes_browser_->type(FL_MULTI_BROWSER);
+    changes_browser_->textfont(FL_COURIER);
+    changes_browser_->textsize(12);
+    changes_browser_->tooltip("Daftar perubahan file. Baris merah = mencurigakan (secret-like).");
+    y += 180 + gap;
 
-    try {
-        auto manifest = nlohmann::json::parse(manifest_text);
+    // ---- Commit message ----
+    {
+        Fl_Box* lbl = new Fl_Box(pad, y, 120, 24, "Commit message:");
+        lbl->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        lbl->labelsize(12);
 
-        std::string manifest_request_hash = manifest.value("request_hash", "");
-        std::string current_hash = computeRequestHash();
-        if (manifest_request_hash != current_hash) return Freshness::Stale;
-
-        auto files = manifest["files"];
-        if (!files.is_array()) return Freshness::Stale;
-
-        std::string project_root = resolveProjectRoot(session_, cfg_);
-        if (project_root.empty()) return Freshness::Stale;
-
-        infrastructure::SandboxedFileSystem fs(project_root);
-        for (const auto& file_entry : files) {
-            std::string path = file_entry.value("path", "");
-            std::string manifest_hash = file_entry.value("hash", "");
-            if (path.empty() || manifest_hash.empty()) continue;
-
-            std::string content = fs.readFile(path);
-            std::string current_hash_file = frans::application::fnv1a_64_hex(content);
-            if (current_hash_file != manifest_hash) return Freshness::Stale;
-        }
-        return Freshness::Fresh;
-    } catch (...) {
-        return Freshness::Stale;
+        commit_message_input_ = new Fl_Input(pad + 120, y, ww - 2 * pad - 120, 24);
+        commit_message_input_->textfont(FL_COURIER);
+        commit_message_input_->textsize(12);
+        commit_message_input_->tooltip("Pesan commit. Auto-filled dari status; boleh diedit.");
+        y += 28;
     }
-}
 
-// ===========================================================================
-// Update UI helpers
-// ===========================================================================
-void PromptDialog::updateKeyStatus() {
-    frans::application::ApiKeyOptions key_opt;
-    key_opt.key_file = cfg_.gemini_api_key_file;
-    auto key_result = frans::application::ApiKeyProvider::resolve(key_opt);
+    // ---- Output area ----
+    {
+        Fl_Box* lbl = new Fl_Box(pad, y, 120, 20, "Output:");
+        lbl->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        lbl->labelsize(11);
 
-    if (key_result.found()) {
-        std::string masked = frans::application::maskApiKey(key_result.key);
-        if (key_status_box_) {
-            std::string label = "key: " + masked + " | model: " + cfg_.gemini_model;
-            key_status_box_->copy_label(label.c_str());
-            key_status_box_->labelcolor(FL_DARK_GREEN);
-        }
-        if (select_btn_) select_btn_->activate();
-    } else {
-        if (key_status_box_) {
-            key_status_box_->copy_label("key: tidak ditemukan");
-            key_status_box_->labelcolor(FL_RED);
-        }
-        if (select_btn_) select_btn_->deactivate();
+        output_ = new Fl_Output(pad, y + 20, ww - 2 * pad, 140);
+        output_->textfont(FL_COURIER);
+        output_->textsize(11);
+        output_->maximum_size(64 * 1024);
+        y += 160 + gap;
     }
+
+    // ---- Button row ----
+    const int btn_h = 28;
+    const int btn_w = 96;
+    int x = pad;
+
+    btn_refresh_ = new Fl_Button(x, y, btn_w, btn_h, "Refresh");
+    btn_refresh_->callback(cbRefresh, this);
+    btn_refresh_->tooltip("Muat ulang status dari git");
+    x += btn_w + gap;
+
+    btn_add_all_ = new Fl_Button(x, y, btn_w, btn_h, "Add All");
+    btn_add_all_->callback(cbAddAll, this);
+    btn_add_all_->tooltip("git add -A (stage semua perubahan)");
+    x += btn_w + gap;
+
+    btn_commit_ = new Fl_Button(x, y, btn_w, btn_h, "Commit");
+    btn_commit_->callback(cbCommit, this);
+    btn_commit_->tooltip("git commit -m <pesan>");
+    x += btn_w + gap;
+
+    btn_push_ = new Fl_Button(x, y, btn_w, btn_h, "Push");
+    btn_push_->callback(cbPush, this);
+    btn_push_->tooltip("git push (dengan konfirmasi)");
+    x += btn_w + gap;
+
+    // Spacer
+    // Cancel + Close di kanan
+    btn_cancel_ = new Fl_Button(ww - pad - 2 * btn_w - gap, y, btn_w, btn_h, "Cancel");
+    btn_cancel_->callback(cbCancel, this);
+    btn_cancel_->deactivate();
+
+    btn_close_ = new Fl_Button(ww - pad - btn_w, y, btn_w, btn_h, "Close");
+    btn_close_->callback(cbClose, this);
 }
 
-void PromptDialog::updateModeDisplay() {
-    if (!mode_box_) return;
-    if (last_selection_.files.empty()) {
-        mode_box_->copy_label("Mode: - | Token: -");
+// ---------------------------------------------------------------------------
+// Status / display helpers
+// ---------------------------------------------------------------------------
+
+void GitDialog::updateStatusDisplay() {
+    if (!status_label_) return;
+    if (!current_status_.error.empty() && !current_status_.is_repo) {
+        std::string msg = "Error: " + current_status_.error;
+        status_label_->copy_label(msg.c_str());
         return;
     }
-    std::string mode_str = last_selection_.mode.empty() ? "-" : last_selection_.mode;
-    std::string token_str = formatBytesHelper(last_selection_.est_tokens * 4) + " (~" +
-                            std::to_string(last_selection_.est_tokens) + " token)";
-    std::string label = "Mode: " + mode_str + " | Dikirim: " +
-                        formatBytesHelper(last_selection_.sent_bytes) + " | " + token_str;
-    mode_box_->copy_label(label.c_str());
-}
-
-void PromptDialog::updateBrowserFromSelection() {
-    if (!file_browser_) return;
-    file_browser_->clear();
-    for (const auto& entry : last_selection_.files) {
-        std::string prio = entry.priority;
-        if (prio.empty()) prio = "?";
-
-        std::string item = "[" + prio + "] " + entry.path +
-                           " (" + formatBytesHelper(entry.size_bytes) + ")";
-        if (!entry.reason.empty()) {
-            item += " - " + entry.reason;
-        }
-        file_browser_->add(item.c_str());
-        int idx = file_browser_->nitems();
-        file_browser_->checked(idx, entry.selected);
+    std::string line = formatStatusLine(current_status_);
+    if (!current_status_.error.empty()) {
+        line += "  |  ! " + current_status_.error;
     }
-    updateTotals();
+    status_label_->copy_label(line.c_str());
 }
 
-void PromptDialog::updateTotals() {
-    if (!total_box_) return;
-    std::size_t total_files = 0;
-    std::size_t total_bytes = 0;
-    for (const auto& entry : last_selection_.files) {
-        if (entry.selected) {
-            ++total_files;
-            total_bytes += entry.size_bytes;
+void GitDialog::updateChangesBrowser() {
+    if (!changes_browser_) return;
+    changes_browser_->clear();
+
+    if (!current_status_.is_repo) {
+        changes_browser_->add("(not a git repository)");
+        return;
+    }
+    if (current_status_.changes.empty()) {
+        changes_browser_->add("(working tree clean)");
+        return;
+    }
+
+    for (const auto& ch : current_status_.changes) {
+        char s = statusChar(ch.index_status, ch.worktree_status);
+        std::ostringstream line;
+        line << s << "   " << ch.path;
+        if (ch.suspicious) {
+            line << "   [!]";
+        }
+        changes_browser_->add(line.str().c_str());
+        int idx = changes_browser_->size();
+        if (ch.suspicious) {
+            changes_browser_->textcolor(idx, FL_RED);
+        } else {
+            const char* color = statusColor(ch.index_status, ch.worktree_status);
+            Fl_Color c = FL_FOREGROUND_COLOR;
+            if (std::string(color) == "green")        c = fl_rgb_color(0, 140, 0);
+            else if (std::string(color) == "blue")    c = fl_rgb_color(0, 80, 200);
+            else if (std::string(color) == "red")     c = fl_rgb_color(200, 0, 0);
+            else if (std::string(color) == "magenta") c = fl_rgb_color(160, 0, 160);
+            else if (std::string(color) == "gray")    c = fl_rgb_color(120, 120, 120);
+            changes_browser_->textcolor(idx, c);
         }
     }
-    std::string label = "Total terpilih: " + std::to_string(total_files) +
-                        " file, " + formatBytesHelper(total_bytes);
-    total_box_->copy_label(label.c_str());
 }
 
-void PromptDialog::updateFreshnessDisplay() {
-    if (!freshness_box_) return;
-    Freshness fresh = checkFreshness();
+void GitDialog::appendOutput(const std::string& text) {
+    if (!output_) return;
+    output_->insert(text.c_str());
+    output_->position(static_cast<int>(output_->size()));
+}
 
-    switch (fresh) {
-        case Freshness::Fresh:
-            freshness_box_->copy_label("Status: SEGAR \xE2\x9C\x93");
-            freshness_box_->labelcolor(FL_DARK_GREEN);
-            has_fresh_source_code_ = true;
-            if (location_box_) {
-                std::string loc = "Lokasi: " + last_build_result_.source_code_path;
-                location_box_->copy_label(loc.c_str());
+void GitDialog::clearOutput() {
+    if (!output_) return;
+    output_->value("");
+}
+
+void GitDialog::setButtonsEnabled(bool enabled) {
+    if (btn_refresh_)  enabled ? btn_refresh_->activate()   : btn_refresh_->deactivate();
+    if (btn_add_all_)  enabled ? btn_add_all_->activate()   : btn_add_all_->deactivate();
+    if (btn_commit_)   enabled ? btn_commit_->activate()    : btn_commit_->deactivate();
+    if (btn_push_)     enabled ? btn_push_->activate()      : btn_push_->deactivate();
+    if (btn_cancel_)   enabled ? btn_cancel_->deactivate()  : btn_cancel_->activate();
+    if (btn_close_)    enabled ? btn_close_->activate()     : btn_close_->deactivate();
+}
+
+bool GitDialog::hasSuspiciousFiles() const {
+    for (const auto& ch : current_status_.changes) {
+        if (ch.suspicious) return true;
+    }
+    return false;
+}
+
+std::string GitDialog::buildSuspiciousWarning() const {
+    std::ostringstream oss;
+    oss << "Peringatan: ada file yang terdeteksi mencurigakan "
+           "(berpotensi secret/credential):\n\n";
+    int count = 0;
+    for (const auto& ch : current_status_.changes) {
+        if (ch.suspicious) {
+            oss << "  - " << ch.path << "\n";
+            ++count;
+            if (count >= 20) {
+                oss << "  ... dan " << (current_status_.changes.size() - 20)
+                    << " lainnya\n";
+                break;
             }
-            if (open_folder_btn_) open_folder_btn_->activate();
-            break;
-        case Freshness::Stale:
-            freshness_box_->copy_label("Status: BASI !");
-            freshness_box_->labelcolor(FL_RED);
-            has_fresh_source_code_ = false;
-            break;
-        case Freshness::NoFile:
-            freshness_box_->copy_label("Status: belum ada");
-            freshness_box_->labelcolor(FL_DARK3);
-            has_fresh_source_code_ = false;
-            if (location_box_) location_box_->copy_label("Lokasi: -");
-            if (open_folder_btn_) open_folder_btn_->deactivate();
-            break;
-    }
-}
-
-void PromptDialog::setStatus(const std::string& msg, unsigned color) {
-    if (!status_box_) return;
-    status_box_->copy_label(msg.c_str());
-    status_box_->labelcolor(static_cast<Fl_Color>(color));
-    status_box_->redraw();
-}
-
-// ===========================================================================
-// Actions
-// ===========================================================================
-std::string PromptDialog::loadTemplate() {
-    const std::string path = cfg_.prompt_template_path;
-    if (!path.empty()) {
-        std::string contents = readFileContents(path);
-        if (!contents.empty()) return contents;
-    }
-    return frans::application::defaultPromptTemplate();
-}
-
-void PromptDialog::doGenerate() {
-    if (!request_buf_ || !preview_buf_) return;
-    const char* req_raw = request_buf_->text();
-    const std::string request = req_raw ? req_raw : "";
-    if (request.empty()) {
-        fl_message("Permintaan kosong.\nTulis permintaan Anda di kotak atas dulu.");
-        return;
-    }
-
-    Freshness fresh = checkFreshness();
-    std::string context_file_name;
-    if (fresh == Freshness::Fresh) {
-        context_file_name = cfg_.context_output_name;
-    } else {
-        int choice = fl_choice("SourceCode.md tidak segar atau belum ada.\n"
-                               "Generate prompt tanpa konteks file?",
-                               "Batal", "Tetap generate", nullptr);
-        if (choice == 0) return;
-        context_file_name = "";
-    }
-
-    const char* err_raw = error_buf_ ? error_buf_->text() : nullptr;
-    const std::string error_output = err_raw ? err_raw : "";
-
-    frans::application::PromptInput in;
-    in.tmpl              = loadTemplate();
-    in.request           = request;
-    in.error_output      = error_output;
-    in.context_file_name = context_file_name;
-
-    std::string new_files_hint;
-    for (const auto& nf : last_selection_.new_files_expected) {
-        if (!new_files_hint.empty()) new_files_hint += "\n";
-        new_files_hint += nf;
-    }
-    in.new_files_hint = new_files_hint;
-
-    last_generated_prompt_ = frans::application::renderPrompt(in);
-    preview_buf_->text(last_generated_prompt_.c_str());
-
-    if (copy_btn_) copy_btn_->activate();
-
-    char buf[256];
-    std::snprintf(buf, sizeof(buf),
-                  "Prompt di-generate (%zu karakter). Klik [Copy] untuk menyalin.",
-                  last_generated_prompt_.size());
-    setStatus(buf, FL_DARK_GREEN);
-}
-
-void PromptDialog::doCopy() {
-    if (last_generated_prompt_.empty()) {
-        fl_message("Belum ada prompt yang di-generate.\nKlik [Generate Prompt] dulu.");
-        return;
-    }
-    Fl::copy(last_generated_prompt_.c_str(),
-             static_cast<int>(last_generated_prompt_.size()), 1);
-    setStatus("Prompt disalin ke clipboard. Paste ke AI browser Anda.", FL_DARK_GREEN);
-}
-
-void PromptDialog::doFetchLastError() {
-    if (!session_) {
-        fl_message("SessionState tidak tersedia.");
-        return;
-    }
-    if (session_->last_build_error.empty()) {
-        fl_message("Belum ada error dari build terakhir.");
-        return;
-    }
-    if (error_buf_) {
-        error_buf_->text(session_->last_build_error.c_str());
-        setStatus("Error dari build terakhir dimuat.", FL_DARK_GREEN);
-    }
-}
-
-void PromptDialog::doTestConnection() {
-    if (list_models_worker_running_.load()) {
-        fl_message("Tes koneksi sedang berjalan.");
-        return;
-    }
-
-    frans::application::ApiKeyOptions key_opt;
-    key_opt.key_file = cfg_.gemini_api_key_file;
-    auto key_result = frans::application::ApiKeyProvider::resolve(key_opt);
-    if (!key_result.found()) {
-        std::string msg = "GEMINI_API_KEY tidak ditemukan.\n" + frans::application::apiKeyMissingHint();
-        fl_message("%s", msg.c_str());
-        return;
-    }
-
-    if (list_models_worker_thread_.joinable()) list_models_worker_thread_.join();
-    if (test_conn_btn_) test_conn_btn_->deactivate();
-    setStatus("Menguji koneksi ke Gemini API...", FL_DARK_BLUE);
-
-    list_models_worker_cancel_.store(false);
-    list_models_worker_running_.store(true);
-    list_models_worker_ok_ = false;
-    list_models_worker_message_.clear();
-    list_models_worker_models_.clear();
-    list_models_worker_thread_ = std::thread(&PromptDialog::workerListModels, this);
-    Fl::add_timeout(0.1, cbPollListModelsWorker, this);
-}
-
-void PromptDialog::doSelectFiles() {
-    if (select_worker_running_.load()) {
-        fl_message("Seleksi file sedang berjalan.");
-        return;
-    }
-    if (!request_buf_) return;
-    const char* req_raw = request_buf_->text();
-    std::string request = req_raw ? req_raw : "";
-    if (request.empty()) {
-        fl_message("Permintaan kosong.\nTulis permintaan dulu sebelum memilih file.");
-        return;
-    }
-
-    frans::application::ApiKeyOptions key_opt;
-    key_opt.key_file = cfg_.gemini_api_key_file;
-    auto key_result = frans::application::ApiKeyProvider::resolve(key_opt);
-    if (!key_result.found()) {
-        fl_message("GEMINI_API_KEY tidak ditemukan.");
-        return;
-    }
-
-    std::string project_root = resolveProjectRoot(session_, cfg_);
-    if (project_root.empty()) {
-        fl_message("Project root belum diatur.\n"
-                   "Isi path project di MainWindow atau set 'default_project_root' di config/app.json.");
-        return;
-    }
-
-    std::string model_name = normalizeModelName(cfg_.gemini_model);
-
-    std::fprintf(stderr, "[frans][prompt_dialog] doSelectFiles: project_root='%s', model='%s' (raw='%s')\n",
-                 project_root.c_str(), model_name.c_str(), cfg_.gemini_model.c_str());
-    std::fflush(stderr);
-
-    if (select_worker_thread_.joinable()) select_worker_thread_.join();
-    if (select_btn_) select_btn_->deactivate();
-    if (cancel_select_btn_) cancel_select_btn_->activate();
-    setStatus("Memilih file via Gemini (model: " + model_name + ")...", FL_DARK_BLUE);
-
-    select_worker_cancel_.store(false);
-    select_worker_running_.store(true);
-    select_worker_ok_ = false;
-    select_worker_error_.clear();
-    select_worker_result_ = frans::application::SelectionResult{};
-    select_worker_collected_.clear();
-    select_worker_thread_ = std::thread(&PromptDialog::workerSelectFiles, this);
-    Fl::add_timeout(0.1, cbPollSelectWorker, this);
-}
-
-void PromptDialog::doAddManual() {
-    std::string project_root = resolveProjectRoot(session_, cfg_);
-    if (project_root.empty()) {
-        fl_message("Project root belum diatur.\n"
-                   "Isi path project di MainWindow atau set 'default_project_root' di config/app.json.");
-        return;
-    }
-
-    const char* picked = fl_file_chooser("Pilih file untuk ditambahkan",
-                                         "*",
-                                         project_root.c_str());
-    if (!picked) return;
-
-    std::string abs_path = picked;
-
-    std::string rel_path;
-    if (abs_path.find(project_root) == 0) {
-        rel_path = abs_path.substr(project_root.size());
-        if (!rel_path.empty() && (rel_path[0] == '/' || rel_path[0] == '\\')) {
-            rel_path = rel_path.substr(1);
         }
+    }
+    oss << "\nMelanjutkan 'git add -A' akan men-stage file-file tersebut "
+           "dan berpotensi meng-commit secret ke repository.\n\n"
+           "Yakin ingin melanjutkan?";
+    return oss.str();
+}
+
+// ---------------------------------------------------------------------------
+// Worker infrastructure
+// ---------------------------------------------------------------------------
+
+void GitDialog::startWorker(std::function<void()> task,
+                            std::function<void()> on_done) {
+    if (worker_running_.load()) return;
+
+    cancel_flag_.store(false);
+    worker_running_.store(true);
+    worker_callback_ = std::move(on_done);
+    setButtonsEnabled(false);
+
+    worker_thread_ = std::thread([this, t = std::move(task)]() {
+        try {
+            t();
+        } catch (const std::exception& e) {
+            appendOutput(std::string("\n[worker exception] ") + e.what() + "\n");
+        } catch (...) {
+            appendOutput("\n[worker exception] unknown\n");
+        }
+        worker_running_.store(false);
+        Fl::awake(pollWorker, this);
+    });
+}
+
+void GitDialog::cancelWorker() {
+    cancel_flag_.store(true);
+}
+
+void GitDialog::onWorkerFinished() {
+    if (worker_thread_.joinable()) {
+        worker_thread_.join();
+    }
+    setButtonsEnabled(true);
+    if (worker_callback_) {
+        auto cb = std::move(worker_callback_);
+        worker_callback_ = nullptr;
+        cb();
+    }
+}
+
+void GitDialog::pollWorker(void* data) {
+    auto* self = static_cast<GitDialog*>(data);
+    if (!self) return;
+    if (!self->worker_running_.load()) {
+        self->onWorkerFinished();
     } else {
-        fl_message("File harus berada di dalam project root.");
+        Fl::repeat_timeout(0.1, pollWorker, data);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+
+void GitDialog::refreshStatus() {
+    clearOutput();
+    appendOutput("[git status] running...\n");
+
+    startWorker(
+        [this]() {
+            current_status_ = git_->status(&cancel_flag_);
+        },
+        [this]() {
+            updateStatusDisplay();
+            updateChangesBrowser();
+
+            if (!current_status_.is_repo) {
+                appendOutput("[git status] " + current_status_.error + "\n");
+                return;
+            }
+            if (!current_status_.git_available) {
+                appendOutput("[git status] " + current_status_.error + "\n");
+                return;
+            }
+            if (!current_status_.error.empty()) {
+                appendOutput("[git status] warning: " + current_status_.error + "\n");
+            } else {
+                appendOutput("[git status] OK — " +
+                             std::to_string(current_status_.changes.size()) +
+                             " change(s)\n");
+            }
+
+            // Auto-fill commit message suggestion (only if input is empty
+            // or still contains a previous suggestion).
+            if (commit_message_input_ && commit_message_input_->size() == 0) {
+                std::string suggestion =
+                    frans::application::GitFacade::suggestCommitMessage(current_status_);
+                commit_message_input_->value(suggestion.c_str());
+            }
+        }
+    );
+}
+
+void GitDialog::doAddAll() {
+    if (!current_status_.is_repo) {
+        fl_message("Bukan git repository. Tidak bisa add.");
+        return;
+    }
+    if (current_status_.changes.empty()) {
+        fl_message("Tidak ada perubahan untuk di-stage.");
         return;
     }
 
-    for (char& c : rel_path) if (c == '\\') c = '/';
-
-    for (const auto& entry : last_selection_.files) {
-        if (entry.path == rel_path) {
-            fl_message("File sudah ada dalam daftar.");
+    if (hasSuspiciousFiles()) {
+        std::string warn = buildSuspiciousWarning();
+        int choice = fl_choice(warn.c_str(), "Batal", "Tetap Add All", nullptr);
+        if (choice != 1) {
+            appendOutput("[git add] dibatalkan oleh pengguna (file mencurigakan).\n");
             return;
         }
     }
 
-    std::ifstream f(abs_path, std::ios::binary | std::ios::ate);
-    if (!f) {
-        fl_message("Gagal membaca file.");
-        return;
-    }
-    std::size_t size = static_cast<std::size_t>(f.tellg());
-
-    frans::application::ContextFileEntry entry;
-    entry.path = rel_path;
-    entry.priority = "manual";
-    entry.reason = "Ditambahkan manual";
-    entry.size_bytes = size;
-    entry.selected = true;
-    last_selection_.files.push_back(entry);
-    updateBrowserFromSelection();
-    setStatus("File ditambahkan: " + rel_path, FL_DARK_GREEN);
+    appendOutput("[git add -A] running...\n");
+    startWorker(
+        [this]() {
+            auto res = git_->addAll(&cancel_flag_);
+            appendOutput(res.ok ? "[git add -A] OK\n"
+                                : "[git add -A] FAILED: " + res.error + "\n");
+            if (!res.output.empty()) appendOutput(res.output);
+        },
+        [this]() { refreshStatus(); }
+    );
 }
 
-void PromptDialog::doCancelSelect() {
-    if (select_worker_running_.load()) {
-        select_worker_cancel_.store(true);
-        setStatus("Membatalkan seleksi...", FL_DARK_BLUE);
-    }
-}
-
-void PromptDialog::doBuildSourceCode() {
-    if (build_worker_running_.load()) {
-        fl_message("Build sedang berjalan.");
+void GitDialog::doCommit() {
+    if (!current_status_.is_repo) {
+        fl_message("Bukan git repository.");
         return;
     }
-    if (last_selection_.files.empty()) {
-        fl_message("Belum ada file terpilih.\nKlik [Pilih File via Gemini] dulu.");
+    if (!commit_message_input_) return;
+
+    std::string msg = commit_message_input_->value() ? commit_message_input_->value() : "";
+    // Trim
+    while (!msg.empty() && std::isspace(static_cast<unsigned char>(msg.back()))) msg.pop_back();
+    while (!msg.empty() && std::isspace(static_cast<unsigned char>(msg.front()))) msg.erase(msg.begin());
+
+    if (msg.empty()) {
+        fl_message("Pesan commit tidak boleh kosong.");
         return;
     }
 
-    std::string project_root = resolveProjectRoot(session_, cfg_);
-    if (project_root.empty()) {
-        fl_message("Project root belum diatur.");
-        return;
-    }
-
-    if (!request_buf_) return;
-
-    if (build_worker_thread_.joinable()) build_worker_thread_.join();
-    if (build_btn_) build_btn_->deactivate();
-    setStatus("Membangun SourceCode.md...", FL_DARK_BLUE);
-
-    build_worker_running_.store(true);
-    build_worker_result_ = frans::application::BuildResult{};
-    build_worker_thread_ = std::thread(&PromptDialog::workerBuildSourceCode, this);
-    Fl::add_timeout(0.1, cbPollBuildWorker, this);
-}
-
-void PromptDialog::doOpenFolder() {
-    if (last_build_result_.source_code_path.empty()) return;
-    std::string dir = std::filesystem::path(last_build_result_.source_code_path).parent_path().string();
-    if (dir.empty()) return;
-
-#ifdef _WIN32
-    std::string cmd = "explorer \"" + dir + "\"";
-#else
-    std::string cmd = "xdg-open \"" + dir + "\" &";
-#endif
-    int ret = std::system(cmd.c_str());
-    (void)ret;
-}
-
-// ===========================================================================
-// Workers
-// ===========================================================================
-void PromptDialog::workerListModels() {
-    frans::application::ApiKeyOptions key_opt;
-    key_opt.key_file = cfg_.gemini_api_key_file;
-    auto key_result = frans::application::ApiKeyProvider::resolve(key_opt);
-    if (!key_result.found()) {
-        list_models_worker_ok_ = false;
-        list_models_worker_message_ = "API key tidak ditemukan.";
-        list_models_worker_running_.store(false);
-        return;
-    }
-
-    auto transport = std::make_shared<frans::infrastructure::http::CurlTransport>();
-    frans::application::GeminiClient client(transport);
-    auto result = client.listModels(cfg_.gemini_endpoint, key_result.key, &list_models_worker_cancel_);
-
-    if (!result.ok) {
-        list_models_worker_ok_ = false;
-        list_models_worker_message_ = "Error: " + result.error.message;
-        if (result.error.http_status > 0) {
-            list_models_worker_message_ += " (HTTP " + std::to_string(result.error.http_status) + ")";
-        }
-    } else {
-        list_models_worker_ok_ = true;
-        list_models_worker_models_ = result.models;
-
-        std::ostringstream ss;
-        ss << "Koneksi berhasil! Ditemukan " << result.models.size() << " model:\n";
-        int count = 0;
-        for (const auto& m : result.models) {
-            if (count >= 20) {
-                ss << "... dan " << (result.models.size() - 20) << " model lainnya.\n";
-                break;
-            }
-            ss << "\xE2\x80\xA2 " << m.name;
-            if (!m.display_name.empty() && m.display_name != m.name) {
-                ss << " (" << m.display_name << ")";
-            }
-            ss << "\n";
-            ++count;
-        }
-
-        std::string cfg_model_norm = normalizeModelName(cfg_.gemini_model);
-        bool model_found = false;
-        for (const auto& m : result.models) {
-            std::string m_norm = normalizeModelName(m.name);
-            if (m_norm == cfg_model_norm) {
-                model_found = true;
-                break;
-            }
-        }
-        if (model_found) {
-            ss << "\n\xE2\x9C\x93 Model '" << cfg_.gemini_model << "' tersedia.\n";
-        } else {
-            ss << "\n\xE2\x9A\xA0 Model '" << cfg_.gemini_model
-               << "' TIDAK ditemukan dalam daftar!\n";
-            ss << "  Buka config/app.json, ganti 'gemini_model' dengan salah satu nama di atas.\n";
-        }
-        list_models_worker_message_ = ss.str();
-    }
-    list_models_worker_running_.store(false);
-}
-
-void PromptDialog::workerSelectFiles() {
-    frans::application::ApiKeyOptions key_opt;
-    key_opt.key_file = cfg_.gemini_api_key_file;
-    auto key_result = frans::application::ApiKeyProvider::resolve(key_opt);
-    if (!key_result.found()) {
-        select_worker_ok_ = false;
-        select_worker_error_ = "API key tidak ditemukan.";
-        select_worker_running_.store(false);
-        return;
-    }
-
-    std::string project_root = resolveProjectRoot(session_, cfg_);
-    if (project_root.empty()) {
-        select_worker_ok_ = false;
-        select_worker_error_ = "Project root belum diatur.";
-        select_worker_running_.store(false);
-        return;
-    }
-
-    const char* req_raw = request_buf_->text();
-    std::string request = req_raw ? req_raw : "";
-    const char* err_raw = error_buf_ ? error_buf_->text() : nullptr;
-    std::string error_output = err_raw ? err_raw : "";
-
-    std::string selector_prompt = readFileContents(cfg_.selector_prompt_path);
-    if (selector_prompt.empty()) {
-        selector_prompt = "Anda adalah asisten pemilih konteks. Pilih file yang relevan.";
-    }
-
-    std::vector<std::string> always_include;
-    if (!cfg_.context_always_include.empty()) {
-        std::istringstream iss(cfg_.context_always_include);
-        std::string item;
-        while (std::getline(iss, item, ',')) {
-            size_t start = item.find_first_not_of(" \t");
-            size_t end = item.find_last_not_of(" \t");
-            if (start != std::string::npos && end != std::string::npos) {
-                always_include.push_back(item.substr(start, end - start + 1));
-            }
-        }
-    }
-
-    std::string model_name = normalizeModelName(cfg_.gemini_model);
-
-    std::fprintf(stderr, "[frans][prompt_dialog] workerSelectFiles: calling Gemini with model='%s'\n",
-                 model_name.c_str());
-    std::fflush(stderr);
-
-    frans::application::ContextRequest ctx_req;
-    ctx_req.project_root = project_root;
-    ctx_req.request_text = request;
-    ctx_req.error_output = error_output;
-    ctx_req.always_include = always_include;
-    ctx_req.max_context_bytes = static_cast<std::size_t>(cfg_.context_max_kb) * 1024;
-    ctx_req.max_files = static_cast<std::size_t>(cfg_.context_max_files);
-    ctx_req.gemini_model = model_name;
-    ctx_req.gemini_endpoint = cfg_.gemini_endpoint;
-    ctx_req.api_key = key_result.key;
-    ctx_req.selector_prompt = selector_prompt;
-    ctx_req.gemini_timeout_sec = cfg_.gemini_timeout_sec;
-    ctx_req.gemini_full_mode_max_tokens = static_cast<std::size_t>(cfg_.gemini_full_mode_max_tokens);
-    ctx_req.gemini_index_head_lines = cfg_.gemini_index_head_lines;
-
-    auto transport = std::make_shared<frans::infrastructure::http::CurlTransport>();
-    frans::application::GeminiClient client(transport);
-
-    auto result = frans::application::selectContext(ctx_req, client, &select_worker_cancel_);
-
-    if (select_worker_cancel_.load()) {
-        select_worker_ok_ = false;
-        select_worker_error_ = "Dibatalkan oleh pengguna.";
-    } else if (!result.ok) {
-        select_worker_ok_ = false;
-        select_worker_error_ = result.error;
-        select_worker_used_model_ = model_name;
-    } else {
-        select_worker_ok_ = true;
-        select_worker_result_ = result;
-
-        frans::application::CollectOptions col_opt;
-        col_opt.max_file_bytes = 256 * 1024;
-        col_opt.exclude_secrets = true;
-        select_worker_collected_ = frans::application::collectFiles(project_root, col_opt, nullptr).files;
-    }
-    select_worker_running_.store(false);
-}
-
-void PromptDialog::workerBuildSourceCode() {
-    std::string project_root = resolveProjectRoot(session_, cfg_);
-    if (project_root.empty()) {
-        build_worker_result_.error = "Project root belum diatur.";
-        build_worker_running_.store(false);
-        return;
-    }
-
-    const char* req_raw = request_buf_->text();
-    std::string request = req_raw ? req_raw : "";
-
-    // FIX: Set created_at di manifest
-    frans::application::BuildManifest manifest;
-    manifest.created_at = formatTimestampNow();  // <-- INI YANG HILANG SEBELUMNYA
-    manifest.request_hash = computeRequestHash();
-    manifest.mode = last_selection_.mode;
-    manifest.model = cfg_.gemini_model;
-
-    auto result = frans::application::buildSourceCode(
-        select_worker_collected_.empty() ? last_collected_files_ : select_worker_collected_,
-        last_selection_.files,
-        project_root,
-        cfg_.ingest_output_dir,
-        cfg_.context_output_name,
-        request,
-        manifest,
-        nullptr);
-
-    build_worker_result_ = result;
-    build_worker_running_.store(false);
-}
-
-// ===========================================================================
-// Callbacks
-// ===========================================================================
-void PromptDialog::cbGenerate(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doGenerate();
-}
-void PromptDialog::cbCopy(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doCopy();
-}
-void PromptDialog::cbFetchLastError(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doFetchLastError();
-}
-void PromptDialog::cbTestConnection(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doTestConnection();
-}
-void PromptDialog::cbSelectFiles(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doSelectFiles();
-}
-void PromptDialog::cbAddManual(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doAddManual();
-}
-void PromptDialog::cbCancelSelect(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doCancelSelect();
-}
-void PromptDialog::cbBrowserChanged(Fl_Widget*, void* data) {
-    auto* dlg = static_cast<PromptDialog*>(data);
-    if (!dlg || !dlg->file_browser_) return;
-    int n = dlg->file_browser_->nitems();
-    for (int i = 0; i < n && i < static_cast<int>(dlg->last_selection_.files.size()); ++i) {
-        dlg->last_selection_.files[i].selected = dlg->file_browser_->checked(i + 1) != 0;
-    }
-    dlg->updateTotals();
-}
-void PromptDialog::cbBuildSourceCode(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doBuildSourceCode();
-}
-void PromptDialog::cbOpenFolder(Fl_Widget*, void* data) {
-    static_cast<PromptDialog*>(data)->doOpenFolder();
-}
-void PromptDialog::cbClose(Fl_Widget* w, void*) {
-    if (Fl_Window* win = w ? w->window() : nullptr) {
-        win->hide();
-    }
-}
-
-// ===========================================================================
-// Polling callbacks
-// ===========================================================================
-void PromptDialog::cbPollListModelsWorker(void* data) {
-    auto* dlg = static_cast<PromptDialog*>(data);
-    if (!dlg) return;
-    if (dlg->list_models_worker_running_.load()) {
-        Fl::repeat_timeout(0.1, cbPollListModelsWorker, data);
-        return;
-    }
-    if (dlg->list_models_worker_thread_.joinable()) {
-        dlg->list_models_worker_thread_.join();
-    }
-    if (dlg->test_conn_btn_) dlg->test_conn_btn_->activate();
-
-    if (dlg->list_models_worker_ok_) {
-        dlg->setStatus("Tes koneksi berhasil.", FL_DARK_GREEN);
-        showScrollableMessage("Daftar Model Gemini", dlg->list_models_worker_message_);
-    } else {
-        dlg->setStatus("Tes koneksi gagal.", FL_RED);
-        showScrollableMessage("Tes Koneksi Gagal", dlg->list_models_worker_message_);
-    }
-    dlg->list_models_worker_message_.clear();
-    dlg->list_models_worker_ok_ = false;
-}
-
-void PromptDialog::cbPollSelectWorker(void* data) {
-    auto* dlg = static_cast<PromptDialog*>(data);
-    if (!dlg) return;
-    if (dlg->select_worker_running_.load()) {
-        Fl::repeat_timeout(0.1, cbPollSelectWorker, data);
-        return;
-    }
-    if (dlg->select_worker_thread_.joinable()) {
-        dlg->select_worker_thread_.join();
-    }
-    if (dlg->select_btn_) dlg->select_btn_->activate();
-    if (dlg->cancel_select_btn_) dlg->cancel_select_btn_->deactivate();
-
-    if (dlg->select_worker_ok_) {
-        dlg->last_selection_ = dlg->select_worker_result_;
-        dlg->last_collected_files_ = dlg->select_worker_collected_;
-        dlg->updateBrowserFromSelection();
-        dlg->updateModeDisplay();
-        dlg->setStatus("Seleksi file selesai. Tinjau dan koreksi centang.", FL_DARK_GREEN);
-    } else {
-        dlg->setStatus("Seleksi file gagal: " + dlg->select_worker_error_, FL_RED);
-
-        std::string error_msg = dlg->select_worker_error_;
-
-        if (isModelNotFoundError(error_msg)) {
-            std::ostringstream oss;
-            oss << "GEMINI MODEL TIDAK DITEMUKAN\n";
-            oss << "================================\n\n";
-            oss << "Model yang dipakai: " << dlg->select_worker_used_model_ << "\n";
-            oss << "Dari config:        " << dlg->cfg_.gemini_model << "\n\n";
-            oss << "API key Anda VALID (Tes Koneksi berhasil dengan "
-                << dlg->list_models_worker_models_.size() << " model),\n";
-            oss << "tetapi nama model di config/app.json tidak ada di daftar.\n\n";
-            oss << "SOLUSI:\n";
-            oss << "1. Klik [Tes Koneksi / Daftar Model] untuk melihat nama model yang valid.\n";
-            oss << "2. Edit config/app.json, ganti 'gemini_model' dengan nama yang valid.\n";
-            oss << "3. Contoh: \"gemini_model\": \"gemini-3.8-flash\"\n\n";
-
-            if (!dlg->list_models_worker_models_.empty()) {
-                std::string similar = findSimilarModel(
-                    dlg->select_worker_used_model_,
-                    dlg->list_models_worker_models_);
-                if (!similar.empty()) {
-                    oss << "Model yang MIRIP dengan '" << dlg->select_worker_used_model_ << "':\n";
-                    oss << similar;
-                    oss << "\n";
-                }
+    appendOutput("[git commit] running...\n");
+    startWorker(
+        [this, msg]() {
+            auto res = git_->commit(msg, &cancel_flag_);
+            if (res.ok) {
+                appendOutput("[git commit] OK\n");
             } else {
-                oss << "Tip: Klik [Tes Koneksi] dulu untuk mengisi daftar model.\n";
+                appendOutput("[git commit] FAILED: " + res.error + "\n");
             }
-
-            oss << "\nError detail dari Gemini:\n" << error_msg << "\n";
-            showScrollableMessage("Model Gemini Tidak Ditemukan", oss.str());
-        } else {
-            fl_message("Seleksi file gagal:\n%s", error_msg.c_str());
+            if (!res.output.empty()) appendOutput(res.output);
+        },
+        [this]() {
+            refreshStatus();
+            // Clear commit message after successful commit
+            if (commit_message_input_) commit_message_input_->value("");
         }
-    }
-    dlg->select_worker_error_.clear();
-    dlg->select_worker_ok_ = false;
+    );
 }
 
-void PromptDialog::cbPollBuildWorker(void* data) {
-    auto* dlg = static_cast<PromptDialog*>(data);
-    if (!dlg) return;
-    if (dlg->build_worker_running_.load()) {
-        Fl::repeat_timeout(0.1, cbPollBuildWorker, data);
+void GitDialog::doPush() {
+    if (!current_status_.is_repo) {
+        fl_message("Bukan git repository.");
         return;
     }
-    if (dlg->build_worker_thread_.joinable()) {
-        dlg->build_worker_thread_.join();
-    }
-    if (dlg->build_btn_) dlg->build_btn_->activate();
 
-    if (dlg->build_worker_result_.ok) {
-        dlg->last_build_result_ = dlg->build_worker_result_;
-        if (dlg->session_) {
-            dlg->session_->last_context_path = dlg->last_build_result_.source_code_path;
-        }
-        dlg->updateFreshnessDisplay();
-        char buf[256];
-        std::snprintf(buf, sizeof(buf),
-                      "SourceCode.md dibangun: %zu file, %s",
-                      dlg->last_build_result_.files_included,
-                      formatBytesHelper(dlg->last_build_result_.total_bytes).c_str());
-        dlg->setStatus(buf, FL_DARK_GREEN);
-    } else {
-        dlg->setStatus("Build gagal: " + dlg->build_worker_result_.error, FL_RED);
-        fl_message("Build SourceCode.md gagal:\n%s", dlg->build_worker_result_.error.c_str());
+    // Build confirmation text
+    std::ostringstream oss;
+    oss << "Konfirmasi git push\n\n"
+        << "  Branch:   " << (current_status_.branch.empty() ? "(detached)" : current_status_.branch) << "\n"
+        << "  Upstream: " << (current_status_.upstream.empty() ? "(none)" : current_status_.upstream) << "\n"
+        << "  Ahead:    " << current_status_.ahead << " commit(s)\n\n";
+
+    if (current_status_.upstream.empty()) {
+        oss << "PERHATIAN: branch ini belum memiliki upstream.\n"
+               "Push mungkin gagal. Jika gagal, jalankan manual:\n"
+               "  git push -u origin <branch>\n\n";
     }
+    if (current_status_.ahead == 0) {
+        oss << "Catatan: tidak ada commit ahead — push mungkin tidak melakukan apa-apa.\n\n";
+    }
+    oss << "Lanjutkan push?";
+
+    int choice = fl_choice(oss.str().c_str(), "Batal", "Push", nullptr);
+    if (choice != 1) {
+        appendOutput("[git push] dibatalkan oleh pengguna.\n");
+        return;
+    }
+
+    appendOutput("[git push] running...\n");
+    startWorker(
+        [this]() {
+            auto res = git_->push(&cancel_flag_);
+            if (res.ok) {
+                appendOutput("[git push] OK\n");
+            } else {
+                appendOutput("[git push] FAILED: " + res.error + "\n");
+            }
+            if (!res.output.empty()) appendOutput(res.output);
+        },
+        [this]() { refreshStatus(); }
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FLTK callbacks
+// ---------------------------------------------------------------------------
+
+void GitDialog::cbRefresh(Fl_Widget*, void* data) {
+    static_cast<GitDialog*>(data)->refreshStatus();
+}
+
+void GitDialog::cbAddAll(Fl_Widget*, void* data) {
+    static_cast<GitDialog*>(data)->doAddAll();
+}
+
+void GitDialog::cbCommit(Fl_Widget*, void* data) {
+    static_cast<GitDialog*>(data)->doCommit();
+}
+
+void GitDialog::cbPush(Fl_Widget*, void* data) {
+    static_cast<GitDialog*>(data)->doPush();
+}
+
+void GitDialog::cbCancel(Fl_Widget*, void* data) {
+    static_cast<GitDialog*>(data)->cancelWorker();
+}
+
+void GitDialog::cbClose(Fl_Widget*, void* data) {
+    auto* self = static_cast<GitDialog*>(data);
+    if (self->worker_running_.load()) {
+        int c = fl_choice("Operasi git masih berjalan. Batalkan dan tutup?",
+                          "Tidak", "Ya", nullptr);
+        if (c != 1) return;
+        self->cancelWorker();
+    }
+    if (self->win_) self->win_->hide();
 }
 
 } // namespace frans::ui
 ================================================
-FILE: src/ui/PromptDialog.h
+FILE: src/ui/GitDialog.h
 ================================================
-// src/ui/PromptDialog.h
-//
-// Dialog Prompt Generator — Fase A #43 + Fase C #58 + Fase C #61.
+// src/ui/GitDialog.h
 #pragma once
+
 #include "config/AppConfig.h"
 #include "ui/SessionState.h"
-#include "application/context/ContextSelector.h"
-#include "application/context/SourceCodeBuilder.h"
-#include "application/ai/GeminiClient.h"
-#include <string>
+#include "application/git/GitFacade.h"
+
+#include <FL/Fl.H>
+#include <FL/Fl_Box.H>
+#include <FL/Fl_Button.H>
+#include <FL/Fl_Input.H>
+#include <FL/Fl_Output.H>
+#include <FL/Fl_Browser.H>
+#include <FL/Fl_Window.H>
+
 #include <atomic>
+#include <functional>
+#include <memory>
+#include <string>
 #include <thread>
-#include <vector>
-class Fl_Window;
-class Fl_Text_Editor;
-class Fl_Text_Buffer;
-class Fl_Text_Display;
-class Fl_Button;
-class Fl_Box;
-class Fl_Check_Browser;
-class Fl_Widget;
+
 namespace frans::ui {
-class PromptDialog {
+
+class GitDialog {
 public:
-static void show(SessionState* session,
-const frans::config::AppConfig& cfg);
-PromptDialog(const PromptDialog&)            = delete;
-PromptDialog& operator=(const PromptDialog&) = delete;
+    static void show(const std::string& project_root,
+                     SessionState* session,
+                     const frans::config::AppConfig& cfg);
+
 private:
-explicit PromptDialog(SessionState* session,
-const frans::config::AppConfig& cfg);
-~PromptDialog();
-void buildUI();
-void doGenerate();
-void doCopy();
-void doFetchLastError();
-void doTestConnection();
-void doSelectFiles();
-void doAddManual();
-void doCancelSelect();
-void doBuildSourceCode();
-void doOpenFolder();
-void setStatus(const std::string& msg, unsigned color);
-std::string loadTemplate();
-void updateBrowserFromSelection();
-void updateTotals();
-void updateFreshnessDisplay();
-void updateKeyStatus();
-void updateModeDisplay();
-enum class Freshness { NoFile, Stale, Fresh };
-Freshness checkFreshness();
-std::string computeRequestHash();
-std::string formatBytes(std::size_t bytes);
-void workerListModels();
-void workerSelectFiles();
-void workerBuildSourceCode();
-static void cbGenerate(Fl_Widget*, void*);
-static void cbCopy(Fl_Widget*, void*);
-static void cbFetchLastError(Fl_Widget*, void*);
-static void cbTestConnection(Fl_Widget*, void*);
-static void cbSelectFiles(Fl_Widget*, void*);
-static void cbAddManual(Fl_Widget*, void*);
-static void cbCancelSelect(Fl_Widget*, void*);
-static void cbBrowserChanged(Fl_Widget*, void*);
-static void cbBuildSourceCode(Fl_Widget*, void*);
-static void cbOpenFolder(Fl_Widget*, void*);
-static void cbClose(Fl_Widget*, void*);
-static void cbPollListModelsWorker(void*);
-static void cbPollSelectWorker(void*);
-static void cbPollBuildWorker(void*);
-SessionState*                  session_;
-const frans::config::AppConfig& cfg_;
-Fl_Window*       win_              = nullptr;
-Fl_Text_Editor*  request_editor_   = nullptr;
-Fl_Text_Buffer*  request_buf_      = nullptr;
-Fl_Text_Editor*  error_editor_     = nullptr;
-Fl_Text_Buffer*  error_buf_        = nullptr;
-Fl_Button*       fetch_btn_        = nullptr;
-Fl_Button*       select_btn_        = nullptr;
-Fl_Box*          key_status_box_    = nullptr;
-Fl_Box*          mode_box_          = nullptr;
-Fl_Check_Browser* file_browser_     = nullptr;
-Fl_Box*          total_box_         = nullptr;
-Fl_Button*       add_manual_btn_    = nullptr;
-Fl_Button*       cancel_select_btn_ = nullptr;
-Fl_Button*       build_btn_         = nullptr;
-Fl_Box*          freshness_box_     = nullptr;
-Fl_Box*          location_box_      = nullptr;
-Fl_Button*       open_folder_btn_   = nullptr;
-Fl_Button*       generate_btn_      = nullptr;
-Fl_Button*       copy_btn_          = nullptr;
-Fl_Button*       test_conn_btn_     = nullptr;
-Fl_Text_Display* preview_display_   = nullptr;
-Fl_Text_Buffer*  preview_buf_       = nullptr;
-Fl_Box*          status_box_        = nullptr;
-std::string last_generated_prompt_;
-frans::application::SelectionResult last_selection_;
-std::vector<frans::application::CollectedFile> last_collected_files_;
-frans::application::BuildResult last_build_result_;
-std::string current_request_hash_;
-bool has_fresh_source_code_ = false;
-std::thread list_models_worker_thread_;
-std::atomic<bool> list_models_worker_running_{false};
-std::atomic<bool> list_models_worker_cancel_{false};
-std::string list_models_worker_message_;
-bool list_models_worker_ok_ = false;
-std::vector<frans::application::ModelInfo> list_models_worker_models_;
-std::thread select_worker_thread_;
-std::atomic<bool> select_worker_running_{false};
-std::atomic<bool> select_worker_cancel_{false};
-frans::application::SelectionResult select_worker_result_;
-std::vector<frans::application::CollectedFile> select_worker_collected_;
-bool select_worker_ok_ = false;
-std::string select_worker_error_;
-std::string select_worker_used_model_;
-std::thread build_worker_thread_;
-std::atomic<bool> build_worker_running_{false};
-frans::application::BuildResult build_worker_result_;
+    GitDialog(const std::string& project_root,
+              SessionState* session,
+              const frans::config::AppConfig& cfg);
+    ~GitDialog();
+
+    GitDialog(const GitDialog&)            = delete;
+    GitDialog& operator=(const GitDialog&) = delete;
+
+    void createUI();
+    void layout();
+
+    void refreshStatus();
+    void doAddAll();
+    void doCommit();
+    void doPush();
+
+    void setButtonsEnabled(bool enabled);
+    void appendOutput(const std::string& text);
+    void clearOutput();
+    void updateStatusDisplay();
+    void updateChangesBrowser();
+
+    bool hasSuspiciousFiles() const;
+    std::string buildSuspiciousWarning() const;
+
+    // Worker infrastructure (same pattern as PromptDialog)
+    void startWorker(std::function<void()> task,
+                     std::function<void()> on_done);
+    void cancelWorker();
+    void onWorkerFinished();
+    static void pollWorker(void* data);
+
+    // FLTK callbacks
+    static void cbRefresh(Fl_Widget*, void*);
+    static void cbAddAll(Fl_Widget*, void*);
+    static void cbCommit(Fl_Widget*, void*);
+    static void cbPush(Fl_Widget*, void*);
+    static void cbCancel(Fl_Widget*, void*);
+    static void cbClose(Fl_Widget*, void*);
+
+    Fl_Window*    win_                 = nullptr;
+    Fl_Box*       status_label_        = nullptr;
+    Fl_Browser*   changes_browser_     = nullptr;
+    Fl_Input*     commit_message_input_= nullptr;
+    Fl_Output*    output_              = nullptr;
+
+    Fl_Button*    btn_refresh_         = nullptr;
+    Fl_Button*    btn_add_all_         = nullptr;
+    Fl_Button*    btn_commit_          = nullptr;
+    Fl_Button*    btn_push_            = nullptr;
+    Fl_Button*    btn_cancel_          = nullptr;
+    Fl_Button*    btn_close_           = nullptr;
+
+    std::string   project_root_;
+    SessionState* session_             = nullptr;
+    frans::config::AppConfig cfg_;
+
+    std::unique_ptr<frans::application::GitFacade> git_;
+    frans::application::GitStatus current_status_;
+
+    std::thread              worker_thread_;
+    std::atomic<bool>        cancel_flag_{false};
+    std::atomic<bool>        worker_running_{false};
+    std::function<void()>    worker_callback_;
 };
+
 } // namespace frans::ui

@@ -15,7 +15,7 @@
   "context_output_name": "SourceCode.md",
   "context_max_kb": 300,
   "context_max_files": 40,
-  "context_always_include": "CMakeLists.txt, cmake/CompilerWarnings.cmake, cmake/Dependencies.cmake, cmake/FLTK.cmake, cmake/GeminiTests.cmake, cmake/Install.cmake, cmake/NlohmannJson.cmake, cmake/Platform.cmake, cmake/PlatformLinux.cmake, cmake/PlatformWindows.cmake, cmake/ProjectOptions.cmake, cmake/Sources.cmake, cmake/Tests.cmake",
+  "context_always_include": "BluePrint-v9-Addendum.md, CMakeLists.txt, cmake/CompilerWarnings.cmake, cmake/Dependencies.cmake, cmake/FLTK.cmake, cmake/GeminiTests.cmake, cmake/Install.cmake, cmake/NlohmannJson.cmake, cmake/Platform.cmake, cmake/PlatformLinux.cmake, cmake/PlatformWindows.cmake, cmake/ProjectOptions.cmake, cmake/Sources.cmake, cmake/Tests.cmake",
   "gemini_model": "gemini-3.1-flash-lite",
   "gemini_endpoint": "https://generativelanguage.googleapis.com/v1beta",
   "gemini_timeout_sec": 90,

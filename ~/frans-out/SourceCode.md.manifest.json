@@ -1,6 +1,6 @@
 {
-  "created_at": "2026-11-15 08:58",
-  "request_hash": "458e1cc058a818b5",
+  "created_at": "2026-11-15 09:40",
+  "request_hash": "0839ab1f6942cdce",
   "mode": "index",
   "model": "gemini-3.1-flash-lite",
   "files": [
@@ -15,9 +15,11 @@
     { "path": "cmake/PlatformLinux.cmake", "hash": "64f39360b3adc9a7", "size_bytes": 80 },
     { "path": "cmake/PlatformWindows.cmake", "hash": "ffded493b966e4a5", "size_bytes": 140 },
     { "path": "cmake/ProjectOptions.cmake", "hash": "9783b6c2ef2d4c94", "size_bytes": 365 },
+    { "path": "cmake/Sources.cmake", "hash": "33b47bae68a7e19f", "size_bytes": 2877 },
     { "path": "cmake/Tests.cmake", "hash": "c15abb8cfe00d43d", "size_bytes": 9678 },
-    { "path": "cmake/Sources.cmake", "hash": "5ce110faee2e3a29", "size_bytes": 2732 },
-    { "path": "src/ui/PromptDialog.cpp", "hash": "21642669c2336acd", "size_bytes": 44965 },
-    { "path": "src/ui/PromptDialog.h", "hash": "373027ec82923c44", "size_bytes": 4439 }
+    { "path": "src/ui/GitDialog.cpp", "hash": "2060bcc0f49523b8", "size_bytes": 17447 },
+    { "path": "src/ui/GitDialog.h", "hash": "a6a94619dabe8f8f", "size_bytes": 2827 },
+    { "path": "src/application/git/GitFacade.cpp", "hash": "e442ac1f7696de1e", "size_bytes": 14409 },
+    { "path": "src/application/git/GitFacade.h", "hash": "3fd5c5ee5b4c6408", "size_bytes": 1253 }
   ]
 }
