@@ -1,9 +1,6 @@
 # SourceCode.md: frans
-Dibuat oleh Frans | 2026-11-15 08:22 | 16 file disertakan | 75.5 KB
-Permintaan: - baca `BluePrint-v9-Addendum.md` dan `SourceCode.md`
-- `SourceCode.md` adalah code yang paling terakhir, paling update
-- PERHATIKAN root app adalah `/home/farhan/Proyek/AgenAI/proyek/frans/`
-- buatka
+Dibuat oleh Frans | 2026-11-15 08:58 | 15 file disertakan | 70.4 KB
+Permintaan: file `src/ui/PromptDialog.cpp` terlalu besar, pecah jadi beberapa bagian
 Tanda "*" pada struktur di bawah = isi file disertakan setelah bagian ini.
 
 Directory structure:
@@ -100,8 +97,8 @@ Directory structure:
     │   │   │   ├── PromptGenerator.cpp
     │   │   │   └── PromptGenerator.h
     │   │   └── safety/
-    │   │       ├── DangerCheckHandler.cpp *
-    │   │       └── DangerCheckHandler.h *
+    │   │       ├── DangerCheckHandler.cpp
+    │   │       └── DangerCheckHandler.h
     │   ├── config/
     │   │   ├── AppConfig.cpp
     │   │   ├── AppConfig.h
@@ -142,8 +139,8 @@ Directory structure:
     │       ├── MainWindow.h
     │       ├── ManualImportDialog.cpp
     │       ├── ManualImportDialog.h
-    │       ├── PromptDialog.cpp
-    │       ├── PromptDialog.h
+    │       ├── PromptDialog.cpp *
+    │       ├── PromptDialog.h *
     │       └── SessionState.h
     ├── test_env_extra.cpp
     ├── tests/
@@ -151,7 +148,7 @@ Directory structure:
     │   ├── GeminiSchemaTest.cpp
     │   ├── README-FaseA-44.md
     │   ├── README.md
-    │   ├── ScenarioTest.cpp *
+    │   ├── ScenarioTest.cpp
     │   ├── SessionStateTest.cpp
     │   ├── ai/
     │   │   ├── FakeHttpTransport.h
@@ -159,6 +156,7 @@ Directory structure:
     │   ├── context/
     │   │   └── source_code_builder_tests.cpp
     │   ├── git/
+    │   │   ├── DangerCheckGitTest.cpp
     │   │   └── GitFacadeTest.cpp
     │   └── manual/
     │       ├── fixtures-generated/
@@ -599,1769 +597,1574 @@ endif()
 FILE: cmake/Tests.cmake
 ================================================
 include_guard(GLOBAL)
+
 option(FRANS_BUILD_TESTS "Build tests" OFF)
+
 if(FRANS_BUILD_TESTS)
-enable_testing()
-#------------------------------------------------------------------
- # frans_scenarios
- # Runner test scenario untuk Manual Import + Danger Check + Sandbox
- # + error parser (traceback frame picking) + PromptGenerator (#42)
- # + FileCollector (#46) + MarkdownRenderer (#48).
- #
- # frans_scenarios                -> jalankan semua scenario
- # frans_scenarios --list         -> daftar nama scenario
- # frans_scenarios --dump NAME    -> print scenario (paste ke GUI)
- #------------------------------------------------------------------
- set(FRANS_SCENARIO_SOURCES
-     tests/ScenarioTest.cpp
-     src/application/import/MultiFileParser.cpp
-     src/application/safety/DangerCheckHandler.cpp
-     src/infrastructure/fs/SandboxedFileSystem.cpp
-     src/application/build_runner/BuildSystems/StandaloneBuildSystem.cpp
-     src/application/prompt/PromptGenerator.cpp
-     # Fase B #46: FileCollector + ProcessExecutor (untuk git ls-files fallback)
-     src/application/ingest/FileCollector.cpp
-     # Fase B #48: MarkdownRenderer (murni, tanpa I/O)
-     src/application/ingest/MarkdownRenderer.cpp
- )
- if(WIN32)
-     list(APPEND FRANS_SCENARIO_SOURCES
-         src/infrastructure/system/ProcessExecutor_win32.cpp)
- else()
-     list(APPEND FRANS_SCENARIO_SOURCES
-         src/infrastructure/system/ProcessExecutor_posix.cpp)
- endif()
- add_executable(frans_scenarios ${FRANS_SCENARIO_SOURCES})
- target_include_directories(frans_scenarios PRIVATE
-     ${CMAKE_CURRENT_SOURCE_DIR}/src
- )
- target_link_libraries(frans_scenarios PRIVATE
-     Threads::Threads
-     ${FRANS_PLATFORM_LIBS}
-     frans_warnings
- )
- if(FRANS_PLATFORM_DEFS)
-     target_compile_definitions(frans_scenarios PRIVATE ${FRANS_PLATFORM_DEFS})
- endif()
- add_test(NAME scenario_tests COMMAND frans_scenarios)
- #------------------------------------------------------------------
- # frans_session_tests  (Fase A #44 + #45)
- # Test ringan, TANPA FLTK dan TANPA ProsesExecutor:
- # - summarizeBuildError()  : isi ringkasan error per phase
- # - wasCancelledByUser()   : deteksi cancel
- # - SessionState           : aturan publish / clear / skip-cancel
- # - integrasi ke PromptGenerator (blok ERROR)
- #
- # Hanya 3 file .cpp -> compile cepat di mesin lama.
- #------------------------------------------------------------------
- add_executable(frans_session_tests
-     tests/SessionStateTest.cpp
-     src/application/build_runner/BuildErrorSummary.cpp
-     src/application/prompt/PromptGenerator.cpp
- )
- target_include_directories(frans_session_tests PRIVATE
-     ${CMAKE_CURRENT_SOURCE_DIR}/src
- )
- target_link_libraries(frans_session_tests PRIVATE
-     frans_warnings
- )
- add_test(NAME session_state_tests COMMAND frans_session_tests)
- #------------------------------------------------------------------
- # frans_apikey_tests  (Fase C #54)
- # ApiKeyProvider: env -> file kunci -> default ~/.gemini/api_key,
- # trim/BOM/CRLF, izin file longgar, masking 4 karakter terakhir,
- # dan pastikan diagnostik tidak membocorkan key.
- #
- # Test memakai HOME palsu di direktori temp; file kunci asli pengguna
- # tidak disentuh. Tanpa FLTK, tanpa jaringan, tanpa subprocess.
- #------------------------------------------------------------------
- add_executable(frans_apikey_tests
-     tests/ApiKeyProviderTest.cpp
-     src/application/ai/ApiKeyProvider.cpp
- )
- target_include_directories(frans_apikey_tests PRIVATE
-     ${CMAKE_CURRENT_SOURCE_DIR}/src
- )
- target_link_libraries(frans_apikey_tests PRIVATE
-     frans_warnings
- )
- add_test(NAME apikey_provider_tests COMMAND frans_apikey_tests)
- #------------------------------------------------------------------
- # frans_gemini_schema_tests  (Fase C #57)
- # GeminiSchema: verifikasi struktur JSON schema untuk response Gemini
- # dan file prompt gemini_selector_prompt.txt ada serta valid.
- #
- # Tanpa FLTK, tanpa jaringan, tanpa subprocess.
- #------------------------------------------------------------------
- add_executable(frans_gemini_schema_tests
-     tests/GeminiSchemaTest.cpp
-     src/application/ai/GeminiSchema.cpp
- )
- target_include_directories(frans_gemini_schema_tests PRIVATE
-     ${CMAKE_CURRENT_SOURCE_DIR}/src
-     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
- )
- target_link_libraries(frans_gemini_schema_tests PRIVATE
-     frans_warnings
- )
- # Copy config files ke build directory agar test bisa akses
- add_custom_command(TARGET frans_gemini_schema_tests POST_BUILD
-     COMMAND ${CMAKE_COMMAND} -E copy_directory
-         ${CMAKE_CURRENT_SOURCE_DIR}/config
-         ${CMAKE_CURRENT_BINARY_DIR}/config
-     COMMENT "Copying config files for gemini schema tests"
- )
- add_test(NAME gemini_schema_tests COMMAND frans_gemini_schema_tests)
- #------------------------------------------------------------------
- # frans_context_tests  (Fase C #60)
- # SourceCodeBuilder:
- # - fnv1a_64_hex         : panjang, lowercase, konsistensi, vektor known
- # - buildManifestJson    : struktur JSON, escape karakter, files kosong
- # - buildSourceCode      : happy path, unselected excluded, content
- #                          identik dengan disk, empty selection,
- #                          error input kosong, cancel flag
- #
- # Tanpa FLTK, tanpa jaringan, tanpa subprocess, tanpa git.
- # Memakai temp directory sebagai fixture (RAII, auto-cleanup).
- #------------------------------------------------------------------
- set(FRANS_CONTEXT_TEST_SOURCES
-     tests/context/source_code_builder_tests.cpp
-     src/application/context/SourceCodeBuilder.cpp
-     src/application/context/ContextSelector.cpp
-     src/application/ingest/MarkdownRenderer.cpp
-     src/application/ingest/FileCollector.cpp
-     src/application/ai/GeminiClient.cpp
-     src/application/ai/ApiKeyProvider.cpp
-     src/application/ai/GeminiSchema.cpp
-     src/infrastructure/fs/SandboxedFileSystem.cpp
-     src/infrastructure/http/CurlTransport.cpp
- )
- if(WIN32)
-     list(APPEND FRANS_CONTEXT_TEST_SOURCES
-         src/infrastructure/system/ProcessExecutor_win32.cpp)
- else()
-     list(APPEND FRANS_CONTEXT_TEST_SOURCES
-         src/infrastructure/system/ProcessExecutor_posix.cpp)
- endif()
- add_executable(frans_context_tests ${FRANS_CONTEXT_TEST_SOURCES})
- target_include_directories(frans_context_tests PRIVATE
-     ${CMAKE_CURRENT_SOURCE_DIR}/src
-     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
- )
- target_link_libraries(frans_context_tests PRIVATE
-     Threads::Threads
-     ${FRANS_PLATFORM_LIBS}
-     frans_warnings
- )
- if(FRANS_PLATFORM_DEFS)
-     target_compile_definitions(frans_context_tests PRIVATE ${FRANS_PLATFORM_DEFS})
- endif()
- add_test(NAME source_code_builder_tests COMMAND frans_context_tests)
- #------------------------------------------------------------------
- # frans_git_facade_tests  (Fase D #67 + #68)
- # GitFacade:
- # - parseStatusPorcelain   : parse output git status --porcelain=v1 -b
- # - suggestCommitMessage   : generate commit message suggestion
- # - status/addAll/commit/push : operasi git via ProcessExecutor
- #
- # Tanpa FLTK, tanpa jaringan, tanpa git binary (untuk pure tests).
- # Operasi git memerlukan ProcessExecutor (untuk runCommand).
- #------------------------------------------------------------------
- set(FRANS_GIT_FACADE_TEST_SOURCES
-     tests/git/GitFacadeTest.cpp
-     src/application/git/GitFacade.cpp
- )
- # Fase D #68: GitFacade memanggil runCommand() dari ProcessExecutor,
- # jadi kita perlu link implementasi ProcessExecutor agar tidak error linker.
- if(WIN32)
-     list(APPEND FRANS_GIT_FACADE_TEST_SOURCES
-         src/infrastructure/system/ProcessExecutor_win32.cpp)
- else()
-     list(APPEND FRANS_GIT_FACADE_TEST_SOURCES
-         src/infrastructure/system/ProcessExecutor_posix.cpp)
- endif()
- add_executable(frans_git_facade_tests ${FRANS_GIT_FACADE_TEST_SOURCES})
- target_include_directories(frans_git_facade_tests PRIVATE
-     ${CMAKE_CURRENT_SOURCE_DIR}/src
- )
- target_link_libraries(frans_git_facade_tests PRIVATE
-     Threads::Threads
-     ${FRANS_PLATFORM_LIBS}
-     frans_warnings
- )
- if(FRANS_PLATFORM_DEFS)
-     target_compile_definitions(frans_git_facade_tests PRIVATE ${FRANS_PLATFORM_DEFS})
- endif()
- add_test(NAME git_facade_tests COMMAND frans_git_facade_tests)
+    enable_testing()
+
+    #------------------------------------------------------------------
+    # frans_scenarios
+    #
+    # Runner test scenario untuk Manual Import + Danger Check + Sandbox
+    # + error parser (traceback frame picking) + PromptGenerator (#42)
+    # + FileCollector (#46) + MarkdownRenderer (#48).
+    #
+    #   frans_scenarios              -> jalankan semua scenario
+    #   frans_scenarios --list       -> daftar nama scenario
+    #   frans_scenarios --dump NAME  -> print scenario (paste ke GUI)
+    #------------------------------------------------------------------
+    set(FRANS_SCENARIO_SOURCES
+        tests/ScenarioTest.cpp
+        src/application/import/MultiFileParser.cpp
+        src/application/safety/DangerCheckHandler.cpp
+        src/infrastructure/fs/SandboxedFileSystem.cpp
+        src/application/build_runner/BuildSystems/StandaloneBuildSystem.cpp
+        src/application/prompt/PromptGenerator.cpp
+        # Fase B #46: FileCollector + ProcessExecutor (untuk git ls-files fallback)
+        src/application/ingest/FileCollector.cpp
+        # Fase B #48: MarkdownRenderer (murni, tanpa I/O)
+        src/application/ingest/MarkdownRenderer.cpp
+    )
+
+    if(WIN32)
+        list(APPEND FRANS_SCENARIO_SOURCES
+            src/infrastructure/system/ProcessExecutor_win32.cpp)
+    else()
+        list(APPEND FRANS_SCENARIO_SOURCES
+            src/infrastructure/system/ProcessExecutor_posix.cpp)
+    endif()
+
+    add_executable(frans_scenarios ${FRANS_SCENARIO_SOURCES})
+    target_include_directories(frans_scenarios PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(frans_scenarios PRIVATE
+        Threads::Threads
+        ${FRANS_PLATFORM_LIBS}
+        frans_warnings
+    )
+    if(FRANS_PLATFORM_DEFS)
+        target_compile_definitions(frans_scenarios PRIVATE ${FRANS_PLATFORM_DEFS})
+    endif()
+    add_test(NAME scenario_tests COMMAND frans_scenarios)
+
+    #------------------------------------------------------------------
+    # frans_session_tests  (Fase A #44 + #45)
+    #
+    # Test ringan, TANPA FLTK dan TANPA ProsesExecutor:
+    #   - summarizeBuildError()  : isi ringkasan error per phase
+    #   - wasCancelledByUser()   : deteksi cancel
+    #   - SessionState           : aturan publish / clear / skip-cancel
+    #   - integrasi ke PromptGenerator (blok ERROR)
+    #
+    # Hanya 3 file .cpp -> compile cepat di mesin lama.
+    #------------------------------------------------------------------
+    add_executable(frans_session_tests
+        tests/SessionStateTest.cpp
+        src/application/build_runner/BuildErrorSummary.cpp
+        src/application/prompt/PromptGenerator.cpp
+    )
+    target_include_directories(frans_session_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(frans_session_tests PRIVATE
+        frans_warnings
+    )
+    add_test(NAME session_state_tests COMMAND frans_session_tests)
+
+    #------------------------------------------------------------------
+    # frans_apikey_tests  (Fase C #54)
+    #
+    # ApiKeyProvider: env -> file kunci -> default ~/.gemini/api_key,
+    # trim/BOM/CRLF, izin file longgar, masking 4 karakter terakhir,
+    # dan pastikan diagnostik tidak membocorkan key.
+    #
+    # Test memakai HOME palsu di direktori temp; file kunci asli pengguna
+    # tidak disentuh. Tanpa FLTK, tanpa jaringan, tanpa subprocess.
+    #------------------------------------------------------------------
+    add_executable(frans_apikey_tests
+        tests/ApiKeyProviderTest.cpp
+        src/application/ai/ApiKeyProvider.cpp
+    )
+    target_include_directories(frans_apikey_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(frans_apikey_tests PRIVATE
+        frans_warnings
+    )
+    add_test(NAME apikey_provider_tests COMMAND frans_apikey_tests)
+
+    #------------------------------------------------------------------
+    # frans_gemini_schema_tests  (Fase C #57)
+    #
+    # GeminiSchema: verifikasi struktur JSON schema untuk response Gemini
+    # dan file prompt gemini_selector_prompt.txt ada serta valid.
+    #
+    # Tanpa FLTK, tanpa jaringan, tanpa subprocess.
+    #------------------------------------------------------------------
+    add_executable(frans_gemini_schema_tests
+        tests/GeminiSchemaTest.cpp
+        src/application/ai/GeminiSchema.cpp
+    )
+    target_include_directories(frans_gemini_schema_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    )
+    target_link_libraries(frans_gemini_schema_tests PRIVATE
+        frans_warnings
+    )
+
+    # Copy config files ke build directory agar test bisa akses
+    add_custom_command(TARGET frans_gemini_schema_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/config
+            ${CMAKE_CURRENT_BINARY_DIR}/config
+        COMMENT "Copying config files for gemini schema tests"
+    )
+    add_test(NAME gemini_schema_tests COMMAND frans_gemini_schema_tests)
+
+    #------------------------------------------------------------------
+    # frans_context_tests  (Fase C #60)
+    #
+    # SourceCodeBuilder:
+    #   - fnv1a_64_hex         : panjang, lowercase, konsistensi, vektor known
+    #   - buildManifestJson    : struktur JSON, escape karakter, files kosong
+    #   - buildSourceCode      : happy path, unselected excluded, content
+    #                           identik dengan disk, empty selection,
+    #                           error input kosong, cancel flag
+    #
+    # Tanpa FLTK, tanpa jaringan, tanpa subprocess, tanpa git.
+    # Memakai temp directory sebagai fixture (RAII, auto-cleanup).
+    #------------------------------------------------------------------
+    set(FRANS_CONTEXT_TEST_SOURCES
+        tests/context/source_code_builder_tests.cpp
+        src/application/context/SourceCodeBuilder.cpp
+        src/application/context/ContextSelector.cpp
+        src/application/ingest/MarkdownRenderer.cpp
+        src/application/ingest/FileCollector.cpp
+        src/application/ai/GeminiClient.cpp
+        src/application/ai/ApiKeyProvider.cpp
+        src/application/ai/GeminiSchema.cpp
+        src/infrastructure/fs/SandboxedFileSystem.cpp
+        src/infrastructure/http/CurlTransport.cpp
+    )
+
+    if(WIN32)
+        list(APPEND FRANS_CONTEXT_TEST_SOURCES
+            src/infrastructure/system/ProcessExecutor_win32.cpp)
+    else()
+        list(APPEND FRANS_CONTEXT_TEST_SOURCES
+            src/infrastructure/system/ProcessExecutor_posix.cpp)
+    endif()
+
+    add_executable(frans_context_tests ${FRANS_CONTEXT_TEST_SOURCES})
+    target_include_directories(frans_context_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    )
+    target_link_libraries(frans_context_tests PRIVATE
+        Threads::Threads
+        ${FRANS_PLATFORM_LIBS}
+        frans_warnings
+    )
+    if(FRANS_PLATFORM_DEFS)
+        target_compile_definitions(frans_context_tests PRIVATE ${FRANS_PLATFORM_DEFS})
+    endif()
+    add_test(NAME source_code_builder_tests COMMAND frans_context_tests)
+
+    #------------------------------------------------------------------
+    # frans_git_facade_tests  (Fase D #67 + #68)
+    #
+    # GitFacade:
+    #   - parseStatusPorcelain   : parse output git status --porcelain=v1 -b
+    #   - suggestCommitMessage   : generate commit message suggestion
+    #   - status/addAll/commit/push : operasi git via ProcessExecutor
+    #
+    # Tanpa FLTK, tanpa jaringan, tanpa git binary (untuk pure tests).
+    # Operasi git memerlukan ProcessExecutor (untuk runCommand).
+    #------------------------------------------------------------------
+    set(FRANS_GIT_FACADE_TEST_SOURCES
+        tests/git/GitFacadeTest.cpp
+        src/application/git/GitFacade.cpp
+    )
+
+    # Fase D #68: GitFacade memanggil runCommand() dari ProcessExecutor,
+    # jadi kita perlu link implementasi ProcessExecutor agar tidak error linker.
+    if(WIN32)
+        list(APPEND FRANS_GIT_FACADE_TEST_SOURCES
+            src/infrastructure/system/ProcessExecutor_win32.cpp)
+    else()
+        list(APPEND FRANS_GIT_FACADE_TEST_SOURCES
+            src/infrastructure/system/ProcessExecutor_posix.cpp)
+    endif()
+
+    add_executable(frans_git_facade_tests ${FRANS_GIT_FACADE_TEST_SOURCES})
+    target_include_directories(frans_git_facade_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(frans_git_facade_tests PRIVATE
+        Threads::Threads
+        ${FRANS_PLATFORM_LIBS}
+        frans_warnings
+    )
+    if(FRANS_PLATFORM_DEFS)
+        target_compile_definitions(frans_git_facade_tests PRIVATE ${FRANS_PLATFORM_DEFS})
+    endif()
+    add_test(NAME git_facade_tests COMMAND frans_git_facade_tests)
+
+    #------------------------------------------------------------------
+    # frans_danger_git_tests  (Fase D #69)
+    #
+    # DangerCheckHandler: pola git berbahaya (push --force, reset --hard,
+    # clean -f, checkout ., restore ., config credential).
+    #
+    # Tanpa FLTK, tanpa jaringan, tanpa git binary.
+    # Hanya test logika pattern matching.
+    #------------------------------------------------------------------
+    add_executable(frans_danger_git_tests
+        tests/git/DangerCheckGitTest.cpp
+        src/application/safety/DangerCheckHandler.cpp
+    )
+    target_include_directories(frans_danger_git_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(frans_danger_git_tests PRIVATE
+        frans_warnings
+    )
+    add_test(NAME danger_git_tests COMMAND frans_danger_git_tests)
+
 endif()
 ================================================
-FILE: src/application/safety/DangerCheckHandler.cpp
+FILE: src/ui/PromptDialog.cpp
 ================================================
-#include "application/safety/DangerCheckHandler.h"
-
+// src/ui/PromptDialog.cpp
+#include "ui/PromptDialog.h"
+#include "application/prompt/PromptGenerator.h"
+#include "application/ai/ApiKeyProvider.h"
+#include "application/ai/GeminiClient.h"
+#include "application/context/ContextSelector.h"
+#include "application/context/SourceCodeBuilder.h"
+#include "infrastructure/http/CurlTransport.h"
+#include "infrastructure/fs/SandboxedFileSystem.h"
+#include <FL/Fl.H>
+#include <FL/Fl_Box.H>
+#include <FL/Fl_Button.H>
+#include <FL/Fl_Check_Browser.H>
+#include <FL/Fl_File_Chooser.H>
+#include <FL/Fl_Text_Buffer.H>
+#include <FL/Fl_Text_Display.H>
+#include <FL/Fl_Text_Editor.H>
+#include <FL/Fl_Window.H>
+#include <FL/fl_ask.H>
+#include <FL/filename.H>
+#include <nlohmann/json.hpp>
 #include <algorithm>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
+#include <cctype>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <string>
 
-namespace frans::application {
+namespace frans::ui {
 
 namespace {
 
-const std::unordered_map<std::string, DangerVerdict>& pythonPatterns() {
-    static const std::unordered_map<std::string, DangerVerdict> kPatterns = {
-        // Shell & subprocess
-        {"os.system",                DangerVerdict::NeedsConfirm},
-        {"os.popen",                 DangerVerdict::NeedsConfirm},
-        {"os.spawn",                 DangerVerdict::NeedsConfirm},
-        {"os.exec",                  DangerVerdict::NeedsConfirm},
-        {"os.fork",                  DangerVerdict::NeedsConfirm},
-        {"subprocess.",              DangerVerdict::NeedsConfirm},
+constexpr int kW      = 720;
+constexpr int kH      = 850;
+constexpr int kPadX   = 15;
+constexpr int kInnerW = kW - 2 * kPadX;
+constexpr int kBtnH   = 28;
+constexpr int kRowGap = 6;
 
-        // Dynamic code
-        {"eval(",                    DangerVerdict::NeedsConfirm},
-        {"exec(",                    DangerVerdict::NeedsConfirm},
-        {"__import__(",              DangerVerdict::NeedsConfirm},
-        {"pickle.loads",             DangerVerdict::NeedsConfirm},
-        {"marshal.loads",            DangerVerdict::NeedsConfirm},
-
-        // Filesystem destruction
-        {"shutil.rmtree",            DangerVerdict::NeedsConfirm},
-        {"os.removedirs",            DangerVerdict::NeedsConfirm},
-        {"os.remove(",               DangerVerdict::NeedsConfirm},
-        {"os.unlink(",               DangerVerdict::NeedsConfirm},
-        {"os.rmdir(",                DangerVerdict::NeedsConfirm},
-        {"os.truncate(",             DangerVerdict::NeedsConfirm},
-
-        // Network
-        {"socket.socket",            DangerVerdict::NeedsConfirm},
-        {"socket.create_connection", DangerVerdict::NeedsConfirm},
-        {"urllib.request",           DangerVerdict::NeedsConfirm},
-        {"requests.get",             DangerVerdict::NeedsConfirm},
-        {"requests.post",            DangerVerdict::NeedsConfirm},
-        {"http.client",              DangerVerdict::NeedsConfirm},
-        {"ftplib.",                  DangerVerdict::NeedsConfirm},
-        {"smtplib.",                 DangerVerdict::NeedsConfirm},
-    };
-    return kPatterns;
+// ---------------------------------------------------------------------------
+// Helper: Resolve project root dengan fallback.
+// ---------------------------------------------------------------------------
+std::string resolveProjectRoot(SessionState* session,
+                               const frans::config::AppConfig& cfg)
+{
+    if (session && !session->last_project_root.empty()) {
+        return session->last_project_root;
+    }
+    if (!cfg.default_project_root.empty()) {
+        std::fprintf(stderr,
+                     "[frans][prompt_dialog] session->last_project_root kosong, "
+                     "fallback ke default_project_root: %s\n",
+                     cfg.default_project_root.c_str());
+        std::fflush(stderr);
+        return cfg.default_project_root;
+    }
+    return "";
 }
 
-// Path sistem Linux kritis -> Blocked.
-const std::vector<std::string>& blockedLinuxPaths() {
-    static const std::vector<std::string> kPaths = {
-        "/etc/passwd",
-        "/etc/shadow",
-        "/etc/sudoers",
-        "/etc/sudoers.d/",
-    };
-    return kPaths;
-}
-
-// Path sistem Windows kritis -> Blocked.
-const std::vector<std::string>& blockedWindowsPaths() {
-    static const std::vector<std::string> kPaths = {
-        "C:/Windows/System32/config/SAM",
-        "C:/Windows/System32/config/SECURITY",
-        "C:/Windows/System32/config/SYSTEM",
-        "C:/Windows/System32/drivers/etc/hosts",
-        "AppData/Local/Microsoft/Credentials",
-    };
-    return kPaths;
-}
-
-// Prefix path yang mencurigakan -> NeedsConfirm.
-const std::vector<std::string>& suspiciousPathPrefixes() {
-    static const std::vector<std::string> kPrefixes = {
-        "/etc/",
-        "/root/",
-        "/boot/",
-        "/sys/kernel/",
-        "/proc/sys/",
-    };
-    return kPrefixes;
-}
-
-// Base command berbahaya (Linux + Windows).
-const std::unordered_set<std::string>& dangerousBaseCommands() {
-    static const std::unordered_set<std::string> kCmds = {
-        // Linux
-        "rm", "dd", "mkfs", "mkfs.ext4", "mkfs.xfs", "mkfs.btrfs",
-        "shred", "wipefs", "fdisk", "parted", "mkswap", "swapoff",
-        "swapon", "reboot", "shutdown", "poweroff", "halt", "init",
-        "chown",
-        // Windows
-        "format", "diskpart", "reg", "shutdown.exe", "taskkill",
-    };
-    return kCmds;
-}
-
-std::string basename(const std::string& path) {
-    const auto pos = path.find_last_of("/\\");
-    return pos == std::string::npos ? path : path.substr(pos + 1);
-}
-
-std::string joinPatterns(const std::vector<std::string>& v) {
-    std::string s;
-    for (std::size_t i = 0; i < v.size(); ++i) {
-        if (i) s += ", ";
-        s += "'" + v[i] + "'";
+// ---------------------------------------------------------------------------
+// Helper: Normalisasi nama model Gemini.
+// ---------------------------------------------------------------------------
+std::string normalizeModelName(const std::string& raw) {
+    std::string s = raw;
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))  s.pop_back();
+    const std::string prefix = "models/";
+    if (s.size() > prefix.size() &&
+        s.compare(0, prefix.size(), prefix) == 0) {
+        s = s.substr(prefix.size());
     }
     return s;
 }
 
+// ---------------------------------------------------------------------------
+// Helper: Deteksi apakah error message mengindikasikan "model tidak ditemukan".
+// ---------------------------------------------------------------------------
+bool isModelNotFoundError(const std::string& error) {
+    std::string lower = error;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    return lower.find("model") != std::string::npos &&
+           (lower.find("not found") != std::string::npos ||
+            lower.find("tidak ditemukan") != std::string::npos ||
+            lower.find("404") != std::string::npos ||
+            lower.find("does not exist") != std::string::npos ||
+            lower.find("invalid model") != std::string::npos ||
+            lower.find("modelnotfound") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Helper: Format timestamp ISO-like: "2026-11-15 03:42".
+// ---------------------------------------------------------------------------
+std::string formatTimestampNow() {
+    auto now = std::chrono::system_clock::now();
+    auto time = std::chrono::system_clock::to_time_t(now);
+    std::tm tm = *std::localtime(&time);
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%d %H:%M");
+    return oss.str();
+}
+
+// ---------------------------------------------------------------------------
+// Helper: Cari model yang namanya paling mirip dengan target.
+// ---------------------------------------------------------------------------
+std::string findSimilarModel(const std::string& target,
+                             const std::vector<frans::application::ModelInfo>& models,
+                             int max_suggestions = 5) {
+    std::string target_lower = target;
+    std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+
+    struct Scored {
+        std::string name;
+        int score = 0;
+    };
+    std::vector<Scored> scored;
+    scored.reserve(models.size());
+
+    for (const auto& m : models) {
+        std::string name = normalizeModelName(m.name);
+        std::string name_lower = name;
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+
+        int score = 0;
+        std::size_t common = 0;
+        while (common < target_lower.size() && common < name_lower.size() &&
+               target_lower[common] == name_lower[common]) {
+            ++common;
+        }
+        score += static_cast<int>(common) * 2;
+
+        if (name_lower.find(target_lower) != std::string::npos ||
+            target_lower.find(name_lower) != std::string::npos) {
+            score += 20;
+        }
+
+        int len_diff = std::abs(static_cast<int>(name_lower.size()) -
+                                static_cast<int>(target_lower.size()));
+        if (len_diff < 5) score += 5;
+
+        if (score > 0) {
+            scored.push_back({name, score});
+        }
+    }
+
+    std::sort(scored.begin(), scored.end(),
+              [](const Scored& a, const Scored& b) { return a.score > b.score; });
+
+    std::ostringstream oss;
+    int count = 0;
+    for (const auto& s : scored) {
+        if (count >= max_suggestions) break;
+        oss << "  - " << s.name << "\n";
+        ++count;
+    }
+    return oss.str();
+}
+
+std::string readFileContents(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return {};
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+void showScrollableMessage(const char* title, const std::string& message) {
+    constexpr int dlg_w = 650;
+    constexpr int dlg_h = 500;
+    constexpr int pad   = 10;
+    constexpr int btn_w = 80;
+    constexpr int btn_h = 30;
+
+    Fl_Window* win = new Fl_Window(dlg_w, dlg_h, title);
+    win->set_modal();
+    win->begin();
+
+    Fl_Text_Display* display = new Fl_Text_Display(
+        pad, pad, dlg_w - 2 * pad, dlg_h - 2 * pad - btn_h - pad);
+    Fl_Text_Buffer* buf = new Fl_Text_Buffer();
+    display->buffer(buf);
+    display->textfont(FL_COURIER);
+    display->textsize(11);
+    display->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
+    display->color(FL_WHITE);
+    buf->text(message.c_str());
+
+    Fl_Button* ok_btn = new Fl_Button(
+        dlg_w - pad - btn_w, dlg_h - pad - btn_h, btn_w, btn_h, "OK");
+    ok_btn->callback([](Fl_Widget* w, void*) {
+        if (Fl_Window* win = w ? w->window() : nullptr) {
+            win->hide();
+        }
+    });
+    ok_btn->take_focus();
+
+    win->end();
+    win->resizable(display);
+    win->show();
+
+    while (win->shown()) Fl::wait();
+
+    delete buf;
+    delete win;
+}
+
+std::string formatBytesHelper(std::size_t bytes) {
+    if (bytes < 1024) return std::to_string(bytes) + " B";
+    if (bytes < 1024 * 1024) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.1f KB", bytes / 1024.0);
+        return buf;
+    }
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.1f MB", bytes / (1024.0 * 1024.0));
+    return buf;
+}
+
 } // namespace
 
-DangerCheckResult DangerCheckHandler::checkCode(
-    const std::string& code,
-    const std::string& language) const
+// ===========================================================================
+// Public
+// ===========================================================================
+void PromptDialog::show(SessionState* session,
+                        const frans::config::AppConfig& cfg)
 {
-    DangerCheckResult r;
-
-    // Saat ini pattern hanya untuk Python.
-    if (language != "python") return r;
-
-    bool any_blocked = false;
-    bool any_confirm = false;
-
-    // Linux blocked paths.
-    for (const auto& needle : blockedLinuxPaths()) {
-        if (code.find(needle) != std::string::npos) {
-            r.matched_patterns.push_back(needle);
-            any_blocked = true;
-        }
-    }
-
-    // Windows blocked paths.
-    for (const auto& needle : blockedWindowsPaths()) {
-        if (code.find(needle) != std::string::npos) {
-            r.matched_patterns.push_back(needle);
-            any_blocked = true;
-        }
-    }
-
-    // Suspicious path prefixes.
-    for (const auto& pfx : suspiciousPathPrefixes()) {
-        const std::string dq = "\"" + pfx;
-        const std::string sq = "'"  + pfx;
-        if (code.find(dq) != std::string::npos) {
-            r.matched_patterns.push_back(dq + "...");
-            any_confirm = true;
-        }
-        if (code.find(sq) != std::string::npos) {
-            r.matched_patterns.push_back(sq + "...");
-            any_confirm = true;
-        }
-    }
-
-    // Pattern API.
-    for (const auto& [needle, verdict] : pythonPatterns()) {
-        if (code.find(needle) == std::string::npos) continue;
-        r.matched_patterns.push_back(needle);
-        if (verdict == DangerVerdict::Blocked)                any_blocked = true;
-        else if (verdict == DangerVerdict::NeedsConfirm)      any_confirm = true;
-    }
-
-    std::sort(r.matched_patterns.begin(), r.matched_patterns.end());
-    r.matched_patterns.erase(
-        std::unique(r.matched_patterns.begin(), r.matched_patterns.end()),
-        r.matched_patterns.end());
-
-    if (r.matched_patterns.empty()) {
-        r.verdict = DangerVerdict::Safe;
-        return r;
-    }
-
-    if (any_blocked) {
-        r.verdict = DangerVerdict::Blocked;
-        r.explanation = "Kode mengandung referensi ke path sistem kritis: "
-                      + joinPatterns(r.matched_patterns);
-    } else if (any_confirm) {
-        r.verdict = DangerVerdict::NeedsConfirm;
-        r.explanation = "Kode mengandung pola berisiko: "
-                      + joinPatterns(r.matched_patterns);
-    }
-    return r;
+    PromptDialog* dlg = new PromptDialog(session, cfg);
+    dlg->win_->set_modal();
+    dlg->win_->show();
+    while (dlg->win_->shown()) Fl::wait();
+    delete dlg;
 }
 
-DangerCheckResult DangerCheckHandler::checkCommand(
-    const std::vector<std::string>& argv) const
+PromptDialog::PromptDialog(SessionState* session,
+                           const frans::config::AppConfig& cfg)
+    : session_(session), cfg_(cfg)
 {
-    DangerCheckResult r;
-    if (argv.empty()) return r;
+    buildUI();
+    updateKeyStatus();
+    updateFreshnessDisplay();
+}
 
-    const std::string base = basename(argv[0]);
+PromptDialog::~PromptDialog() {
+    delete request_buf_;     request_buf_    = nullptr;
+    delete error_buf_;       error_buf_      = nullptr;
+    delete preview_buf_;     preview_buf_    = nullptr;
 
-    if (dangerousBaseCommands().count(base) > 0) {
-        r.matched_patterns.push_back("cmd:" + base);
-        r.verdict = DangerVerdict::NeedsConfirm;
+    if (list_models_worker_running_.load()) {
+        list_models_worker_cancel_.store(true);
     }
+    if (list_models_worker_thread_.joinable()) list_models_worker_thread_.join();
 
-    for (const auto& a : argv) {
-        if ((a == "-rf" || a == "-fr" || a == "--no-preserve-root")
-            && base == "rm")
-        {
-            r.matched_patterns.push_back("flag:" + a);
-            r.verdict = DangerVerdict::NeedsConfirm;
-        }
-
-        for (const auto& blocked : blockedLinuxPaths()) {
-            if (a.find(blocked) != std::string::npos) {
-                r.matched_patterns.push_back("arg:" + a);
-                r.verdict = DangerVerdict::Blocked;
-                r.explanation = "Argumen menyentuh path sistem kritis: '"
-                              + a + "'";
-                return r;
-            }
-        }
-        for (const auto& blocked : blockedWindowsPaths()) {
-            if (a.find(blocked) != std::string::npos) {
-                r.matched_patterns.push_back("arg:" + a);
-                r.verdict = DangerVerdict::Blocked;
-                r.explanation = "Argumen menyentuh path sistem kritis: '"
-                              + a + "'";
-                return r;
-            }
-        }
+    if (select_worker_running_.load()) {
+        select_worker_cancel_.store(true);
     }
+    if (select_worker_thread_.joinable()) select_worker_thread_.join();
 
-    if (!r.matched_patterns.empty()
-        && r.verdict == DangerVerdict::NeedsConfirm)
+    if (build_worker_thread_.joinable()) build_worker_thread_.join();
+
+    if (win_) {
+        if (win_->shown()) win_->hide();
+        delete win_;
+        win_ = nullptr;
+    }
+}
+
+// ===========================================================================
+// UI construction
+// ===========================================================================
+void PromptDialog::buildUI() {
+    win_ = new Fl_Window(kW, kH, "Prompt Generator");
+    win_->begin();
+    int y = kPadX;
+
     {
-        r.explanation = "Perintah berisiko: "
-                      + joinPatterns(r.matched_patterns);
+        Fl_Box* t = new Fl_Box(kPadX, y, kInnerW, 20, "1. Permintaan");
+        t->labelfont(FL_BOLD);
+        t->labelsize(13);
+        t->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        y += 22;
     }
-    return r;
+    {
+        Fl_Box* l = new Fl_Box(kPadX, y, kInnerW, 16,
+                               "Tulis permintaan Anda untuk AI (wajib):");
+        l->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        l->labelsize(11);
+        l->labelcolor(FL_DARK_BLUE);
+        y += 18;
+    }
+    {
+        const int editor_h = 100;
+        request_editor_ = new Fl_Text_Editor(kPadX, y, kInnerW, editor_h, nullptr);
+        request_buf_ = new Fl_Text_Buffer();
+        request_editor_->buffer(request_buf_);
+        request_editor_->textfont(FL_COURIER);
+        request_editor_->textsize(11);
+        request_editor_->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
+        request_editor_->color(FL_WHITE);
+        y += editor_h + kRowGap;
+    }
+
+    {
+        Fl_Box* l = new Fl_Box(kPadX, y, kInnerW - 180, 18, "Error output (opsional):");
+        l->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        l->labelsize(11);
+        l->labelcolor(FL_DARK_BLUE);
+        fetch_btn_ = new Fl_Button(kPadX + kInnerW - 170, y, 170, 20, "Ambil dari build terakhir");
+        fetch_btn_->callback(cbFetchLastError, this);
+        y += 22;
+    }
+    {
+        const int editor_h = 60;
+        error_editor_ = new Fl_Text_Editor(kPadX, y, kInnerW, editor_h, nullptr);
+        error_buf_ = new Fl_Text_Buffer();
+        error_editor_->buffer(error_buf_);
+        error_editor_->textfont(FL_COURIER);
+        error_editor_->textsize(10);
+        error_editor_->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
+        error_editor_->color(FL_WHITE);
+        y += editor_h + kRowGap;
+    }
+
+    {
+        Fl_Box* t = new Fl_Box(kPadX, y, 120, 20, "2. Pilih file");
+        t->labelfont(FL_BOLD);
+        t->labelsize(13);
+        t->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        select_btn_ = new Fl_Button(kPadX + 130, y, 180, 22, "Pilih File via Gemini");
+        select_btn_->callback(cbSelectFiles, this);
+        key_status_box_ = new Fl_Box(kPadX + 320, y, kInnerW - 320, 20, "");
+        key_status_box_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        key_status_box_->labelsize(10);
+        y += 24;
+    }
+    {
+        mode_box_ = new Fl_Box(kPadX, y, kInnerW - 200, 18, "Mode: - | Token: -");
+        mode_box_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        mode_box_->labelsize(10);
+        mode_box_->labelcolor(FL_DARK_GREEN);
+        test_conn_btn_ = new Fl_Button(kPadX + kInnerW - 190, y, 190, 20, "Tes Koneksi / Daftar Model");
+        test_conn_btn_->callback(cbTestConnection, this);
+        y += 22;
+    }
+    {
+        const int browser_h = 130;
+        file_browser_ = new Fl_Check_Browser(kPadX, y, kInnerW, browser_h);
+        file_browser_->callback(cbBrowserChanged, this);
+        file_browser_->textfont(FL_COURIER);
+        file_browser_->textsize(10);
+        y += browser_h + kRowGap;
+    }
+    {
+        total_box_ = new Fl_Box(kPadX, y, kInnerW - 280, 20, "Total terpilih: 0 file, 0 B");
+        total_box_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        total_box_->labelsize(11);
+        add_manual_btn_ = new Fl_Button(kPadX + kInnerW - 270, y, 130, 22, "+ Tambah manual...");
+        add_manual_btn_->callback(cbAddManual, this);
+        cancel_select_btn_ = new Fl_Button(kPadX + kInnerW - 130, y, 130, 22, "Batal");
+        cancel_select_btn_->callback(cbCancelSelect, this);
+        cancel_select_btn_->deactivate();
+        y += 24 + kRowGap;
+    }
+
+    {
+        Fl_Box* t = new Fl_Box(kPadX, y, 140, 20, "3. SourceCode.md");
+        t->labelfont(FL_BOLD);
+        t->labelsize(13);
+        t->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        build_btn_ = new Fl_Button(kPadX + 150, y, 180, 22, "Bangun SourceCode.md");
+        build_btn_->callback(cbBuildSourceCode, this);
+        freshness_box_ = new Fl_Box(kPadX + 340, y, kInnerW - 340, 20, "Status: -");
+        freshness_box_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        freshness_box_->labelsize(11);
+        y += 24;
+    }
+    {
+        location_box_ = new Fl_Box(kPadX, y, kInnerW - 120, 18, "Lokasi: -");
+        location_box_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        location_box_->labelsize(10);
+        open_folder_btn_ = new Fl_Button(kPadX + kInnerW - 110, y, 110, 20, "Buka Folder");
+        open_folder_btn_->callback(cbOpenFolder, this);
+        open_folder_btn_->deactivate();
+        y += 22 + kRowGap;
+    }
+
+    {
+        status_box_ = new Fl_Box(kPadX, y, kInnerW, 22,
+                                 "Idle. Tulis permintaan lalu klik [Pilih File via Gemini].");
+        status_box_->box(FL_DOWN_BOX);
+        status_box_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        status_box_->labelsize(11);
+        y += 22 + kRowGap;
+    }
+
+    {
+        generate_btn_ = new Fl_Button(kPadX, y, 160, kBtnH, "Generate Prompt");
+        generate_btn_->callback(cbGenerate, this);
+        copy_btn_ = new Fl_Button(kPadX + 170, y, 100, kBtnH, "Copy");
+        copy_btn_->callback(cbCopy, this);
+        copy_btn_->deactivate();
+        Fl_Button* close_btn = new Fl_Button(kPadX + kInnerW - 100, y, 100, kBtnH, "Close");
+        close_btn->callback(cbClose, this);
+        y += kBtnH + kRowGap;
+    }
+
+    {
+        Fl_Box* l = new Fl_Box(kPadX, y, kInnerW, 16, "4. Preview Prompt (read-only):");
+        l->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+        l->labelsize(11);
+        l->labelcolor(FL_DARK_BLUE);
+        y += 18;
+    }
+    {
+        const int preview_h = kH - y - kPadX;
+        preview_display_ = new Fl_Text_Display(kPadX, y, kInnerW, preview_h > 60 ? preview_h : 60, nullptr);
+        preview_buf_ = new Fl_Text_Buffer();
+        preview_display_->buffer(preview_buf_);
+        preview_display_->textfont(FL_COURIER);
+        preview_display_->textsize(10);
+        preview_display_->wrap_mode(Fl_Text_Display::WRAP_AT_BOUNDS, 0);
+        preview_display_->color(FL_WHITE);
+    }
+
+    win_->end();
+    win_->resizable(preview_display_);
 }
 
-} // namespace frans::application
-================================================
-FILE: src/application/safety/DangerCheckHandler.h
-================================================
-#pragma once
+// ===========================================================================
+// Helper methods
+// ===========================================================================
+std::string PromptDialog::formatBytes(std::size_t bytes) {
+    return formatBytesHelper(bytes);
+}
 
-#include <string>
-#include <vector>
+std::string PromptDialog::computeRequestHash() {
+    if (!request_buf_) return "";
+    const char* text = request_buf_->text();
+    std::string req = text ? text : "";
+    return frans::application::fnv1a_64_hex(req);
+}
 
-namespace frans::application {
+PromptDialog::Freshness PromptDialog::checkFreshness() {
+    if (last_build_result_.manifest_path.empty()) return Freshness::NoFile;
 
-enum class DangerVerdict {
-    Safe,
-    NeedsConfirm,
-    Blocked,
-};
+    std::ifstream f(last_build_result_.manifest_path);
+    if (!f) return Freshness::NoFile;
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    std::string manifest_text = ss.str();
 
-struct DangerCheckResult {
-    DangerVerdict             verdict = DangerVerdict::Safe;
-    std::vector<std::string>  matched_patterns;
-    std::string               explanation;
+    try {
+        auto manifest = nlohmann::json::parse(manifest_text);
 
-    bool is_safe()       const { return verdict == DangerVerdict::Safe; }
-    bool needs_confirm() const { return verdict == DangerVerdict::NeedsConfirm; }
-    bool is_blocked()    const { return verdict == DangerVerdict::Blocked; }
-};
+        std::string manifest_request_hash = manifest.value("request_hash", "");
+        std::string current_hash = computeRequestHash();
+        if (manifest_request_hash != current_hash) return Freshness::Stale;
 
-// Deteksi pola berbahaya di source code dan argv command.
-//
-// Konservatif: pola umum (open, print, import os) TIDAK ditandai.
-// Pola berisiko (subprocess, socket) -> NeedsConfirm.
-// Path sistem kritis -> Blocked.
-//
-// Pattern list multi-bahasa: Python + Windows (SAM, hosts, reg, dll).
-class DangerCheckHandler {
-public:
-    DangerCheckResult checkCode(const std::string& code,
-                                const std::string& language) const;
+        auto files = manifest["files"];
+        if (!files.is_array()) return Freshness::Stale;
 
-    DangerCheckResult checkCommand(const std::vector<std::string>& argv) const;
-};
+        std::string project_root = resolveProjectRoot(session_, cfg_);
+        if (project_root.empty()) return Freshness::Stale;
 
-} // namespace frans::application
-================================================
-FILE: tests/ScenarioTest.cpp
-================================================
-// tests/ScenarioTest.cpp
-//
-// Runner test scenario untuk Manual Import + Danger Check + Sandbox
-// + error parser (traceback frame picking) + PromptGenerator (Fase A #42)
-// + FileCollector (Fase B #46) + MarkdownRenderer (Fase B #48).
-//
-// Mode:
-//   frans_scenarios              -> jalankan semua scenario, print PASS/FAIL
-//   frans_scenarios --list       -> daftar nama scenario
-//   frans_scenarios --dump NAME  -> print isi scenario (paste ke GUI)
-//
-// Scenario yang di-cover (sesuai Blueprint §9.2 + §9.3 + Fase B #46/#48):
-//   §9.2:
-//     01 python-standalone        -> #16
-//     02 cmake-multifile          -> regression
-//     03 path-escape              -> #18 (parser)
-//     04 danger-python            -> #19
-//     05 ai-browser-realistic     -> #17
-//     06 cancel-sleep             -> #23 (manual via GUI)
-//   §9.3:
-//     07 npm-basic                -> #22
-//     08 npm-typescript           -> #22
-//     09 standalone-js            -> #22
-//   plus:
-//     sandbox-path-safety         -> #18 (sandbox)
-//     traceback-frame-picking     -> regression (anomali 1)
-//     prompt-generator            -> #42 (Fase A)
-//     prompt-format-rules         -> verifikasi aturan format output
-//     file-collector-basic        -> #46 (Fase B)
-//     markdown-renderer           -> #48 (Fase B)
-#include "application/import/MultiFileParser.h"
-#include "application/safety/DangerCheckHandler.h"
-#include "application/build_runner/BuildReport.h"
-#include "application/build_runner/ProjectInfo.h"
-#include "application/build_runner/BuildSystems/StandaloneBuildSystem.h"
-#include "application/prompt/PromptGenerator.h"
-#include "application/ingest/FileCollector.h"
-#include "application/ingest/MarkdownRenderer.h"
-#include "infrastructure/fs/SandboxedFileSystem.h"
-#include <algorithm>
-#include <cstdio>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <string>
-#include <system_error>
-#include <utility>
-#include <vector>
+        infrastructure::SandboxedFileSystem fs(project_root);
+        for (const auto& file_entry : files) {
+            std::string path = file_entry.value("path", "");
+            std::string manifest_hash = file_entry.value("hash", "");
+            if (path.empty() || manifest_hash.empty()) continue;
 
-namespace {
-using frans::application::parseModelOutput;
-using frans::application::BuildPhase;
-using frans::application::BuildSystemKind;
-using frans::application::CommandResult;
-using frans::application::DangerCheckHandler;
-using frans::application::DangerVerdict;
-using frans::application::PhaseResult;
-using frans::application::ProjectInfo;
-using frans::application::StandaloneBuildSystem;
-using frans::application::PromptInput;
-using frans::application::renderPrompt;
-using frans::application::defaultPromptTemplate;
-using frans::application::CollectedFile;
-using frans::application::CollectOptions;
-using frans::application::CollectResult;
-using frans::application::collectFiles;
-using frans::application::isSecretBasename;
-using frans::application::isExcludedPath;
-using frans::application::renderTree;
-using frans::application::renderFileBlock;
-using frans::application::renderMarkdown;
-using frans::application::RenderInput;
-using frans::application::RenderOptions;
-using frans::application::detectLanguageFromExtension;
-using frans::application::formatBytesHuman;
-using frans::domain::GeneratedFile;
+            std::string content = fs.readFile(path);
+            std::string current_hash_file = frans::application::fnv1a_64_hex(content);
+            if (current_hash_file != manifest_hash) return Freshness::Stale;
+        }
+        return Freshness::Fresh;
+    } catch (...) {
+        return Freshness::Stale;
+    }
+}
 
-// Hindari literal triple-backtick di source (bisa mengganggu tooling).
-// Placeholder "###F###" di-expand menjadi tiga backtick oleh expandFences().
-const std::string kFence            = "`" "`" "`";
-const std::string kFencePlaceholder = "###F###";
+// ===========================================================================
+// Update UI helpers
+// ===========================================================================
+void PromptDialog::updateKeyStatus() {
+    frans::application::ApiKeyOptions key_opt;
+    key_opt.key_file = cfg_.gemini_api_key_file;
+    auto key_result = frans::application::ApiKeyProvider::resolve(key_opt);
 
-std::string expandFences(const std::string& raw) {
-    std::string result;
-    result.reserve(raw.size() + 32);
-    std::size_t pos = 0;
-    while (pos < raw.size()) {
-        const std::size_t hit = raw.find(kFencePlaceholder, pos);
-        if (hit == std::string::npos) {
-            result.append(raw, pos, std::string::npos);
+    if (key_result.found()) {
+        std::string masked = frans::application::maskApiKey(key_result.key);
+        if (key_status_box_) {
+            std::string label = "key: " + masked + " | model: " + cfg_.gemini_model;
+            key_status_box_->copy_label(label.c_str());
+            key_status_box_->labelcolor(FL_DARK_GREEN);
+        }
+        if (select_btn_) select_btn_->activate();
+    } else {
+        if (key_status_box_) {
+            key_status_box_->copy_label("key: tidak ditemukan");
+            key_status_box_->labelcolor(FL_RED);
+        }
+        if (select_btn_) select_btn_->deactivate();
+    }
+}
+
+void PromptDialog::updateModeDisplay() {
+    if (!mode_box_) return;
+    if (last_selection_.files.empty()) {
+        mode_box_->copy_label("Mode: - | Token: -");
+        return;
+    }
+    std::string mode_str = last_selection_.mode.empty() ? "-" : last_selection_.mode;
+    std::string token_str = formatBytesHelper(last_selection_.est_tokens * 4) + " (~" +
+                            std::to_string(last_selection_.est_tokens) + " token)";
+    std::string label = "Mode: " + mode_str + " | Dikirim: " +
+                        formatBytesHelper(last_selection_.sent_bytes) + " | " + token_str;
+    mode_box_->copy_label(label.c_str());
+}
+
+void PromptDialog::updateBrowserFromSelection() {
+    if (!file_browser_) return;
+    file_browser_->clear();
+    for (const auto& entry : last_selection_.files) {
+        std::string prio = entry.priority;
+        if (prio.empty()) prio = "?";
+
+        std::string item = "[" + prio + "] " + entry.path +
+                           " (" + formatBytesHelper(entry.size_bytes) + ")";
+        if (!entry.reason.empty()) {
+            item += " - " + entry.reason;
+        }
+        file_browser_->add(item.c_str());
+        int idx = file_browser_->nitems();
+        file_browser_->checked(idx, entry.selected);
+    }
+    updateTotals();
+}
+
+void PromptDialog::updateTotals() {
+    if (!total_box_) return;
+    std::size_t total_files = 0;
+    std::size_t total_bytes = 0;
+    for (const auto& entry : last_selection_.files) {
+        if (entry.selected) {
+            ++total_files;
+            total_bytes += entry.size_bytes;
+        }
+    }
+    std::string label = "Total terpilih: " + std::to_string(total_files) +
+                        " file, " + formatBytesHelper(total_bytes);
+    total_box_->copy_label(label.c_str());
+}
+
+void PromptDialog::updateFreshnessDisplay() {
+    if (!freshness_box_) return;
+    Freshness fresh = checkFreshness();
+
+    switch (fresh) {
+        case Freshness::Fresh:
+            freshness_box_->copy_label("Status: SEGAR \xE2\x9C\x93");
+            freshness_box_->labelcolor(FL_DARK_GREEN);
+            has_fresh_source_code_ = true;
+            if (location_box_) {
+                std::string loc = "Lokasi: " + last_build_result_.source_code_path;
+                location_box_->copy_label(loc.c_str());
+            }
+            if (open_folder_btn_) open_folder_btn_->activate();
             break;
-        }
-        result.append(raw, pos, hit - pos);
-        result += kFence;
-        pos = hit + kFencePlaceholder.size();
+        case Freshness::Stale:
+            freshness_box_->copy_label("Status: BASI !");
+            freshness_box_->labelcolor(FL_RED);
+            has_fresh_source_code_ = false;
+            break;
+        case Freshness::NoFile:
+            freshness_box_->copy_label("Status: belum ada");
+            freshness_box_->labelcolor(FL_DARK3);
+            has_fresh_source_code_ = false;
+            if (location_box_) location_box_->copy_label("Lokasi: -");
+            if (open_folder_btn_) open_folder_btn_->deactivate();
+            break;
     }
-    return result;
 }
 
-enum class DangerExpect {
-    Any,
-    Safe,
-    NeedsConfirm,
-    Blocked,
-};
-
-struct FileExpect {
-    std::string  relative_path;
-    DangerExpect danger = DangerExpect::Any;
-};
-
-struct Scenario {
-    std::string             name;
-    std::string             description;
-    std::string             raw_input;          // pakai ###F### untuk fence
-    std::size_t             expected_file_count = 0;
-    bool                    expect_parse_error  = false;
-    std::vector<FileExpect> file_expects;
-};
-
-std::vector<Scenario> buildScenarios() {
-    std::vector<Scenario> v;
-
-    // ---- 01: Python standalone ----
-    {
-        Scenario s;
-        s.name = "python-standalone";
-        s.description = "Skrip Python tanpa marker build system.";
-        s.expected_file_count = 1;
-        s.raw_input = R"RAW(File: hello.py
-###F###python
-#!/usr/bin/env python3
-"""Contoh skrip Python standalone."""
-def greet(name: str) -> str:
-    return f"Halo, {name}!"
-def main() -> None:
-    print(greet("Dunia"))
-if __name__ == "__main__":
-    main()
-###F###
-)RAW";
-        s.file_expects.push_back({"hello.py", DangerExpect::Safe});
-        v.push_back(std::move(s));
-    }
-
-    // ---- 02: CMake multi-file (regression §9.1 #12) ----
-    {
-        Scenario s;
-        s.name = "cmake-multifile";
-        s.description = "CMakeLists.txt + src/main.cpp (2 file).";
-        s.expected_file_count = 2;
-        s.raw_input = R"RAW(File: CMakeLists.txt
-###F###cmake
-cmake_minimum_required(VERSION 3.16)
-project(demo LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-add_executable(demo src/main.cpp)
-enable_testing()
-add_test(NAME demo_run COMMAND demo)
-###F###
-File: src/main.cpp
-###F###cpp
-#include <iostream>
-int main() {
-    std::cout << "Halo dari demo\n";
-    return 0;
-}
-###F###
-)RAW";
-        s.file_expects.push_back({"CMakeLists.txt", DangerExpect::Safe});
-        s.file_expects.push_back({"src/main.cpp",   DangerExpect::Safe});
-        v.push_back(std::move(s));
-    }
-
-    // ---- 03: Path escape (parser accept, sandbox reject) ----
-    {
-        Scenario s;
-        s.name = "path-escape";
-        s.description = "File dengan '../' — parser accept, sandbox harus "
-                        "BLOCKED (lihat sandbox-path-safety).";
-        s.expected_file_count = 1;
-        s.raw_input = R"RAW(File: ../evil.py
-###F###python
-print("coba keluar sandbox")
-###F###
-)RAW";
-        s.file_expects.push_back({"../evil.py", DangerExpect::Safe});
-        v.push_back(std::move(s));
-    }
-
-    // ---- 04: Danger pattern Python ----
-    {
-        Scenario s;
-        s.name = "danger-python";
-        s.description = "os.system + shutil.rmtree — harus NeedsConfirm.";
-        s.expected_file_count = 1;
-        s.raw_input = R"RAW(File: cleanup.py
-###F###python
-import os
-import shutil
-def wipe(path):
-    os.system("rm -rf " + path)
-    shutil.rmtree(path)
-if __name__ == "__main__":
-    wipe("/tmp/scratch")
-###F###
-)RAW";
-        s.file_expects.push_back({"cleanup.py", DangerExpect::NeedsConfirm});
-        v.push_back(std::move(s));
-    }
-
-    // ---- 05: Output AI browser realistis ----
-    {
-        Scenario s;
-        s.name = "ai-browser-realistic";
-        s.description = "Output dengan prose + multi-file, seperti DeepSeek.";
-        s.expected_file_count = 2;
-        s.raw_input = R"RAW(Berikut adalah implementasi yang kamu minta.
-Saya buat dua file: satu module utility, satu entry point.
-File: utils.py
-###F###python
-"""Utility sederhana."""
-def tambah(a, b):
-    return a + b
-def kurang(a, b):
-    return a - b
-###F###
-File: app.py
-###F###python
-from utils import tambah, kurang
-def main():
-    print(tambah(2, 3))
-    print(kurang(10, 4))
-if __name__ == "__main__":
-    main()
-###F###
-Semoga membantu! Kalau ada error, kabari saya.
-)RAW";
-        s.file_expects.push_back({"utils.py", DangerExpect::Safe});
-        s.file_expects.push_back({"app.py",   DangerExpect::Safe});
-        v.push_back(std::move(s));
-    }
-
-    // ---- 06: Cancel test (§9.3 #23) — manual via GUI ----
-    {
-        Scenario s;
-        s.name = "cancel-sleep";
-        s.description = "Script Python sleep 60 detik. Untuk test Cancel "
-                        "button: paste, Write, Build, klik Cancel dalam "
-                        "2 detik, verify status CANCELLED.";
-        s.expected_file_count = 1;
-        s.raw_input = R"RAW(File: sleeper.py
-###F###python
-import time
-def main():
-    print("Mulai tidur 60 detik...", flush=True)
-    time.sleep(60)
-    print("Selesai tidur", flush=True)
-if __name__ == "__main__":
-    main()
-###F###
-)RAW";
-        s.file_expects.push_back({"sleeper.py", DangerExpect::Safe});
-        v.push_back(std::move(s));
-    }
-
-    // ---- 07: npm basic (§9.3 #22) ----
-    {
-        Scenario s;
-        s.name = "npm-basic";
-        s.description = "Project npm sederhana: package.json + src/index.js. "
-                        "Uji: npm install -> npm run build -> npm test.";
-        s.expected_file_count = 2;
-        s.raw_input = R"RAW(File: package.json
-###F###json
-{
-  "name": "demo-npm-basic",
-  "version": "1.0.0",
-  "private": true,
-  "scripts": {
-    "build": "node --check src/index.js",
-    "test": "node --check src/index.js"
-  }
-}
-###F###
-File: src/index.js
-###F###javascript
-function greet(name) {
-    return "Halo, " + name + "!";
-}
-console.log(greet("npm"));
-###F###
-)RAW";
-        s.file_expects.push_back({"package.json", DangerExpect::Safe});
-        s.file_expects.push_back({"src/index.js", DangerExpect::Safe});
-        v.push_back(std::move(s));
-    }
-
-    // ---- 08: npm TypeScript (§9.3 #22) ----
-    {
-        Scenario s;
-        s.name = "npm-typescript";
-        s.description = "Project npm dengan TypeScript. Uji: npm install "
-                        "(tarik tsc) -> tsc --noEmit via npm run build.";
-        s.expected_file_count = 3;
-        s.raw_input = R"RAW(File: package.json
-###F###json
-{
-  "name": "demo-npm-typescript",
-  "version": "1.0.0",
-  "private": true,
-  "scripts": {
-    "build": "tsc --noEmit",
-    "test": "tsc --noEmit"
-  },
-  "devDependencies": {
-    "typescript": "^5.4.0"
-  }
-}
-###F###
-File: tsconfig.json
-###F###json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "commonjs",
-    "strict": true,
-    "noEmit": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true
-  },
-  "include": ["src/**/*.ts"]
-}
-###F###
-File: src/index.ts
-###F###typescript
-function greet(name: string): string {
-    return "Halo, " + name + "!";
-}
-const msg: string = greet("TypeScript");
-console.log(msg);
-###F###
-)RAW";
-        s.file_expects.push_back({"package.json",  DangerExpect::Safe});
-        s.file_expects.push_back({"tsconfig.json", DangerExpect::Safe});
-        s.file_expects.push_back({"src/index.ts",  DangerExpect::Safe});
-        v.push_back(std::move(s));
-    }
-
-    // ---- 09: Standalone JavaScript (§9.3 #22) ----
-    {
-        Scenario s;
-        s.name = "standalone-js";
-        s.description = "JS tanpa package.json. Uji: node --check "
-                        "(build) + node hello.js (run).";
-        s.expected_file_count = 1;
-        s.raw_input = R"RAW(File: hello.js
-###F###javascript
-function greet(name) {
-    return "Halo, " + name + "!";
-}
-console.log(greet("Dunia"));
-###F###
-)RAW";
-        s.file_expects.push_back({"hello.js", DangerExpect::Safe});
-        v.push_back(std::move(s));
-    }
-
-    return v;
+void PromptDialog::setStatus(const std::string& msg, unsigned color) {
+    if (!status_box_) return;
+    status_box_->copy_label(msg.c_str());
+    status_box_->labelcolor(static_cast<Fl_Color>(color));
+    status_box_->redraw();
 }
 
-const char* dangerName(DangerVerdict v) {
-    switch (v) {
-        case DangerVerdict::Safe:         return "Safe";
-        case DangerVerdict::NeedsConfirm: return "NeedsConfirm";
-        case DangerVerdict::Blocked:      return "Blocked";
+// ===========================================================================
+// Actions
+// ===========================================================================
+std::string PromptDialog::loadTemplate() {
+    const std::string path = cfg_.prompt_template_path;
+    if (!path.empty()) {
+        std::string contents = readFileContents(path);
+        if (!contents.empty()) return contents;
     }
-    return "?";
+    return frans::application::defaultPromptTemplate();
 }
 
-bool dangerMatches(DangerVerdict actual, DangerExpect expected) {
-    if (expected == DangerExpect::Any) return true;
-    if (expected == DangerExpect::Safe         && actual == DangerVerdict::Safe)         return true;
-    if (expected == DangerExpect::NeedsConfirm && actual == DangerVerdict::NeedsConfirm) return true;
-    if (expected == DangerExpect::Blocked      && actual == DangerVerdict::Blocked)      return true;
-    return false;
-}
-
-std::string languageFromPath(const std::string& path) {
-    const auto dot = path.find_last_of('.');
-    if (dot == std::string::npos) return {};
-    const std::string ext = path.substr(dot + 1);
-    if (ext == "py")  return "python";
-    if (ext == "cpp" || ext == "cc" || ext == "cxx"
-        || ext == "hpp" || ext == "hxx" || ext == "hh" || ext == "h") return "cpp";
-    if (ext == "ts"  || ext == "tsx") return "typescript";
-    if (ext == "js" || ext == "jsx" || ext == "mjs" || ext == "cjs") return "javascript";
-    if (ext == "vue") return "vue";
-    return {};
-}
-
-bool runScenario(const Scenario& s) {
-    std::printf("\n=== %s ===\n%s\n",
-                s.name.c_str(), s.description.c_str());
-    const std::string input = expandFences(s.raw_input);
-    const auto parse = parseModelOutput(input, "");
-    bool ok = true;
-
-    if (s.expect_parse_error) {
-        if (parse.error.empty()) {
-            std::printf("  [FAIL] expected parse error, tapi parse sukses\n");
-            ok = false;
-        } else {
-            std::printf("  [ok] parse error seperti diharapkan: %s\n",
-                        parse.error.c_str());
-        }
-    } else if (!parse.error.empty()) {
-        std::printf("  [FAIL] parse error: %s\n", parse.error.c_str());
-        ok = false;
+void PromptDialog::doGenerate() {
+    if (!request_buf_ || !preview_buf_) return;
+    const char* req_raw = request_buf_->text();
+    const std::string request = req_raw ? req_raw : "";
+    if (request.empty()) {
+        fl_message("Permintaan kosong.\nTulis permintaan Anda di kotak atas dulu.");
+        return;
     }
 
-    if (s.expected_file_count > 0
-        && parse.files.size() != s.expected_file_count) {
-        std::printf("  [FAIL] expected %zu file, got %zu\n",
-                    s.expected_file_count, parse.files.size());
-        ok = false;
-    } else if (s.expected_file_count > 0) {
-        std::printf("  [ok] %zu file di-parse\n", parse.files.size());
-    }
-
-    DangerCheckHandler danger;
-    for (std::size_t i = 0; i < parse.files.size(); ++i) {
-        const auto& f = parse.files[i];
-        const std::string lang = languageFromPath(f.relative_path);
-        const auto dc = danger.checkCode(f.content, lang);
-        std::printf("    file[%zu] %-24s lang=%-10s danger=%s\n",
-                    i, f.relative_path.c_str(),
-                    lang.empty() ? "?" : lang.c_str(),
-                    dangerName(dc.verdict));
-        if (i < s.file_expects.size()) {
-            const auto& exp = s.file_expects[i];
-            if (!exp.relative_path.empty()
-                && exp.relative_path != f.relative_path) {
-                std::printf("      [FAIL] path expected '%s', got '%s'\n",
-                            exp.relative_path.c_str(),
-                            f.relative_path.c_str());
-                ok = false;
-            }
-            if (!dangerMatches(dc.verdict, exp.danger)) {
-                std::printf("      [FAIL] danger expected != actual\n");
-                ok = false;
-            }
-        }
-    }
-
-    std::printf("  => %s\n", ok ? "PASS" : "FAIL");
-    return ok;
-}
-
-// ---- Test sandbox (path containment) — terpisah dari scenario ----
-bool runSandboxTest() {
-    std::printf("\n=== sandbox-path-safety ===\n");
-    std::printf("  Cek SandboxedFileSystem::isPathSafe() — path escape "
-                "harus ditolak.\n");
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    fs::path tmp = fs::temp_directory_path(ec);
-    if (ec) {
-        std::printf("  [SKIP] temp_directory_path gagal: %s\n",
-                    ec.message().c_str());
-        return true;
-    }
-    tmp /= "frans_test_sandbox_v8";
-    fs::remove_all(tmp, ec);
-    fs::create_directories(tmp, ec);
-    if (ec) {
-        std::printf("  [SKIP] create_directories gagal: %s\n",
-                    ec.message().c_str());
-        return true;
-    }
-
-    frans::infrastructure::SandboxedFileSystem sb(tmp.string());
-    int fails = 0;
-    auto check = [&](const char* p, bool expected_safe) {
-        const bool actual = sb.isPathSafe(p);
-        const bool pass = (actual == expected_safe);
-        if (!pass) ++fails;
-        std::printf("  %s isPathSafe(%-28s) = %s (harus %s)\n",
-                    pass ? "[ok]  " : "[FAIL]",
-                    p,
-                    actual ? "true" : "false",
-                    expected_safe ? "true" : "false");
-    };
-
-    check("hello.py",          true);
-    check("src/main.cpp",      true);
-    check("a/b/c/d.py",        true);
-    check("../evil.py",        false);
-    check("../../etc/passwd",  false);
-    check("/etc/passwd",       false);
-    check("src/../../evil.py", false);
-
-    fs::remove_all(tmp, ec);
-    const bool ok = (fails == 0);
-    std::printf("  => %s\n", ok ? "PASS" : "FAIL");
-    return ok;
-}
-
-// ---- Test parseOutput: traceback frame picking (anomali 1) ----
-bool runTracebackPickingTest() {
-    std::printf("\n=== traceback-frame-picking ===\n");
-    std::printf("  Cek StandaloneBuildSystem::parseOutput memilih frame "
-                "PERTAMA di dalam project_root (file user), bukan frame "
-                "stdlib di akhir traceback.\n");
-
-    PhaseResult pr;
-    pr.phase   = BuildPhase::Run;
-    pr.skipped = false;
-    pr.success = false;
-
-    CommandResult cr;
-    cr.label     = "run";
-    cr.command   = "python3 cleanup.py";
-    cr.ran       = true;
-    cr.success   = false;
-    cr.exit_code = 1;
-    cr.stderr_tail =
-        "Traceback (most recent call last):\n"
-        "  File \"/tmp/frans_pytest/cleanup.py\", line 9, in <module>\n"
-        "    wipe(\"/tmp/scratch\")\n"
-        "  File \"/tmp/frans_pytest/cleanup.py\", line 6, in wipe\n"
-        "    shutil.rmtree(path)\n"
-        "  File \"/usr/lib/python3.12/shutil.py\", line 775, in rmtree\n"
-        "    onexc(os.lstat, path, err)\n"
-        "  File \"/usr/lib/python3.12/shutil.py\", line 773, in rmtree\n"
-        "    orig_st = os.lstat(path, dir_fd=dir_fd)\n"
-        "FileNotFoundError: [Errno 2] No such file or directory: "
-        "'/tmp/scratch'\n";
-    pr.commands.push_back(std::move(cr));
-
-    ProjectInfo info;
-    info.project_root     = "/tmp/frans_pytest";
-    info.sandbox_root     = "/tmp/frans_pytest";
-    info.kind             = BuildSystemKind::Standalone;
-    info.primary_language = "Python";
-
-    StandaloneBuildSystem sys;
-    sys.parseOutput(pr, info);
-
-    bool ok = true;
-    if (pr.related_files.empty()) {
-        std::printf("  [FAIL] related_files kosong\n");
-        ok = false;
+    Freshness fresh = checkFreshness();
+    std::string context_file_name;
+    if (fresh == Freshness::Fresh) {
+        context_file_name = cfg_.context_output_name;
     } else {
-        const auto& rf = pr.related_files.front();
-        std::printf("  frame dipilih: %s:%d\n", rf.path.c_str(), rf.line);
-        if (rf.path != "cleanup.py") {
-            std::printf("  [FAIL] expected path 'cleanup.py', got '%s'\n",
-                        rf.path.c_str());
-            ok = false;
-        }
-        if (rf.line != 9) {
-            std::printf("  [FAIL] expected line 9 (frame pertama user), "
-                        "got %d\n", rf.line);
-            ok = false;
-        }
+        int choice = fl_choice("SourceCode.md tidak segar atau belum ada.\n"
+                               "Generate prompt tanpa konteks file?",
+                               "Batal", "Tetap generate", nullptr);
+        if (choice == 0) return;
+        context_file_name = "";
     }
 
-    if (pr.error_message.find("FileNotFoundError") == std::string::npos) {
-        std::printf("  [FAIL] error_message tidak mengandung "
-                    "'FileNotFoundError': '%s'\n",
-                    pr.error_message.c_str());
-        ok = false;
+    const char* err_raw = error_buf_ ? error_buf_->text() : nullptr;
+    const std::string error_output = err_raw ? err_raw : "";
+
+    frans::application::PromptInput in;
+    in.tmpl              = loadTemplate();
+    in.request           = request;
+    in.error_output      = error_output;
+    in.context_file_name = context_file_name;
+
+    std::string new_files_hint;
+    for (const auto& nf : last_selection_.new_files_expected) {
+        if (!new_files_hint.empty()) new_files_hint += "\n";
+        new_files_hint += nf;
+    }
+    in.new_files_hint = new_files_hint;
+
+    last_generated_prompt_ = frans::application::renderPrompt(in);
+    preview_buf_->text(last_generated_prompt_.c_str());
+
+    if (copy_btn_) copy_btn_->activate();
+
+    char buf[256];
+    std::snprintf(buf, sizeof(buf),
+                  "Prompt di-generate (%zu karakter). Klik [Copy] untuk menyalin.",
+                  last_generated_prompt_.size());
+    setStatus(buf, FL_DARK_GREEN);
+}
+
+void PromptDialog::doCopy() {
+    if (last_generated_prompt_.empty()) {
+        fl_message("Belum ada prompt yang di-generate.\nKlik [Generate Prompt] dulu.");
+        return;
+    }
+    Fl::copy(last_generated_prompt_.c_str(),
+             static_cast<int>(last_generated_prompt_.size()), 1);
+    setStatus("Prompt disalin ke clipboard. Paste ke AI browser Anda.", FL_DARK_GREEN);
+}
+
+void PromptDialog::doFetchLastError() {
+    if (!session_) {
+        fl_message("SessionState tidak tersedia.");
+        return;
+    }
+    if (session_->last_build_error.empty()) {
+        fl_message("Belum ada error dari build terakhir.");
+        return;
+    }
+    if (error_buf_) {
+        error_buf_->text(session_->last_build_error.c_str());
+        setStatus("Error dari build terakhir dimuat.", FL_DARK_GREEN);
+    }
+}
+
+void PromptDialog::doTestConnection() {
+    if (list_models_worker_running_.load()) {
+        fl_message("Tes koneksi sedang berjalan.");
+        return;
+    }
+
+    frans::application::ApiKeyOptions key_opt;
+    key_opt.key_file = cfg_.gemini_api_key_file;
+    auto key_result = frans::application::ApiKeyProvider::resolve(key_opt);
+    if (!key_result.found()) {
+        std::string msg = "GEMINI_API_KEY tidak ditemukan.\n" + frans::application::apiKeyMissingHint();
+        fl_message("%s", msg.c_str());
+        return;
+    }
+
+    if (list_models_worker_thread_.joinable()) list_models_worker_thread_.join();
+    if (test_conn_btn_) test_conn_btn_->deactivate();
+    setStatus("Menguji koneksi ke Gemini API...", FL_DARK_BLUE);
+
+    list_models_worker_cancel_.store(false);
+    list_models_worker_running_.store(true);
+    list_models_worker_ok_ = false;
+    list_models_worker_message_.clear();
+    list_models_worker_models_.clear();
+    list_models_worker_thread_ = std::thread(&PromptDialog::workerListModels, this);
+    Fl::add_timeout(0.1, cbPollListModelsWorker, this);
+}
+
+void PromptDialog::doSelectFiles() {
+    if (select_worker_running_.load()) {
+        fl_message("Seleksi file sedang berjalan.");
+        return;
+    }
+    if (!request_buf_) return;
+    const char* req_raw = request_buf_->text();
+    std::string request = req_raw ? req_raw : "";
+    if (request.empty()) {
+        fl_message("Permintaan kosong.\nTulis permintaan dulu sebelum memilih file.");
+        return;
+    }
+
+    frans::application::ApiKeyOptions key_opt;
+    key_opt.key_file = cfg_.gemini_api_key_file;
+    auto key_result = frans::application::ApiKeyProvider::resolve(key_opt);
+    if (!key_result.found()) {
+        fl_message("GEMINI_API_KEY tidak ditemukan.");
+        return;
+    }
+
+    std::string project_root = resolveProjectRoot(session_, cfg_);
+    if (project_root.empty()) {
+        fl_message("Project root belum diatur.\n"
+                   "Isi path project di MainWindow atau set 'default_project_root' di config/app.json.");
+        return;
+    }
+
+    std::string model_name = normalizeModelName(cfg_.gemini_model);
+
+    std::fprintf(stderr, "[frans][prompt_dialog] doSelectFiles: project_root='%s', model='%s' (raw='%s')\n",
+                 project_root.c_str(), model_name.c_str(), cfg_.gemini_model.c_str());
+    std::fflush(stderr);
+
+    if (select_worker_thread_.joinable()) select_worker_thread_.join();
+    if (select_btn_) select_btn_->deactivate();
+    if (cancel_select_btn_) cancel_select_btn_->activate();
+    setStatus("Memilih file via Gemini (model: " + model_name + ")...", FL_DARK_BLUE);
+
+    select_worker_cancel_.store(false);
+    select_worker_running_.store(true);
+    select_worker_ok_ = false;
+    select_worker_error_.clear();
+    select_worker_result_ = frans::application::SelectionResult{};
+    select_worker_collected_.clear();
+    select_worker_thread_ = std::thread(&PromptDialog::workerSelectFiles, this);
+    Fl::add_timeout(0.1, cbPollSelectWorker, this);
+}
+
+void PromptDialog::doAddManual() {
+    std::string project_root = resolveProjectRoot(session_, cfg_);
+    if (project_root.empty()) {
+        fl_message("Project root belum diatur.\n"
+                   "Isi path project di MainWindow atau set 'default_project_root' di config/app.json.");
+        return;
+    }
+
+    const char* picked = fl_file_chooser("Pilih file untuk ditambahkan",
+                                         "*",
+                                         project_root.c_str());
+    if (!picked) return;
+
+    std::string abs_path = picked;
+
+    std::string rel_path;
+    if (abs_path.find(project_root) == 0) {
+        rel_path = abs_path.substr(project_root.size());
+        if (!rel_path.empty() && (rel_path[0] == '/' || rel_path[0] == '\\')) {
+            rel_path = rel_path.substr(1);
+        }
     } else {
-        std::printf("  error_message: %s\n", pr.error_message.c_str());
+        fl_message("File harus berada di dalam project root.");
+        return;
     }
 
-    std::printf("  => %s\n", ok ? "PASS" : "FAIL");
-    return ok;
-}
+    for (char& c : rel_path) if (c == '\\') c = '/';
 
-// ---- Test PromptGenerator (Fase A #42) ----
-bool runPromptGeneratorTest() {
-    std::printf("\n=== prompt-generator ===\n");
-    std::printf("  Cek PromptGenerator::renderPrompt — placeholder, "
-                "blok kondisional, template kosong, placeholder tak "
-                "dikenal, blok tanpa penutup, tail 8 KB.\n");
-
-    int fails = 0;
-    auto check = [&](const char* name, const std::string& actual,
-                     const std::string& expected_substr, bool should_contain) {
-        const bool has = actual.find(expected_substr) != std::string::npos;
-        const bool pass = (has == should_contain);
-        if (!pass) ++fails;
-        std::printf("  %s %-40s %s '%s'\n",
-                    pass ? "[ok]  " : "[FAIL]",
-                    name,
-                    should_contain ? "contains" : "NOT contains",
-                    expected_substr.c_str());
-        if (!pass) {
-            std::printf("        actual: '%s'\n", actual.c_str());
-        }
-    };
-
-    // ---- Test 1: semua blok aktif ----
-    {
-        PromptInput in;
-        in.tmpl = "REQ={{REQUEST}} CTX={{CONTEXT_FILE_NAME}} "
-                  "{{#ERROR}}ERR={{ERROR_OUTPUT}}{{/ERROR}} "
-                  "{{#CONTEXT}}HAS_CTX{{/CONTEXT}} "
-                  "{{#NEWFILES}}NEW={{NEW_FILES_HINT}}{{/NEWFILES}}";
-        in.request           = "buat fungsi foo";
-        in.error_output      = "Traceback...";
-        in.context_file_name = "SourceCode.md";
-        in.new_files_hint    = "src/new.py";
-
-        const std::string out = renderPrompt(in);
-        check("all-blocks: request",     out, "REQ=buat fungsi foo", true);
-        check("all-blocks: ctx name",    out, "CTX=SourceCode.md",   true);
-        check("all-blocks: error on",    out, "ERR=Traceback...",    true);
-        check("all-blocks: context on",  out, "HAS_CTX",             true);
-        check("all-blocks: newfiles on", out, "NEW=src/new.py",      true);
-    }
-
-    // ---- Test 2: tanpa error_output -> blok ERROR tidak dirender ----
-    {
-        PromptInput in;
-        in.tmpl = "REQ={{REQUEST}} {{#ERROR}}ERR={{ERROR_OUTPUT}}{{/ERROR}} END";
-        in.request      = "foo";
-        in.error_output = "";
-
-        const std::string out = renderPrompt(in);
-        check("no-error: request", out, "REQ=foo", true);
-        check("no-error: no ERR",  out, "ERR=",    false);
-        check("no-error: END",     out, "END",     true);
-    }
-
-    // ---- Test 3: tanpa context_file_name -> blok CONTEXT tidak dirender ----
-    {
-        PromptInput in;
-        in.tmpl = "{{#CONTEXT}}HAS_CTX{{/CONTEXT}} DONE";
-        in.context_file_name = "";
-
-        const std::string out = renderPrompt(in);
-        check("no-ctx: no HAS_CTX", out, "HAS_CTX", false);
-        check("no-ctx: DONE",       out, "DONE",    true);
-    }
-
-    // ---- Test 4: tanpa new_files_hint -> blok NEWFILES tidak dirender ----
-    {
-        PromptInput in;
-        in.tmpl = "{{#NEWFILES}}NEW={{NEW_FILES_HINT}}{{/NEWFILES}} OK";
-        in.new_files_hint = "";
-
-        const std::string out = renderPrompt(in);
-        check("no-newfiles: no NEW", out, "NEW=", false);
-        check("no-newfiles: OK",     out, "OK",   true);
-    }
-
-    // ---- Test 5: placeholder tak dikenal -> dibiarkan apa adanya ----
-    {
-        PromptInput in;
-        in.tmpl = "A={{REQUEST}} B={{UNKNOWN}} C={{CONTEXT_FILE_NAME}}";
-        in.request           = "req";
-        in.context_file_name = "ctx";
-
-        const std::string out = renderPrompt(in);
-        check("unknown-ph: A=req",  out, "A=req",         true);
-        check("unknown-ph: B kept", out, "B={{UNKNOWN}}", true);
-        check("unknown-ph: C=ctx",  out, "C=ctx",         true);
-    }
-
-    // ---- Test 6: template kosong -> pakai default ----
-    {
-        PromptInput in;
-        in.tmpl              = "";
-        in.request           = "test request";
-        in.context_file_name = "SourceCode.md";
-
-        const std::string out = renderPrompt(in);
-        check("empty-tmpl: has default marker",
-              out, "Full file content, not diff", true);
-        check("empty-tmpl: has request",
-              out, "test request", true);
-        check("empty-tmpl: has context block",
-              out, "SourceCode.md", true);
-        check("empty-tmpl: no error block (error_output kosong)",
-              out, "--- error output ---", false);
-    }
-
-    // ---- Test 7: blok tanpa penutup -> dirender apa adanya ----
-    {
-        PromptInput in;
-        in.tmpl         = "BEFORE {{#ERROR}}no-closer END";
-        in.error_output = "err";
-
-        const std::string out = renderPrompt(in);
-        check("no-closer: BEFORE",    out, "BEFORE",        true);
-        check("no-closer: tag kept",  out, "{{#ERROR}}",    true);
-        check("no-closer: rest kept", out, "no-closer END", true);
-    }
-
-    // ---- Test 8: error_output di-tail +/- 8 KB ----
-    {
-        PromptInput in;
-        in.tmpl = "{{ERROR_OUTPUT}}";
-        std::string big(20 * 1024, 'x');
-        in.error_output = big;
-
-        const std::string out = renderPrompt(in);
-        const bool truncated = out.size() < big.size();
-        const bool has_prefix = out.find("truncated") != std::string::npos;
-        const bool pass = truncated && has_prefix;
-        if (!pass) ++fails;
-        std::printf("  %s %-40s truncated=%s has_prefix=%s (out=%zu, in=%zu)\n",
-                    pass ? "[ok]  " : "[FAIL]",
-                    "error-tail-8kb",
-                    truncated  ? "true" : "false",
-                    has_prefix ? "true" : "false",
-                    out.size(), big.size());
-    }
-
-    // ---- Test 9: default template valid ----
-    {
-        const std::string& d = defaultPromptTemplate();
-        const bool not_empty     = !d.empty();
-        const bool has_request   = d.find("{{REQUEST}}") != std::string::npos;
-        const bool has_ctx_block = d.find("{{#CONTEXT}}") != std::string::npos;
-        const bool ok = not_empty && has_request && has_ctx_block;
-        if (!ok) ++fails;
-        std::printf("  %s %-40s not_empty=%d has_REQUEST=%d has_CTX=%d\n",
-                    ok ? "[ok]  " : "[FAIL]",
-                    "default-template-valid",
-                    (int)not_empty, (int)has_request, (int)has_ctx_block);
-    }
-
-    // ---- Test 10: placeholder di dalam blok kondisional ikut di-substitute ----
-    {
-        PromptInput in;
-        in.tmpl              = "{{#CONTEXT}}CTX={{CONTEXT_FILE_NAME}}{{/CONTEXT}}";
-        in.context_file_name = "SourceCode.md";
-
-        const std::string out = renderPrompt(in);
-        check("inner-ph: substituted", out, "CTX=SourceCode.md", true);
-    }
-
-    // ---- Test 11: "{{" tanpa "}}" di akhir template ----
-    {
-        PromptInput in;
-        in.tmpl    = "BEFORE {{REQUEST}} DAN {{";
-        in.request = "req";
-
-        const std::string out = renderPrompt(in);
-        check("unclosed-open: BEFORE", out, "BEFORE req DAN {{", true);
-    }
-
-    std::printf("  => %s\n", fails == 0 ? "PASS" : "FAIL");
-    return fails == 0;
-}
-
-// ---- Test aturan format output (sinkronisasi dengan format user) ----
-bool runPromptFormatRulesTest() {
-    std::printf("\n=== prompt-format-rules ===\n");
-    std::printf("  Verifikasi default template mengandung semua aturan format "
-                "output yang disinkronkan.\n");
-
-    const std::string& d = defaultPromptTemplate();
-    int fails = 0;
-    auto check = [&](const char* name, const std::string& needle) {
-        const bool has = d.find(needle) != std::string::npos;
-        if (!has) ++fails;
-        std::printf("  %s %-50s contains '%s'\n",
-                    has ? "[ok]  " : "[FAIL]",
-                    name,
-                    needle.c_str());
-    };
-
-    check("rule-2: File: <path>",          "File: <path>");
-    check("rule-2: fenced code block",     "fenced code block");
-    check("rule-3: Path relatif",          "Path relatif");
-    check("rule-4: awal baris",            "awal baris");
-    check("rule-4: tidak ada indentasi",   "tidak ada indentasi");
-    check("rule-5: SEBELUM memulai File:", "SEBELUM memulai File:");
-    check("rule-6: tiga backtick",         "tiga backtick");
-    check("rule-6: merusak parser",        "merusak parser");
-    check("rule-7: tidak berubah",         "tidak berubah");
-    check("rule-8: file binary",           "file binary");
-    check("rule-9: Full file content",     "Full file content");
-    check("rule-9: bukan patch",           "bukan patch");
-
-    std::printf("  => %s\n", fails == 0 ? "PASS" : "FAIL");
-    return fails == 0;
-}
-
-// ---- Test FileCollector (Fase B #46) ----
-bool runFileCollectorTest() {
-    std::printf("\n=== file-collector-basic ===\n");
-    std::printf("  Cek FileCollector::collectFiles — secret, exclude, "
-                "binary, size, output-dir.\n");
-
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    fs::path tmp = fs::temp_directory_path(ec);
-    if (ec) {
-        std::printf("  [SKIP] temp_directory_path gagal: %s\n",
-                    ec.message().c_str());
-        return true;
-    }
-    tmp /= "frans_test_collector_v1";
-    fs::remove_all(tmp, ec);
-    fs::create_directories(tmp, ec);
-    if (ec) {
-        std::printf("  [SKIP] create_directories gagal: %s\n",
-                    ec.message().c_str());
-        return true;
-    }
-
-    auto write = [&](const std::string& rel, const std::string& content) {
-        fs::path p = tmp / rel;
-        std::error_code ec2;
-        fs::create_directories(p.parent_path(), ec2);
-        std::ofstream f(p, std::ios::binary);
-        f.write(content.data(), static_cast<std::streamsize>(content.size()));
-    };
-
-    write("hello.py",     "print('hi')\n");
-    write("src/main.cpp", "#include <iostream>\nint main(){}\n");
-    write("a/b/c.txt",    "hello\n");
-    write(".env",                    "SECRET=xxx\n");
-    write("config/credentials.json", "{}\n");
-    write("secrets.prod.yaml",       "api_key: xxx\n");
-    write("node_modules/x.js", "module.exports={};\n");
-    write("build/out.o",       "binary-object\n");
-
-    {
-        std::ofstream f(tmp / "big.bin", std::ios::binary);
-        std::string big(300 * 1024, 'x');
-        f.write(big.data(), static_cast<std::streamsize>(big.size()));
-    }
-    {
-        std::ofstream f(tmp / "data.bin", std::ios::binary);
-        const char payload[] = {'a', 'b', 'c', '\0', 'd', 'e', 'f'};
-        f.write(payload, sizeof(payload));
-    }
-
-    const fs::path out_dir = tmp / "out";
-    fs::create_directories(out_dir, ec);
-    write("out/SourceCode.md", "# harus di-exclude\n");
-
-    CollectOptions opt;
-    opt.max_file_bytes  = 256 * 1024;
-    opt.exclude_secrets = true;
-    opt.output_dir      = out_dir.string();
-
-    CollectResult result = collectFiles(tmp.string(), opt, nullptr);
-
-    if (result.used_git) {
-        std::printf("  [SKIP] temp dir terdeteksi sebagai git repo — "
-                    "test ini dirancang untuk fallback walker.\n");
-        fs::remove_all(tmp, ec);
-        return true;
-    }
-
-    bool ok = result.ok;
-    if (!ok) {
-        std::printf("  [FAIL] collectFiles gagal: %s\n", result.error.c_str());
-    }
-
-    auto findFile = [&](const std::string& rel) -> const CollectedFile* {
-        for (const auto& f : result.files) {
-            if (f.relative_path == rel) return &f;
-        }
-        return nullptr;
-    };
-
-    auto checkExist = [&](const char* rel, bool should_exist) {
-        const CollectedFile* f = findFile(rel);
-        const bool found = (f != nullptr);
-        const bool pass = (found == should_exist);
-        if (!pass) ok = false;
-        std::printf("  %s exist %-32s found=%d expected=%d\n",
-                    pass ? "[ok]  " : "[FAIL]",
-                    rel, found ? 1 : 0, should_exist ? 1 : 0);
-    };
-
-    auto checkSkip = [&](const char* rel, const char* expected_reason) {
-        const CollectedFile* f = findFile(rel);
-        if (!f) {
-            ok = false;
-            std::printf("  [FAIL] skip  %-32s NOT FOUND\n", rel);
+    for (const auto& entry : last_selection_.files) {
+        if (entry.path == rel_path) {
+            fl_message("File sudah ada dalam daftar.");
             return;
         }
-        const bool pass = f->skipped && f->skip_reason == expected_reason;
-        if (!pass) ok = false;
-        std::printf("  %s skip   %-32s reason='%s' expected='%s'\n",
-                    pass ? "[ok]  " : "[FAIL]",
-                    rel,
-                    f->skip_reason.c_str(),
-                    expected_reason);
-    };
+    }
 
-    checkExist("hello.py",     true);
-    checkExist("src/main.cpp", true);
-    checkExist("a/b/c.txt",    true);
-    checkSkip (".env",                   "secret");
-    checkSkip ("config/credentials.json", "secret");
-    checkSkip ("secrets.prod.yaml",      "secret");
-    checkExist("node_modules/x.js", false);
-    checkExist("build/out.o",       false);
-    checkSkip ("big.bin",  "too_large");
-    checkSkip ("data.bin", "binary");
-    checkExist("out/SourceCode.md", false);
+    std::ifstream f(abs_path, std::ios::binary | std::ios::ate);
+    if (!f) {
+        fl_message("Gagal membaca file.");
+        return;
+    }
+    std::size_t size = static_cast<std::size_t>(f.tellg());
 
-    auto helperCheck = [&](const char* label, bool cond) {
-        if (!cond) ok = false;
-        std::printf("  %s helper %-40s\n",
-                    cond ? "[ok]  " : "[FAIL]", label);
-    };
+    frans::application::ContextFileEntry entry;
+    entry.path = rel_path;
+    entry.priority = "manual";
+    entry.reason = "Ditambahkan manual";
+    entry.size_bytes = size;
+    entry.selected = true;
+    last_selection_.files.push_back(entry);
+    updateBrowserFromSelection();
+    setStatus("File ditambahkan: " + rel_path, FL_DARK_GREEN);
+}
 
-    helperCheck("isSecretBasename('.env')",
-                isSecretBasename(".env"));
-    helperCheck("isSecretBasename('id_rsa')",
-                isSecretBasename("id_rsa"));
-    helperCheck("isSecretBasename('foo.pem')",
-                isSecretBasename("foo.pem"));
-    helperCheck("isSecretBasename('secrets.prod.yaml')",
-                isSecretBasename("secrets.prod.yaml"));
-    helperCheck("!isSecretBasename('main.cpp')",
-                !isSecretBasename("main.cpp"));
-    helperCheck("!isSecretBasename('.envrc')",
-                !isSecretBasename(".envrc"));
-    helperCheck("isExcludedPath('node_modules/x.js', {})",
-                isExcludedPath("node_modules/x.js", {}));
-    helperCheck("isExcludedPath('build/out.o', {})",
-                isExcludedPath("build/out.o", {}));
-    helperCheck("isExcludedPath('a/__pycache__/x.pyc', {})",
-                isExcludedPath("a/__pycache__/x.pyc", {}));
-    helperCheck("!isExcludedPath('src/main.cpp', {})",
-                !isExcludedPath("src/main.cpp", {}));
-    helperCheck("isExcludedPath('foo.log', {'*.log'})",
-                isExcludedPath("foo.log", {"*.log"}));
-    helperCheck("!isExcludedPath('foo.txt', {'*.log'})",
-                !isExcludedPath("foo.txt", {"*.log"}));
+void PromptDialog::doCancelSelect() {
+    if (select_worker_running_.load()) {
+        select_worker_cancel_.store(true);
+        setStatus("Membatalkan seleksi...", FL_DARK_BLUE);
+    }
+}
 
-    if (result.files.size() >= 2) {
-        bool sorted = true;
-        for (std::size_t i = 1; i < result.files.size(); ++i) {
-            if (result.files[i - 1].relative_path
-                > result.files[i].relative_path)
-            {
-                sorted = false;
+void PromptDialog::doBuildSourceCode() {
+    if (build_worker_running_.load()) {
+        fl_message("Build sedang berjalan.");
+        return;
+    }
+    if (last_selection_.files.empty()) {
+        fl_message("Belum ada file terpilih.\nKlik [Pilih File via Gemini] dulu.");
+        return;
+    }
+
+    std::string project_root = resolveProjectRoot(session_, cfg_);
+    if (project_root.empty()) {
+        fl_message("Project root belum diatur.");
+        return;
+    }
+
+    if (!request_buf_) return;
+
+    if (build_worker_thread_.joinable()) build_worker_thread_.join();
+    if (build_btn_) build_btn_->deactivate();
+    setStatus("Membangun SourceCode.md...", FL_DARK_BLUE);
+
+    build_worker_running_.store(true);
+    build_worker_result_ = frans::application::BuildResult{};
+    build_worker_thread_ = std::thread(&PromptDialog::workerBuildSourceCode, this);
+    Fl::add_timeout(0.1, cbPollBuildWorker, this);
+}
+
+void PromptDialog::doOpenFolder() {
+    if (last_build_result_.source_code_path.empty()) return;
+    std::string dir = std::filesystem::path(last_build_result_.source_code_path).parent_path().string();
+    if (dir.empty()) return;
+
+#ifdef _WIN32
+    std::string cmd = "explorer \"" + dir + "\"";
+#else
+    std::string cmd = "xdg-open \"" + dir + "\" &";
+#endif
+    int ret = std::system(cmd.c_str());
+    (void)ret;
+}
+
+// ===========================================================================
+// Workers
+// ===========================================================================
+void PromptDialog::workerListModels() {
+    frans::application::ApiKeyOptions key_opt;
+    key_opt.key_file = cfg_.gemini_api_key_file;
+    auto key_result = frans::application::ApiKeyProvider::resolve(key_opt);
+    if (!key_result.found()) {
+        list_models_worker_ok_ = false;
+        list_models_worker_message_ = "API key tidak ditemukan.";
+        list_models_worker_running_.store(false);
+        return;
+    }
+
+    auto transport = std::make_shared<frans::infrastructure::http::CurlTransport>();
+    frans::application::GeminiClient client(transport);
+    auto result = client.listModels(cfg_.gemini_endpoint, key_result.key, &list_models_worker_cancel_);
+
+    if (!result.ok) {
+        list_models_worker_ok_ = false;
+        list_models_worker_message_ = "Error: " + result.error.message;
+        if (result.error.http_status > 0) {
+            list_models_worker_message_ += " (HTTP " + std::to_string(result.error.http_status) + ")";
+        }
+    } else {
+        list_models_worker_ok_ = true;
+        list_models_worker_models_ = result.models;
+
+        std::ostringstream ss;
+        ss << "Koneksi berhasil! Ditemukan " << result.models.size() << " model:\n";
+        int count = 0;
+        for (const auto& m : result.models) {
+            if (count >= 20) {
+                ss << "... dan " << (result.models.size() - 20) << " model lainnya.\n";
+                break;
+            }
+            ss << "\xE2\x80\xA2 " << m.name;
+            if (!m.display_name.empty() && m.display_name != m.name) {
+                ss << " (" << m.display_name << ")";
+            }
+            ss << "\n";
+            ++count;
+        }
+
+        std::string cfg_model_norm = normalizeModelName(cfg_.gemini_model);
+        bool model_found = false;
+        for (const auto& m : result.models) {
+            std::string m_norm = normalizeModelName(m.name);
+            if (m_norm == cfg_model_norm) {
+                model_found = true;
                 break;
             }
         }
-        helperCheck("files terurut leksikografis", sorted);
+        if (model_found) {
+            ss << "\n\xE2\x9C\x93 Model '" << cfg_.gemini_model << "' tersedia.\n";
+        } else {
+            ss << "\n\xE2\x9A\xA0 Model '" << cfg_.gemini_model
+               << "' TIDAK ditemukan dalam daftar!\n";
+            ss << "  Buka config/app.json, ganti 'gemini_model' dengan salah satu nama di atas.\n";
+        }
+        list_models_worker_message_ = ss.str();
     }
-
-    fs::remove_all(tmp, ec);
-    std::printf("  => %s\n", ok ? "PASS" : "FAIL");
-    return ok;
+    list_models_worker_running_.store(false);
 }
 
-// ---- Test MarkdownRenderer (Fase B #48) ----
-//
-// Cek:
-//   - renderTree: struktur tree, penanda "*", sorting alphabetical,
-//     intermediate dirs dibuat otomatis.
-//   - renderFileBlock: separator + FILE: path + separator + konten.
-//   - renderMarkdown: header + tree + file blocks lengkap.
-//   - detectLanguageFromExtension: pemetaan ekstensi -> bahasa.
-//   - formatBytesHuman: B / KB / MB.
-bool runMarkdownRendererTest() {
-    std::printf("\n=== markdown-renderer ===\n");
-    std::printf("  Cek MarkdownRenderer — tree, file block, render lengkap, "
-                "language detection, format bytes.\n");
-
-    int fails = 0;
-    auto checkContains = [&](const char* label, const std::string& hay,
-                             const std::string& needle) {
-        const bool ok = hay.find(needle) != std::string::npos;
-        if (!ok) ++fails;
-        std::printf("  %s %-44s contains '%s'\n",
-                    ok ? "[ok]  " : "[FAIL]", label, needle.c_str());
-        if (!ok) std::printf("        actual: '%s'\n", hay.c_str());
-    };
-    auto checkNotContains = [&](const char* label, const std::string& hay,
-                                const std::string& needle) {
-        const bool ok = hay.find(needle) == std::string::npos;
-        if (!ok) ++fails;
-        std::printf("  %s %-44s NOT contains '%s'\n",
-                    ok ? "[ok]  " : "[FAIL]", label, needle.c_str());
-    };
-
-    // ---- Test 1: renderTree dasar ----
-    {
-        std::vector<CollectedFile> files = {
-            {"README.md",       100, true, false, ""},
-            {"src/main.cpp",    200, true, false, ""},
-            {"src/util.h",       50, true, false, ""},
-            {"tests/test.cpp",  150, true, false, ""},
-        };
-        std::vector<std::string> starred = {"src/main.cpp", "README.md"};
-
-        const std::string tree = renderTree(files, "demo-repo", starred);
-
-        checkContains("tree: header",        tree, "Directory structure:");
-        checkContains("tree: root",          tree, "└── demo-repo/");
-        checkContains("tree: README starred", tree, "README.md *");
-        checkContains("tree: src dir",       tree, "src/");
-        checkContains("tree: main.cpp starred", tree, "main.cpp *");
-        checkContains("tree: util.h no star", tree, "util.h");
-        checkNotContains("tree: util.h no *", tree, "util.h *");
-        checkContains("tree: tests dir",     tree, "tests/");
-        checkContains("tree: test.cpp",      tree, "test.cpp");
-        // util.h TIDAK boleh berbintang
-        checkNotContains("tree: util.h clean", tree, "util.h *");
+void PromptDialog::workerSelectFiles() {
+    frans::application::ApiKeyOptions key_opt;
+    key_opt.key_file = cfg_.gemini_api_key_file;
+    auto key_result = frans::application::ApiKeyProvider::resolve(key_opt);
+    if (!key_result.found()) {
+        select_worker_ok_ = false;
+        select_worker_error_ = "API key tidak ditemukan.";
+        select_worker_running_.store(false);
+        return;
     }
 
-    // ---- Test 2: sorting alphabetical (file & dir bercampur) ----
-    {
-        std::vector<CollectedFile> files = {
-            {"z.txt",      10, true, false, ""},
-            {"a.txt",      10, true, false, ""},
-            {"m/b.txt",    10, true, false, ""},
-            {"m/a.txt",    10, true, false, ""},
-        };
-        const std::string tree = renderTree(files, "repo", {});
-
-        // Urutan yang diharapkan:
-        //   a.txt
-        //   m/
-        //     a.txt
-        //     b.txt
-        //   z.txt
-        const auto pos_a = tree.find("a.txt");
-        const auto pos_m = tree.find("m/");
-        const auto pos_z = tree.find("z.txt");
-        const bool order_ok = (pos_a < pos_m) && (pos_m < pos_z);
-        if (!order_ok) ++fails;
-        std::printf("  %s %-44s alphabetical order\n",
-                    order_ok ? "[ok]  " : "[FAIL]", "tree-sort");
+    std::string project_root = resolveProjectRoot(session_, cfg_);
+    if (project_root.empty()) {
+        select_worker_ok_ = false;
+        select_worker_error_ = "Project root belum diatur.";
+        select_worker_running_.store(false);
+        return;
     }
 
-    // ---- Test 3: intermediate dirs dibuat otomatis ----
-    {
-        std::vector<CollectedFile> files = {
-            {"a/b/c/d.txt", 10, true, false, ""},
-        };
-        const std::string tree = renderTree(files, "repo", {});
+    const char* req_raw = request_buf_->text();
+    std::string request = req_raw ? req_raw : "";
+    const char* err_raw = error_buf_ ? error_buf_->text() : nullptr;
+    std::string error_output = err_raw ? err_raw : "";
 
-        checkContains("tree: a/",  tree, "a/");
-        checkContains("tree: b/",  tree, "b/");
-        checkContains("tree: c/",  tree, "c/");
-        checkContains("tree: d.txt", tree, "d.txt");
+    std::string selector_prompt = readFileContents(cfg_.selector_prompt_path);
+    if (selector_prompt.empty()) {
+        selector_prompt = "Anda adalah asisten pemilih konteks. Pilih file yang relevan.";
     }
 
-    // ---- Test 4: file yang di-skip tidak muncul di tree ----
-    {
-        std::vector<CollectedFile> files = {
-            {"visible.txt", 10, true, false, ""},
-            {"secret.env",  10, true, true, "secret"},
-        };
-        const std::string tree = renderTree(files, "repo", {});
-
-        checkContains("tree: visible ada",  tree, "visible.txt");
-        checkNotContains("tree: secret skip", tree, "secret.env");
-    }
-
-    // ---- Test 5: renderFileBlock ----
-    {
-        const std::string block =
-            renderFileBlock("src/main.cpp", "#include <iostream>\nint main() {}\n");
-
-        checkContains("block: separator atas", block,
-                      "================================================");
-        checkContains("block: FILE: path",     block, "FILE: src/main.cpp");
-        checkContains("block: konten",         block, "#include <iostream>");
-        checkContains("block: akhir newline",  block, "int main() {}\n");
-    }
-
-    // ---- Test 6: renderFileBlock tanpa trailing newline ----
-    {
-        const std::string block =
-            renderFileBlock("a.txt", "no newline at end");
-
-        checkContains("block: auto-newline", block, "no newline at end\n");
-    }
-
-    // ---- Test 7: renderMarkdown lengkap ----
-    {
-        RenderInput in;
-        in.all_files = {
-            {"README.md",    100, true, false, ""},
-            {"src/main.cpp", 200, true, false, ""},
-            {"src/util.h",    50, true, false, ""},
-        };
-        in.starred_paths = {"src/main.cpp", "README.md"};
-        in.file_contents = {
-            {"README.md",    "# Demo\n"},
-            {"src/main.cpp", "#include <iostream>\n"},
-        };
-        in.options.repo_name            = "demo-repo";
-        in.options.header_title         = "SourceCode.md";
-        in.options.created_at           = "2026-11-13 14:05";
-        in.options.request_summary      = "buat fitur X";
-        in.options.total_files_included = 2;
-        in.options.total_content_bytes  = 38 * 1024 + 200;  // 38.2 KB
-
-        const std::string out = renderMarkdown(in);
-
-        checkContains("md: header title",  out, "# SourceCode.md: demo-repo");
-        checkContains("md: timestamp",     out, "2026-11-13 14:05");
-        checkContains("md: file count",    out, "2 file disertakan");
-        checkContains("md: size",          out, "38.2 KB");
-        checkContains("md: permintaan",    out, "Permintaan: buat fitur X");
-        checkContains("md: marker legend", out,
-                      "Tanda \"*\" pada struktur di bawah");
-        checkContains("md: tree root",     out, "└── demo-repo/");
-        checkContains("md: README starred", out, "README.md *");
-        checkContains("md: util no star",  out, "util.h");
-        checkNotContains("md: util clean", out, "util.h *");
-        checkContains("md: block README",  out, "FILE: README.md");
-        checkContains("md: block main",    out, "FILE: src/main.cpp");
-        checkNotContains("md: util no block", out, "FILE: src/util.h");
-        checkContains("md: konten README", out, "# Demo");
-        checkContains("md: konten main",   out, "#include <iostream>");
-    }
-
-    // ---- Test 8: renderMarkdown tanpa permintaan ----
-    {
-        RenderInput in;
-        in.all_files = {{"a.txt", 10, true, false, ""}};
-        in.starred_paths = {"a.txt"};
-        in.file_contents = {{"a.txt", "hello\n"}};
-        in.options.repo_name            = "r";
-        in.options.header_title         = "Ingest";
-        in.options.total_files_included = 1;
-        in.options.total_content_bytes  = 6;
-
-        const std::string out = renderMarkdown(in);
-        checkNotContains("md: no permintaan line", out, "Permintaan:");
-        checkContains("md: header tetap ada", out, "# Ingest: r");
-    }
-
-    // ---- Test 9: starred path tidak ada di file_contents -> warning + skip ----
-    {
-        RenderInput in;
-        in.all_files = {{"a.txt", 10, true, false, ""}};
-        in.starred_paths = {"a.txt", "missing.txt"};
-        in.file_contents = {{"a.txt", "hello\n"}};
-        in.options.repo_name = "r";
-
-        const std::string out = renderMarkdown(in);
-        checkContains("md: a.txt block ada", out, "FILE: a.txt");
-        checkNotContains("md: missing.txt skip", out, "FILE: missing.txt");
-    }
-
-    // ---- Test 10: detectLanguageFromExtension ----
-    {
-        auto checkLang = [&](const char* path, const char* expected) {
-            const std::string actual = detectLanguageFromExtension(path);
-            const bool ok = (actual == expected);
-            if (!ok) ++fails;
-            std::printf("  %s lang(%-24s) = '%s' (expected '%s')\n",
-                        ok ? "[ok]  " : "[FAIL]",
-                        path, actual.c_str(), expected);
-        };
-        checkLang("main.cpp",          "cpp");
-        checkLang("header.hpp",        "cpp");
-        checkLang("script.py",         "python");
-        checkLang("app.js",            "javascript");
-        checkLang("app.ts",            "typescript");
-        checkLang("data.json",         "json");
-        checkLang("config.yaml",       "yaml");
-        checkLang("CMakeLists.txt",    "cmake");
-        checkLang("Makefile",          "makefile");
-        checkLang("Dockerfile",        "dockerfile");
-        checkLang("readme.md",         "markdown");
-        checkLang("noext",             "");
-        checkLang("unknown.xyz",       "");
-    }
-
-    // ---- Test 11: formatBytesHuman ----
-    {
-        auto checkFmt = [&](std::size_t bytes, const char* expected) {
-            const std::string actual = formatBytesHuman(bytes);
-            const bool ok = (actual == expected);
-            if (!ok) ++fails;
-            std::printf("  %s fmt(%zu) = '%s' (expected '%s')\n",
-                        ok ? "[ok]  " : "[FAIL]",
-                        bytes, actual.c_str(), expected);
-        };
-        checkFmt(0,          "0 B");
-        checkFmt(512,        "512 B");
-        checkFmt(1024,       "1.0 KB");
-        checkFmt(1536,       "1.5 KB");
-        checkFmt(38 * 1024 + 200, "38.2 KB");
-        checkFmt(1024 * 1024, "1.0 MB");
-        checkFmt(5 * 1024 * 1024 + 123 * 1024, "5.1 MB");
-    }
-
-    // ---- Test 12: tree kosong (tidak ada file) ----
-    {
-        std::vector<CollectedFile> files;
-        const std::string tree = renderTree(files, "empty-repo", {});
-        checkContains("tree-empty: header", tree, "Directory structure:");
-        checkContains("tree-empty: root",   tree, "└── empty-repo/");
-        // Tidak ada anak
-        checkNotContains("tree-empty: no children", tree, "├──");
-        checkNotContains("tree-empty: no children2", tree, "└── ");
-    }
-
-    std::printf("  => %s\n", fails == 0 ? "PASS" : "FAIL");
-    return fails == 0;
-}
-
-void listScenarios(const std::vector<Scenario>& scenarios) {
-    std::printf("Scenario tersedia:\n");
-    for (const auto& s : scenarios) {
-        std::printf("  %-24s %s\n", s.name.c_str(), s.description.c_str());
-    }
-    std::printf("  %-24s Cek SandboxedFileSystem::isPathSafe()\n",
-                "sandbox-path-safety");
-    std::printf("  %-24s Cek parseOutput pilih frame Python user\n",
-                "traceback-frame-picking");
-    std::printf("  %-24s Cek PromptGenerator::renderPrompt (Fase A #42)\n",
-                "prompt-generator");
-    std::printf("  %-24s Verifikasi aturan format output\n",
-                "prompt-format-rules");
-    std::printf("  %-24s Cek FileCollector (Fase B #46)\n",
-                "file-collector-basic");
-    std::printf("  %-24s Cek MarkdownRenderer (Fase B #48)\n",
-                "markdown-renderer");
-}
-
-void dumpScenario(const Scenario& s) {
-    const std::string input = expandFences(s.raw_input);
-    std::fwrite(input.data(), 1, input.size(), stdout);
-    if (input.empty() || input.back() != '\n') std::putchar('\n');
-}
-
-} // namespace
-
-int main(int argc, char** argv) {
-    const auto scenarios = buildScenarios();
-
-    if (argc >= 2 && std::strcmp(argv[1], "--list") == 0) {
-        listScenarios(scenarios);
-        return 0;
-    }
-    if (argc >= 3 && std::strcmp(argv[1], "--dump") == 0) {
-        for (const auto& s : scenarios) {
-            if (s.name == argv[2]) {
-                dumpScenario(s);
-                return 0;
+    std::vector<std::string> always_include;
+    if (!cfg_.context_always_include.empty()) {
+        std::istringstream iss(cfg_.context_always_include);
+        std::string item;
+        while (std::getline(iss, item, ',')) {
+            size_t start = item.find_first_not_of(" \t");
+            size_t end = item.find_last_not_of(" \t");
+            if (start != std::string::npos && end != std::string::npos) {
+                always_include.push_back(item.substr(start, end - start + 1));
             }
         }
-        std::fprintf(stderr, "scenario '%s' tidak ada\n", argv[2]);
-        return 2;
     }
 
-    int pass = 0;
-    int fail = 0;
+    std::string model_name = normalizeModelName(cfg_.gemini_model);
 
-    for (const auto& s : scenarios) {
-        if (runScenario(s)) ++pass;
-        else                ++fail;
+    std::fprintf(stderr, "[frans][prompt_dialog] workerSelectFiles: calling Gemini with model='%s'\n",
+                 model_name.c_str());
+    std::fflush(stderr);
+
+    frans::application::ContextRequest ctx_req;
+    ctx_req.project_root = project_root;
+    ctx_req.request_text = request;
+    ctx_req.error_output = error_output;
+    ctx_req.always_include = always_include;
+    ctx_req.max_context_bytes = static_cast<std::size_t>(cfg_.context_max_kb) * 1024;
+    ctx_req.max_files = static_cast<std::size_t>(cfg_.context_max_files);
+    ctx_req.gemini_model = model_name;
+    ctx_req.gemini_endpoint = cfg_.gemini_endpoint;
+    ctx_req.api_key = key_result.key;
+    ctx_req.selector_prompt = selector_prompt;
+    ctx_req.gemini_timeout_sec = cfg_.gemini_timeout_sec;
+    ctx_req.gemini_full_mode_max_tokens = static_cast<std::size_t>(cfg_.gemini_full_mode_max_tokens);
+    ctx_req.gemini_index_head_lines = cfg_.gemini_index_head_lines;
+
+    auto transport = std::make_shared<frans::infrastructure::http::CurlTransport>();
+    frans::application::GeminiClient client(transport);
+
+    auto result = frans::application::selectContext(ctx_req, client, &select_worker_cancel_);
+
+    if (select_worker_cancel_.load()) {
+        select_worker_ok_ = false;
+        select_worker_error_ = "Dibatalkan oleh pengguna.";
+    } else if (!result.ok) {
+        select_worker_ok_ = false;
+        select_worker_error_ = result.error;
+        select_worker_used_model_ = model_name;
+    } else {
+        select_worker_ok_ = true;
+        select_worker_result_ = result;
+
+        frans::application::CollectOptions col_opt;
+        col_opt.max_file_bytes = 256 * 1024;
+        col_opt.exclude_secrets = true;
+        select_worker_collected_ = frans::application::collectFiles(project_root, col_opt, nullptr).files;
     }
-    if (runSandboxTest())           ++pass;
-    else                            ++fail;
-    if (runTracebackPickingTest())  ++pass;
-    else                            ++fail;
-    if (runPromptGeneratorTest())   ++pass;
-    else                            ++fail;
-    if (runPromptFormatRulesTest()) ++pass;
-    else                            ++fail;
-    if (runFileCollectorTest())     ++pass;
-    else                            ++fail;
-    if (runMarkdownRendererTest())  ++pass;
-    else                            ++fail;
-
-    std::printf("\n=== Summary: %d passed, %d failed, %d total ===\n",
-                pass, fail, pass + fail);
-    return fail == 0 ? 0 : 1;
+    select_worker_running_.store(false);
 }
+
+void PromptDialog::workerBuildSourceCode() {
+    std::string project_root = resolveProjectRoot(session_, cfg_);
+    if (project_root.empty()) {
+        build_worker_result_.error = "Project root belum diatur.";
+        build_worker_running_.store(false);
+        return;
+    }
+
+    const char* req_raw = request_buf_->text();
+    std::string request = req_raw ? req_raw : "";
+
+    // FIX: Set created_at di manifest
+    frans::application::BuildManifest manifest;
+    manifest.created_at = formatTimestampNow();  // <-- INI YANG HILANG SEBELUMNYA
+    manifest.request_hash = computeRequestHash();
+    manifest.mode = last_selection_.mode;
+    manifest.model = cfg_.gemini_model;
+
+    auto result = frans::application::buildSourceCode(
+        select_worker_collected_.empty() ? last_collected_files_ : select_worker_collected_,
+        last_selection_.files,
+        project_root,
+        cfg_.ingest_output_dir,
+        cfg_.context_output_name,
+        request,
+        manifest,
+        nullptr);
+
+    build_worker_result_ = result;
+    build_worker_running_.store(false);
+}
+
+// ===========================================================================
+// Callbacks
+// ===========================================================================
+void PromptDialog::cbGenerate(Fl_Widget*, void* data) {
+    static_cast<PromptDialog*>(data)->doGenerate();
+}
+void PromptDialog::cbCopy(Fl_Widget*, void* data) {
+    static_cast<PromptDialog*>(data)->doCopy();
+}
+void PromptDialog::cbFetchLastError(Fl_Widget*, void* data) {
+    static_cast<PromptDialog*>(data)->doFetchLastError();
+}
+void PromptDialog::cbTestConnection(Fl_Widget*, void* data) {
+    static_cast<PromptDialog*>(data)->doTestConnection();
+}
+void PromptDialog::cbSelectFiles(Fl_Widget*, void* data) {
+    static_cast<PromptDialog*>(data)->doSelectFiles();
+}
+void PromptDialog::cbAddManual(Fl_Widget*, void* data) {
+    static_cast<PromptDialog*>(data)->doAddManual();
+}
+void PromptDialog::cbCancelSelect(Fl_Widget*, void* data) {
+    static_cast<PromptDialog*>(data)->doCancelSelect();
+}
+void PromptDialog::cbBrowserChanged(Fl_Widget*, void* data) {
+    auto* dlg = static_cast<PromptDialog*>(data);
+    if (!dlg || !dlg->file_browser_) return;
+    int n = dlg->file_browser_->nitems();
+    for (int i = 0; i < n && i < static_cast<int>(dlg->last_selection_.files.size()); ++i) {
+        dlg->last_selection_.files[i].selected = dlg->file_browser_->checked(i + 1) != 0;
+    }
+    dlg->updateTotals();
+}
+void PromptDialog::cbBuildSourceCode(Fl_Widget*, void* data) {
+    static_cast<PromptDialog*>(data)->doBuildSourceCode();
+}
+void PromptDialog::cbOpenFolder(Fl_Widget*, void* data) {
+    static_cast<PromptDialog*>(data)->doOpenFolder();
+}
+void PromptDialog::cbClose(Fl_Widget* w, void*) {
+    if (Fl_Window* win = w ? w->window() : nullptr) {
+        win->hide();
+    }
+}
+
+// ===========================================================================
+// Polling callbacks
+// ===========================================================================
+void PromptDialog::cbPollListModelsWorker(void* data) {
+    auto* dlg = static_cast<PromptDialog*>(data);
+    if (!dlg) return;
+    if (dlg->list_models_worker_running_.load()) {
+        Fl::repeat_timeout(0.1, cbPollListModelsWorker, data);
+        return;
+    }
+    if (dlg->list_models_worker_thread_.joinable()) {
+        dlg->list_models_worker_thread_.join();
+    }
+    if (dlg->test_conn_btn_) dlg->test_conn_btn_->activate();
+
+    if (dlg->list_models_worker_ok_) {
+        dlg->setStatus("Tes koneksi berhasil.", FL_DARK_GREEN);
+        showScrollableMessage("Daftar Model Gemini", dlg->list_models_worker_message_);
+    } else {
+        dlg->setStatus("Tes koneksi gagal.", FL_RED);
+        showScrollableMessage("Tes Koneksi Gagal", dlg->list_models_worker_message_);
+    }
+    dlg->list_models_worker_message_.clear();
+    dlg->list_models_worker_ok_ = false;
+}
+
+void PromptDialog::cbPollSelectWorker(void* data) {
+    auto* dlg = static_cast<PromptDialog*>(data);
+    if (!dlg) return;
+    if (dlg->select_worker_running_.load()) {
+        Fl::repeat_timeout(0.1, cbPollSelectWorker, data);
+        return;
+    }
+    if (dlg->select_worker_thread_.joinable()) {
+        dlg->select_worker_thread_.join();
+    }
+    if (dlg->select_btn_) dlg->select_btn_->activate();
+    if (dlg->cancel_select_btn_) dlg->cancel_select_btn_->deactivate();
+
+    if (dlg->select_worker_ok_) {
+        dlg->last_selection_ = dlg->select_worker_result_;
+        dlg->last_collected_files_ = dlg->select_worker_collected_;
+        dlg->updateBrowserFromSelection();
+        dlg->updateModeDisplay();
+        dlg->setStatus("Seleksi file selesai. Tinjau dan koreksi centang.", FL_DARK_GREEN);
+    } else {
+        dlg->setStatus("Seleksi file gagal: " + dlg->select_worker_error_, FL_RED);
+
+        std::string error_msg = dlg->select_worker_error_;
+
+        if (isModelNotFoundError(error_msg)) {
+            std::ostringstream oss;
+            oss << "GEMINI MODEL TIDAK DITEMUKAN\n";
+            oss << "================================\n\n";
+            oss << "Model yang dipakai: " << dlg->select_worker_used_model_ << "\n";
+            oss << "Dari config:        " << dlg->cfg_.gemini_model << "\n\n";
+            oss << "API key Anda VALID (Tes Koneksi berhasil dengan "
+                << dlg->list_models_worker_models_.size() << " model),\n";
+            oss << "tetapi nama model di config/app.json tidak ada di daftar.\n\n";
+            oss << "SOLUSI:\n";
+            oss << "1. Klik [Tes Koneksi / Daftar Model] untuk melihat nama model yang valid.\n";
+            oss << "2. Edit config/app.json, ganti 'gemini_model' dengan nama yang valid.\n";
+            oss << "3. Contoh: \"gemini_model\": \"gemini-3.8-flash\"\n\n";
+
+            if (!dlg->list_models_worker_models_.empty()) {
+                std::string similar = findSimilarModel(
+                    dlg->select_worker_used_model_,
+                    dlg->list_models_worker_models_);
+                if (!similar.empty()) {
+                    oss << "Model yang MIRIP dengan '" << dlg->select_worker_used_model_ << "':\n";
+                    oss << similar;
+                    oss << "\n";
+                }
+            } else {
+                oss << "Tip: Klik [Tes Koneksi] dulu untuk mengisi daftar model.\n";
+            }
+
+            oss << "\nError detail dari Gemini:\n" << error_msg << "\n";
+            showScrollableMessage("Model Gemini Tidak Ditemukan", oss.str());
+        } else {
+            fl_message("Seleksi file gagal:\n%s", error_msg.c_str());
+        }
+    }
+    dlg->select_worker_error_.clear();
+    dlg->select_worker_ok_ = false;
+}
+
+void PromptDialog::cbPollBuildWorker(void* data) {
+    auto* dlg = static_cast<PromptDialog*>(data);
+    if (!dlg) return;
+    if (dlg->build_worker_running_.load()) {
+        Fl::repeat_timeout(0.1, cbPollBuildWorker, data);
+        return;
+    }
+    if (dlg->build_worker_thread_.joinable()) {
+        dlg->build_worker_thread_.join();
+    }
+    if (dlg->build_btn_) dlg->build_btn_->activate();
+
+    if (dlg->build_worker_result_.ok) {
+        dlg->last_build_result_ = dlg->build_worker_result_;
+        if (dlg->session_) {
+            dlg->session_->last_context_path = dlg->last_build_result_.source_code_path;
+        }
+        dlg->updateFreshnessDisplay();
+        char buf[256];
+        std::snprintf(buf, sizeof(buf),
+                      "SourceCode.md dibangun: %zu file, %s",
+                      dlg->last_build_result_.files_included,
+                      formatBytesHelper(dlg->last_build_result_.total_bytes).c_str());
+        dlg->setStatus(buf, FL_DARK_GREEN);
+    } else {
+        dlg->setStatus("Build gagal: " + dlg->build_worker_result_.error, FL_RED);
+        fl_message("Build SourceCode.md gagal:\n%s", dlg->build_worker_result_.error.c_str());
+    }
+}
+
+} // namespace frans::ui
+================================================
+FILE: src/ui/PromptDialog.h
+================================================
+// src/ui/PromptDialog.h
+//
+// Dialog Prompt Generator — Fase A #43 + Fase C #58 + Fase C #61.
+#pragma once
+#include "config/AppConfig.h"
+#include "ui/SessionState.h"
+#include "application/context/ContextSelector.h"
+#include "application/context/SourceCodeBuilder.h"
+#include "application/ai/GeminiClient.h"
+#include <string>
+#include <atomic>
+#include <thread>
+#include <vector>
+class Fl_Window;
+class Fl_Text_Editor;
+class Fl_Text_Buffer;
+class Fl_Text_Display;
+class Fl_Button;
+class Fl_Box;
+class Fl_Check_Browser;
+class Fl_Widget;
+namespace frans::ui {
+class PromptDialog {
+public:
+static void show(SessionState* session,
+const frans::config::AppConfig& cfg);
+PromptDialog(const PromptDialog&)            = delete;
+PromptDialog& operator=(const PromptDialog&) = delete;
+private:
+explicit PromptDialog(SessionState* session,
+const frans::config::AppConfig& cfg);
+~PromptDialog();
+void buildUI();
+void doGenerate();
+void doCopy();
+void doFetchLastError();
+void doTestConnection();
+void doSelectFiles();
+void doAddManual();
+void doCancelSelect();
+void doBuildSourceCode();
+void doOpenFolder();
+void setStatus(const std::string& msg, unsigned color);
+std::string loadTemplate();
+void updateBrowserFromSelection();
+void updateTotals();
+void updateFreshnessDisplay();
+void updateKeyStatus();
+void updateModeDisplay();
+enum class Freshness { NoFile, Stale, Fresh };
+Freshness checkFreshness();
+std::string computeRequestHash();
+std::string formatBytes(std::size_t bytes);
+void workerListModels();
+void workerSelectFiles();
+void workerBuildSourceCode();
+static void cbGenerate(Fl_Widget*, void*);
+static void cbCopy(Fl_Widget*, void*);
+static void cbFetchLastError(Fl_Widget*, void*);
+static void cbTestConnection(Fl_Widget*, void*);
+static void cbSelectFiles(Fl_Widget*, void*);
+static void cbAddManual(Fl_Widget*, void*);
+static void cbCancelSelect(Fl_Widget*, void*);
+static void cbBrowserChanged(Fl_Widget*, void*);
+static void cbBuildSourceCode(Fl_Widget*, void*);
+static void cbOpenFolder(Fl_Widget*, void*);
+static void cbClose(Fl_Widget*, void*);
+static void cbPollListModelsWorker(void*);
+static void cbPollSelectWorker(void*);
+static void cbPollBuildWorker(void*);
+SessionState*                  session_;
+const frans::config::AppConfig& cfg_;
+Fl_Window*       win_              = nullptr;
+Fl_Text_Editor*  request_editor_   = nullptr;
+Fl_Text_Buffer*  request_buf_      = nullptr;
+Fl_Text_Editor*  error_editor_     = nullptr;
+Fl_Text_Buffer*  error_buf_        = nullptr;
+Fl_Button*       fetch_btn_        = nullptr;
+Fl_Button*       select_btn_        = nullptr;
+Fl_Box*          key_status_box_    = nullptr;
+Fl_Box*          mode_box_          = nullptr;
+Fl_Check_Browser* file_browser_     = nullptr;
+Fl_Box*          total_box_         = nullptr;
+Fl_Button*       add_manual_btn_    = nullptr;
+Fl_Button*       cancel_select_btn_ = nullptr;
+Fl_Button*       build_btn_         = nullptr;
+Fl_Box*          freshness_box_     = nullptr;
+Fl_Box*          location_box_      = nullptr;
+Fl_Button*       open_folder_btn_   = nullptr;
+Fl_Button*       generate_btn_      = nullptr;
+Fl_Button*       copy_btn_          = nullptr;
+Fl_Button*       test_conn_btn_     = nullptr;
+Fl_Text_Display* preview_display_   = nullptr;
+Fl_Text_Buffer*  preview_buf_       = nullptr;
+Fl_Box*          status_box_        = nullptr;
+std::string last_generated_prompt_;
+frans::application::SelectionResult last_selection_;
+std::vector<frans::application::CollectedFile> last_collected_files_;
+frans::application::BuildResult last_build_result_;
+std::string current_request_hash_;
+bool has_fresh_source_code_ = false;
+std::thread list_models_worker_thread_;
+std::atomic<bool> list_models_worker_running_{false};
+std::atomic<bool> list_models_worker_cancel_{false};
+std::string list_models_worker_message_;
+bool list_models_worker_ok_ = false;
+std::vector<frans::application::ModelInfo> list_models_worker_models_;
+std::thread select_worker_thread_;
+std::atomic<bool> select_worker_running_{false};
+std::atomic<bool> select_worker_cancel_{false};
+frans::application::SelectionResult select_worker_result_;
+std::vector<frans::application::CollectedFile> select_worker_collected_;
+bool select_worker_ok_ = false;
+std::string select_worker_error_;
+std::string select_worker_used_model_;
+std::thread build_worker_thread_;
+std::atomic<bool> build_worker_running_{false};
+frans::application::BuildResult build_worker_result_;
+};
+} // namespace frans::ui
