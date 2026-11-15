@@ -125,15 +125,12 @@ void GitDialog::layout() {
 
     int y = pad;
 
-    // ---- Status label ----
-    status_label_ = new Fl_Box(pad, y, ww - 2 * pad, 22,
-                               "Loading git status...");
+    status_label_ = new Fl_Box(pad, y, ww - 2 * pad, 22, "Loading git status...");
     status_label_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
     status_label_->labelfont(FL_COURIER_BOLD);
     status_label_->labelsize(12);
     y += 26;
 
-    // ---- Changes browser ----
     changes_browser_ = new Fl_Browser(pad, y, ww - 2 * pad, 180);
     changes_browser_->type(FL_MULTI_BROWSER);
     changes_browser_->textfont(FL_COURIER);
@@ -141,7 +138,6 @@ void GitDialog::layout() {
     changes_browser_->tooltip("Daftar perubahan file. Baris merah = mencurigakan (secret-like).");
     y += 180 + gap;
 
-    // ---- Commit message ----
     {
         Fl_Box* lbl = new Fl_Box(pad, y, 120, 24, "Commit message:");
         lbl->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
@@ -154,7 +150,6 @@ void GitDialog::layout() {
         y += 28;
     }
 
-    // ---- Output area ----
     {
         Fl_Box* lbl = new Fl_Box(pad, y, 120, 20, "Output:");
         lbl->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
@@ -167,7 +162,6 @@ void GitDialog::layout() {
         y += 160 + gap;
     }
 
-    // ---- Button row ----
     const int btn_h = 28;
     const int btn_w = 96;
     int x = pad;
@@ -192,8 +186,6 @@ void GitDialog::layout() {
     btn_push_->tooltip("git push (dengan konfirmasi)");
     x += btn_w + gap;
 
-    // Spacer
-    // Cancel + Close di kanan
     btn_cancel_ = new Fl_Button(ww - pad - 2 * btn_w - gap, y, btn_w, btn_h, "Cancel");
     btn_cancel_->callback(cbCancel, this);
     btn_cancel_->deactivate();
@@ -289,7 +281,7 @@ std::string GitDialog::buildSuspiciousWarning() const {
 }
 
 // ---------------------------------------------------------------------------
-// Worker infrastructure
+// Worker infrastructure (THREAD-SAFE)
 // ---------------------------------------------------------------------------
 
 void GitDialog::startWorker(std::function<void()> task,
@@ -301,17 +293,20 @@ void GitDialog::startWorker(std::function<void()> task,
     worker_callback_ = std::move(on_done);
     setButtonsEnabled(false);
 
+    // Worker thread HANYA menjalankan task dan mengubah flag.
+    // TIDAK BOLEH memanggil fungsi FLTK (seperti appendOutput) dari sini.
     worker_thread_ = std::thread([this, t = std::move(task)]() {
         try {
             t();
-        } catch (const std::exception& e) {
-            appendOutput(std::string("\n[worker exception] ") + e.what() + "\n");
         } catch (...) {
-            appendOutput("\n[worker exception] unknown\n");
+            // Abaikan exception agar thread bisa selesai dengan rapi
         }
         worker_running_.store(false);
-        Fl::awake(pollWorker, this);
     });
+
+    // Main thread melakukan polling setiap 0.1 detik.
+    // Ini jauh lebih andal daripada Fl::awake(cb, data) di berbagai versi FLTK.
+    Fl::add_timeout(0.1, pollWorker, this);
 }
 
 void GitDialog::cancelWorker() {
@@ -326,13 +321,14 @@ void GitDialog::onWorkerFinished() {
     if (worker_callback_) {
         auto cb = std::move(worker_callback_);
         worker_callback_ = nullptr;
-        cb();
+        cb(); // Callback ini dijalankan di MAIN THREAD, aman untuk update UI
     }
 }
 
 void GitDialog::pollWorker(void* data) {
     auto* self = static_cast<GitDialog*>(data);
     if (!self) return;
+    
     if (!self->worker_running_.load()) {
         self->onWorkerFinished();
     } else {
@@ -347,6 +343,16 @@ void GitDialog::pollWorker(void* data) {
 void GitDialog::refreshStatus() {
     clearOutput();
     appendOutput("[git status] running...\n");
+
+    if (project_root_.empty()) {
+        current_status_.is_repo = false;
+        current_status_.error = "Project root kosong.";
+        updateStatusDisplay();
+        updateChangesBrowser();
+        appendOutput("[git status] Gagal: Project root tidak diatur.\n");
+        setButtonsEnabled(true);
+        return;
+    }
 
     startWorker(
         [this]() {
@@ -372,8 +378,6 @@ void GitDialog::refreshStatus() {
                              " change(s)\n");
             }
 
-            // Auto-fill commit message suggestion (only if input is empty
-            // or still contains a previous suggestion).
             if (commit_message_input_ && commit_message_input_->size() == 0) {
                 std::string suggestion =
                     frans::application::GitFacade::suggestCommitMessage(current_status_);
@@ -395,7 +399,6 @@ void GitDialog::doAddAll() {
 
     if (hasSuspiciousFiles()) {
         std::string warn = buildSuspiciousWarning();
-        // Use "%s" format to avoid format-security warning
         int choice = fl_choice("%s", "Batal", "Tetap Add All", nullptr, warn.c_str());
         if (choice != 1) {
             appendOutput("[git add] dibatalkan oleh pengguna (file mencurigakan).\n");
@@ -406,12 +409,16 @@ void GitDialog::doAddAll() {
     appendOutput("[git add -A] running...\n");
     startWorker(
         [this]() {
-            auto res = git_->addAll(&cancel_flag_);
-            appendOutput(res.ok ? "[git add -A] OK\n"
-                                : "[git add -A] FAILED: " + res.error + "\n");
-            if (!res.output.empty()) appendOutput(res.output);
+            // Thread-safe: hanya menulis ke variabel member
+            last_op_result_ = git_->addAll(&cancel_flag_);
         },
-        [this]() { refreshStatus(); }
+        [this]() {
+            // Thread-safe: update UI dilakukan di main thread via callback
+            appendOutput(last_op_result_.ok ? "[git add -A] OK\n"
+                                            : "[git add -A] FAILED: " + last_op_result_.error + "\n");
+            if (!last_op_result_.output.empty()) appendOutput(last_op_result_.output);
+            refreshStatus();
+        }
     );
 }
 
@@ -423,7 +430,6 @@ void GitDialog::doCommit() {
     if (!commit_message_input_) return;
 
     std::string msg = commit_message_input_->value() ? commit_message_input_->value() : "";
-    // Trim
     while (!msg.empty() && std::isspace(static_cast<unsigned char>(msg.back()))) msg.pop_back();
     while (!msg.empty() && std::isspace(static_cast<unsigned char>(msg.front()))) msg.erase(msg.begin());
 
@@ -435,17 +441,16 @@ void GitDialog::doCommit() {
     appendOutput("[git commit] running...\n");
     startWorker(
         [this, msg]() {
-            auto res = git_->commit(msg, &cancel_flag_);
-            if (res.ok) {
-                appendOutput("[git commit] OK\n");
-            } else {
-                appendOutput("[git commit] FAILED: " + res.error + "\n");
-            }
-            if (!res.output.empty()) appendOutput(res.output);
+            last_op_result_ = git_->commit(msg, &cancel_flag_);
         },
         [this]() {
+            if (last_op_result_.ok) {
+                appendOutput("[git commit] OK\n");
+            } else {
+                appendOutput("[git commit] FAILED: " + last_op_result_.error + "\n");
+            }
+            if (!last_op_result_.output.empty()) appendOutput(last_op_result_.output);
             refreshStatus();
-            // Clear commit message after successful commit
             if (commit_message_input_) commit_message_input_->value("");
         }
     );
@@ -457,7 +462,6 @@ void GitDialog::doPush() {
         return;
     }
 
-    // Build confirmation text
     std::ostringstream oss;
     oss << "Konfirmasi git push\n\n"
         << "  Branch:   " << (current_status_.branch.empty() ? "(detached)" : current_status_.branch) << "\n"
@@ -475,7 +479,6 @@ void GitDialog::doPush() {
     oss << "Lanjutkan push?";
 
     std::string confirm_text = oss.str();
-    // Use "%s" format to avoid format-security warning
     int choice = fl_choice("%s", "Batal", "Push", nullptr, confirm_text.c_str());
     if (choice != 1) {
         appendOutput("[git push] dibatalkan oleh pengguna.\n");
@@ -485,15 +488,17 @@ void GitDialog::doPush() {
     appendOutput("[git push] running...\n");
     startWorker(
         [this]() {
-            auto res = git_->push(&cancel_flag_);
-            if (res.ok) {
+            last_op_result_ = git_->push(&cancel_flag_);
+        },
+        [this]() {
+            if (last_op_result_.ok) {
                 appendOutput("[git push] OK\n");
             } else {
-                appendOutput("[git push] FAILED: " + res.error + "\n");
+                appendOutput("[git push] FAILED: " + last_op_result_.error + "\n");
             }
-            if (!res.output.empty()) appendOutput(res.output);
-        },
-        [this]() { refreshStatus(); }
+            if (!last_op_result_.output.empty()) appendOutput(last_op_result_.output);
+            refreshStatus();
+        }
     );
 }
 

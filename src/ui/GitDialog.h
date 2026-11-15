@@ -53,7 +53,7 @@ private:
     bool hasSuspiciousFiles() const;
     std::string buildSuspiciousWarning() const;
 
-    // Worker infrastructure (same pattern as PromptDialog)
+    // Worker infrastructure
     void startWorker(std::function<void()> task,
                      std::function<void()> on_done);
     void cancelWorker();
@@ -86,7 +86,10 @@ private:
     frans::config::AppConfig cfg_;
 
     std::unique_ptr<frans::application::GitFacade> git_;
-    frans::application::GitStatus current_status_;
+    
+    // State untuk komunikasi thread-safe antara worker dan main thread
+    frans::application::GitStatus   current_status_;
+    frans::application::GitOpResult last_op_result_;
 
     std::thread              worker_thread_;
     std::atomic<bool>        cancel_flag_{false};
